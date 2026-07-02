@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-onebot-adapter"
-version = "1.0.0b1"
+version = "1.0.0b2"
 description = "OneBot 11 adapter service for Hermes Agent (NapCat / go-cqhttp)."
 readme = "README.md"
 license = { text = "MIT" }
@@ -35,7 +35,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/a1ec/hermes-onebot-adapter"
+Repository = "https://github.com/DNAlec/hermes-onebot-adapter"
 
 [project.scripts]
 hermes-onebot-adapter = "onebot_adapter.__main__:main"

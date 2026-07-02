@@ -42,7 +42,8 @@ hermes-onebot-adapter --init-config   # 生成默认配置后退出
 2. **打开 WebUI** — 浏览器访问 `http://localhost:18820`，登录后进入管理界面
 3. **配置 OneBot 连接** — 在 WebUI 的"连接管理"页选择连接模式（反向 WS / 正向 WS），填写 WS 地址和 token
 4. **安装 Hermes 插件** — 在 WebUI 的"连接管理"页填写 Hermes 安装目录（默认 `~/.hermes`），点击"安装插件到 Hermes"
-5. **重启 Hermes 网关** — `hermes gateway restart`
+5. **启用插件** — `hermes plugins enable onebot-platform`
+6. **重启 Hermes 网关** — `hermes gateway restart`
 
 安装插件时，Installer 自动完成三件事：
 
@@ -52,7 +53,7 @@ hermes-onebot-adapter --init-config   # 生成默认配置后退出
 | 写入环境变量 | `ONEBOT_ADAPTER_URL` + `ONEBOT_ADAPTER_TOKEN` → `<hermes>/.env` |
 | 初始化工具集 | 写入 `platform_toolsets.onebot` → `<hermes>/config.yaml` |
 
-以上均只需**重启 Hermes 网关**即可生效，无需手动编辑任何文件。
+以上均需**启用插件并重启 Hermes 网关**后生效。
 
 也可通过 CLI 安装：
 

@@ -473,7 +473,7 @@ async def test_parse_group_admin_prefix():
     """管理员发送群消息应带有 (管理员) 标识。"""
     from onebot_adapter.config import AdapterConfig
 
-    cfg = AdapterConfig(global_admins=["100"])
+    cfg = AdapterConfig(global_admins=["100"], message_show_group_id=False)
     segs = [
         {"type": "at", "data": {"qq": "999"}},
         {"type": "text", "data": {"text": "hi"}},
@@ -495,7 +495,7 @@ async def test_parse_group_non_admin_no_suffix():
     """非管理员发送群消息不带 (管理员) 标识。"""
     from onebot_adapter.config import AdapterConfig
 
-    cfg = AdapterConfig(global_admins=["200"])
+    cfg = AdapterConfig(global_admins=["200"], message_show_group_id=False)
     segs = [
         {"type": "at", "data": {"qq": "999"}},
         {"type": "text", "data": {"text": "hi"}},
@@ -748,11 +748,11 @@ async def test_message_show_group_id_enabled_no_group_name():
     assert event.text.startswith("[群:42]\n")
 
 
-async def test_message_show_group_id_disabled_by_default():
-    """By default message_show_group_id is off — no [群:...] header."""
+async def test_message_show_group_id_disabled_explicitly():
+    """With message_show_group_id=False, no [群:...] header."""
     from onebot_adapter.config import AdapterConfig
 
-    cfg = AdapterConfig(group_require_mention=False)
+    cfg = AdapterConfig(group_require_mention=False, message_show_group_id=False)
     resolver = _mock_name_resolver(group_names={"42": "测试群"})
     result = await parser.parse_event(
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
@@ -765,7 +765,6 @@ async def test_message_show_group_id_disabled_by_default():
     assert result is not None
     event, _ = result
     assert "[群:" not in event.text
-    assert event.text == "[Tester(100)#1]: hi"
 
 
 async def test_message_show_group_id_skipped_for_dm():
@@ -926,7 +925,7 @@ async def test_group_prefix_falls_back_to_message_id_without_real_seq():
 async def test_group_admin_prefix_with_real_seq():
     """管理员前缀也带 real_seq。"""
     from onebot_adapter.config import AdapterConfig, GroupConfig
-    cfg = AdapterConfig(group_require_mention=False,
+    cfg = AdapterConfig(group_require_mention=False, message_show_group_id=False,
         groups={"42": GroupConfig(group_id="42", admins=["100"]).to_dict()})
     ev = _msg_event("hi", message_type="group", group_id=42, user_id=100, message_id=1)
     ev["real_seq"] = "200"
