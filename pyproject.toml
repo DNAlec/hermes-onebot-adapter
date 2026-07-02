@@ -35,7 +35,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/a1ec/hermes-onebot-adapter"
+Repository = "https://github.com/DNAlec/hermes-onebot-adapter"
 
 [project.scripts]
 hermes-onebot-adapter = "onebot_adapter.__main__:main"
