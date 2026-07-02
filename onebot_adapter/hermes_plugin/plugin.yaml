@@ -1,7 +1,7 @@
 name: onebot-platform
 label: OneBot (NapCat)
 kind: platform
-version: 1.0.0b1
+version: 1.0.0b2
 description: >
   OneBot 11 适配器插件，经独立 onebot_adapter 服务对接 NapCat / go-cqhttp 等
   OneBot 11 实现。插件通过 WebSocket 与适配器服务通信，不直接接触 NapCat。
