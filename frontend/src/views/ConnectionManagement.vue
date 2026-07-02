@@ -12,6 +12,7 @@ const msg = ref("");
 const msgType = ref<"success" | "error" | "warning">("success");
 const installResult = ref<any>(null);
 const showToken = ref(false);
+const showOnebotToken = ref(false);
 const hermesDirStatus = ref<HermesDirStatus | null>(null);
 const checkingDir = ref(false);
 
@@ -139,7 +140,15 @@ async function uninstall() {
 function copyToken() {
   if (cfg.value?.hermes_ws_token) {
     navigator.clipboard.writeText(cfg.value.hermes_ws_token);
-    msg.value = "Token 已复制到剪贴板";
+    msg.value = "Hermes WS Token 已复制到剪贴板";
+    msgType.value = "success";
+  }
+}
+
+function copyOnebotToken() {
+  if (cfg.value?.onebot_ws_token) {
+    navigator.clipboard.writeText(cfg.value.onebot_ws_token);
+    msg.value = "OneBot WS Token 已复制到剪贴板";
     msgType.value = "success";
   }
 }
@@ -151,6 +160,15 @@ function regenerateToken() {
   const b64 = btoa(String.fromCharCode(...arr))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   cfg.value.hermes_ws_token = b64;
+}
+
+function regenerateOnebotToken() {
+  if (!cfg.value) return;
+  const arr = new Uint8Array(24);
+  crypto.getRandomValues(arr);
+  const b64 = btoa(String.fromCharCode(...arr))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  cfg.value.onebot_ws_token = b64;
 }
 
 function getAdapterUrl() {
@@ -216,7 +234,19 @@ function copyAdapterUrl() {
           </label>
           <label>
             WS Token
-            <input v-model="cfg.onebot_ws_token" type="password" placeholder="自动生成" />
+            <div class="token-input-wrapper">
+              <input
+                :type="showOnebotToken ? 'text' : 'password'"
+                v-model="cfg.onebot_ws_token"
+                class="token-input"
+                placeholder="自动生成"
+              />
+              <button @click="showOnebotToken = !showOnebotToken" class="icon-btn" :title="showOnebotToken ? '隐藏' : '显示'">
+                {{ showOnebotToken ? '🙈' : '👁️' }}
+              </button>
+              <button @click="copyOnebotToken" class="icon-btn" title="复制">📋</button>
+              <button @click="regenerateOnebotToken" class="icon-btn" title="重新生成">🔄</button>
+            </div>
             <span class="hint">OneBot WebSocket 鉴权令牌；反向模式校验入站连接（query ?token= 或 Authorization: Bearer）；正向模式作为出站 Authorization: Bearer 头</span>
           </label>
         </div>
@@ -268,7 +298,7 @@ function copyAdapterUrl() {
         </div>
 
         <div class="subsection">
-          <h4>认证令牌</h4>
+          <h4>WS Token</h4>
           <div class="token-input-wrapper">
             <input
               :type="showToken ? 'text' : 'password'"
@@ -281,7 +311,7 @@ function copyAdapterUrl() {
             <button @click="copyToken" class="icon-btn" title="复制">📋</button>
             <button @click="regenerateToken" class="icon-btn" title="重新生成">🔄</button>
           </div>
-          <span class="hint">Hermes 插件连接时的认证令牌；修改后需保存并重新安装插件以同步到 Hermes 端</span>
+          <span class="hint">Hermes 插件连接时的 WS Token；修改后需保存并重新安装插件以同步到 Hermes 端</span>
         </div>
 
         <div class="subsection">

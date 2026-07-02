@@ -130,6 +130,8 @@ const globalAdminInput = ref("");
 const dmUserInput = ref("");
 const groupAdminInput = ref("");
 const groupUserInput = ref("");
+const triggerKeywordsInput = ref("");
+const groupKeywordsInput = ref("");
 function addTag(list: string[], value: string) {
   const v = value.trim();
   if (v && !list.includes(v)) list.push(v);
@@ -207,13 +209,13 @@ function resetHint() {
           <span>保留 @bot 段（触发后不移除，如果@bot出现在开头，会导致/命令无法被解析）</span>
         </label>
         <label class="full">
-          触发关键词（每行一个，空=不启用）
-          <textarea
-            :value="cfg.group_trigger_keywords.join('\n')"
-            @input="cfg.group_trigger_keywords = ($event.target as HTMLTextAreaElement).value.split('\n').map((s: string) => s.trim()).filter((s: string) => s.length > 0)"
-            rows="3"
-            placeholder="每行一个关键词"
-          ></textarea>
+          触发关键词（回车添加，空=不启用）
+          <div class="tag-input-container">
+            <span v-for="(kw, i) in cfg.group_trigger_keywords" :key="i" class="tag">
+              {{ kw }}<button @click="removeTag(cfg.group_trigger_keywords, i)">×</button>
+            </span>
+            <input v-model="triggerKeywordsInput" placeholder="输入关键词后回车" @keydown.enter.prevent="addTag(cfg.group_trigger_keywords, triggerKeywordsInput); triggerKeywordsInput=''" />
+          </div>
         </label>
         <label>
           <input type="checkbox" v-model="cfg.group_auto_join" />
@@ -400,13 +402,13 @@ function resetHint() {
         </label>
 
         <label v-if="editingGroup.trigger_keywords !== null">
-          关键词列表（每行一个）
-          <textarea
-            :value="editingGroup.trigger_keywords.join('\n')"
-            @input="editingGroup.trigger_keywords = ($event.target as HTMLTextAreaElement).value.split('\n').map((s: string) => s.trim()).filter((s: string) => s.length > 0)"
-            rows="3"
-            placeholder="每行一个关键词"
-          ></textarea>
+          关键词列表（回车添加）
+          <div class="tag-input-container">
+            <span v-for="(kw, i) in editingGroup.trigger_keywords" :key="i" class="tag">
+              {{ kw }}<button @click="removeTag(editingGroup.trigger_keywords, i)">×</button>
+            </span>
+            <input v-model="groupKeywordsInput" placeholder="输入关键词后回车" @keydown.enter.prevent="addTag(editingGroup.trigger_keywords, groupKeywordsInput); groupKeywordsInput=''" />
+          </div>
           <span class="hint">留空列表 = 此群禁用关键词触发</span>
         </label>
 

@@ -177,9 +177,9 @@ class AdapterConfig:
     log_file_enabled: bool = True
     log_file_dir: str = ""
     log_retention_days: int = 3
-    message_show_group_id: bool = False
+    message_show_group_id: bool = True
     seq_map_size: int = 4500
-    reaction_emoji_enabled: bool = False
+    reaction_emoji_enabled: bool = True
     reaction_emoji_id: str = "76"
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
