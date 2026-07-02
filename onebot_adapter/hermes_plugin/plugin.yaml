@@ -1,0 +1,22 @@
+name: onebot-platform
+label: OneBot (NapCat)
+kind: platform
+version: 0.1.0
+description: >
+  OneBot 11 适配器插件，经独立 onebot_adapter 服务对接 NapCat / go-cqhttp 等
+  OneBot 11 实现。插件通过 WebSocket 与适配器服务通信，不直接接触 NapCat。
+author: Alec
+requires_env:
+  - name: ONEBOT_ADAPTER_URL
+    description: "适配器服务 WebSocket 地址 (ws://host:port/hermes)"
+    prompt: "适配器服务 WS 地址"
+    password: false
+  - name: ONEBOT_ADAPTER_TOKEN
+    description: "适配器服务鉴权 token（WebUI 中显示）"
+    prompt: "适配器服务 token"
+    password: true
+optional_env:
+  - name: ONEBOT_HOME_CHANNEL
+    description: "cron / 通知投递目标 chat_id（私聊为 QQ 号，群为 group:<id>）"
+    prompt: "Home channel"
+    password: false
