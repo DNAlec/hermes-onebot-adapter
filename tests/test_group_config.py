@@ -194,10 +194,10 @@ def test_resolve_keep_mention_group_override():
     assert cfg.resolve_keep_mention("42") is True
 
 
-def test_resolve_reaction_emoji_default_disabled():
+def test_resolve_reaction_emoji_default_enabled():
     cfg = AdapterConfig()
-    assert cfg.resolve_reaction_emoji_enabled("999") is False
-    assert cfg.resolve_reaction_emoji_enabled(None) is False  # DM
+    assert cfg.resolve_reaction_emoji_enabled("999") is True
+    assert cfg.resolve_reaction_emoji_enabled(None) is True  # DM
 
 
 def test_resolve_reaction_emoji_global_enabled():

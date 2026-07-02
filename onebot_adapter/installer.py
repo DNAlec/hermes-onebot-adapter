@@ -127,7 +127,7 @@ def install(
 
         defaults = default_onebot_toolsets(install_dir)
         write_platform_toolsets(install_dir, defaults)
-        result["note"] += " 已为 OneBot 平台启用默认工具集,重启 Hermes 网关后生效。"
+        result["note"] += " 已为 OneBot 平台启用默认工具集;请运行 hermes plugins enable onebot-platform 并重启 Hermes 网关后生效。"
         logger.info("platform_toolsets.onebot initialized: %s", defaults)
     except Exception as exc:
         logger.warning("could not init platform_toolsets.onebot: %s", exc)

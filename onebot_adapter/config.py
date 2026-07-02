@@ -54,10 +54,11 @@ DEFAULT_PLATFORM_HINT = (
     "- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n"
     "- 合并转发:\n"
     "  [合并转发开始:1]\n"
-    "  [Alice(1)#123]: msg one\n"
-    "  [Bob(2)#124]: msg two\n"
+    "  [Alice]: msg one\n"
+    "  [Bob]: msg two\n"
     "  [合并转发结束:1]\n"
     "  嵌套时层级号递增;超过 4 层显示 [合并转发(已跳过:超过最大深度)]\n"
+    "  合并转发中仅含昵称,无 QQ 号和群内序号,请勿尝试获取转发中发言者的详细信息\n"
     "- 斜杠命令(/reset 等)不加发送者前缀,原样传递\n"
     "- 启用群号标识时,消息头部会有 [群:42(测试群)] 行(仅主消息,斜杠命令不加)\n\n"
     "# 消息序号与工具调用\n"
@@ -177,9 +178,9 @@ class AdapterConfig:
     log_file_enabled: bool = True
     log_file_dir: str = ""
     log_retention_days: int = 3
-    message_show_group_id: bool = False
+    message_show_group_id: bool = True
     seq_map_size: int = 4500
-    reaction_emoji_enabled: bool = False
+    reaction_emoji_enabled: bool = True
     reaction_emoji_id: str = "76"
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
