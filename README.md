@@ -8,7 +8,7 @@ OneBot 11 适配器服务 + Hermes 插件，经独立服务对接 NapCat / go-cq
 OneBot ──WS──  适配器服务  ──WS── Hermes 插件 ── Hermes Agent
 ```
 
-适配器服务承担全部 OneBot 交互；插件只与适配器服务通信，不直接接触 OneBot 。
+适配器服务承担全部 OneBot 交互；插件只与适配器服务通信，不直接接触 OneBot ；不修改 Hermes 本身的代码。
 
 ## 环境要求
 
@@ -88,7 +88,7 @@ hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
 |------|------|
 | 18800 | OneBot WS 服务端 `/onebot`（反向 WS 模式，OneBot 连接此端口；正向 WS 模式不使用） |
 | 18810 | Hermes 插件 WS 服务端 `/hermes?token=`（插件连接适配器的端口） |
-| 18820 | WebUI + REST API + 健康检查 (`/api/health`) |
+| 18820 | WebUI + REST API + 健康检查 (`/api/health`)（详见 [API 文档](docs/api.md)） |
 
 ## 环境变量
 
