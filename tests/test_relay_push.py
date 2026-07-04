@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import aiohttp.web
@@ -233,5 +233,104 @@ async def test_push_event_client_disconnects_drops_client():
             await asyncio.sleep(0.1)
         # Push after client disconnected — should not raise
         await relay.push_event(_make_event("after disconnect"), [])
+    finally:
+        await server.close()
+
+
+# ── Ring buffer replay resilience (corrupted entry handling) ────────────
+
+
+async def test_replay_ring_buffer_purges_bad_entry_unit():
+    """_replay_ring_buffer must purge an entry whose send raises, return
+    False so the caller closes the dirty WS, and leave good entries intact."""
+    relay, _, _ = _make_relay()
+    # Good entry (no media) — should survive.
+    relay._ring_buffer.append((time.monotonic(), _make_event("good"), []))
+    # Bad entry with media whose send_bytes will raise.
+    bad_media = _make_media(b"corrupt")
+    relay._ring_buffer.append((time.monotonic(), _make_event("bad", "photo"), [bad_media]))
+    assert len(relay._ring_buffer) == 2
+
+    mock_ws = MagicMock()
+    mock_ws.send_json = AsyncMock()
+    mock_ws.send_bytes = AsyncMock(side_effect=TypeError("poisoned payload"))
+
+    result = await relay._replay_ring_buffer(mock_ws)
+    assert result is False
+    # The bad entry is purged; the good one remains.
+    assert len(relay._ring_buffer) == 1
+    assert relay._ring_buffer[0][1].text == "good"
+
+
+async def test_replay_ring_buffer_all_ok_returns_true_unit():
+    """A fully-successful replay returns True and leaves the buffer intact."""
+    relay, _, _ = _make_relay()
+    relay._ring_buffer.append((time.monotonic(), _make_event("ok1"), []))
+    relay._ring_buffer.append((time.monotonic(), _make_event("ok2"), []))
+
+    mock_ws = MagicMock()
+    mock_ws.send_json = AsyncMock()
+    mock_ws.send_bytes = AsyncMock()
+
+    result = await relay._replay_ring_buffer(mock_ws)
+    assert result is True
+    assert len(relay._ring_buffer) == 2
+
+
+async def test_ring_buffer_poison_entry_closes_ws_and_breaks_loop():
+    """A corrupted ring buffer entry (unsendable bytes) must close the
+    newly-connected WS and be purged, so a reconnecting plugin is not
+    trapped in an infinite reconnect loop. Verifies the fix for the bug
+    where a bad merged-forward entry kept poisoning every reconnect."""
+    relay, _, _ = _make_relay()
+    app = aiohttp.web.Application()
+    relay.add_routes(app)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        # Inject a poison entry: MediaPayload whose data is not bytes,
+        # so aiohttp's send_bytes raises when replay tries to ship it.
+        # No client is connected, so push_event's _broadcast_event is a
+        # no-op and the poison sits dormant in the buffer.
+        poison_media = MediaPayload(
+            descriptor=MediaDescriptor(id="poison", mime="application/octet-stream", name="bad"),
+            data=object(),  # type: ignore[arg-type]
+        )
+        relay._ring_buffer.append((time.monotonic(), _make_event("poison_msg", "document"), [poison_media]))
+        # A clean event buffered after the poison — should survive the purge.
+        await relay.push_event(_make_event("good_msg"), [])
+        assert len(relay._ring_buffer) == 2
+
+        async with TestClient(server) as client:
+            # First client: replay hits the poison → WS closed, poison purged.
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                ready = await ws.receive_json(timeout=2)
+                assert ready["type"] == "ready"
+                # The media descriptor frame is sent before send_bytes
+                # raises on the non-bytes payload — drain it, then the
+                # server closes the WS.
+                media_frame = await ws.receive_json(timeout=2)
+                assert media_frame["type"] == "media"
+                assert media_frame["id"] == "poison"
+                msg = await ws.receive(timeout=2)
+                assert msg.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                )
+            # Poison purged; good event retained.
+            assert len(relay._ring_buffer) == 1
+            assert relay._ring_buffer[0][1].text == "good_msg"
+
+            # Second client: replays only the good event, WS stays open.
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                ready = await ws.receive_json(timeout=2)
+                assert ready["type"] == "ready"
+                event_msg = await ws.receive_json(timeout=2)
+                assert event_msg["type"] == "event"
+                assert event_msg["text"] == "good_msg"
+                # No more frames; WS should stay open (no close).
+                with pytest.raises(asyncio.TimeoutError):
+                    await ws.receive_json(timeout=0.5)
     finally:
         await server.close()
