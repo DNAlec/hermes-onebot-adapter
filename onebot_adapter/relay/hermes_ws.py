@@ -271,8 +271,14 @@ class HermesRelayServer:
                 self_id=self._config.self_id,
             )
         )
-        # Replay buffered events so a reconnecting plugin doesn't miss messages
-        await self._replay_ring_buffer(ws)
+        # Replay buffered events so a reconnecting plugin doesn't miss messages.
+        # If replay hits a corrupted buffer entry, the WS is already dirty —
+        # close it so the message loop exits cleanly instead of thrashing;
+        # the bad entry has been purged, so the next reconnect replays clean.
+        replay_ok = await self._replay_ring_buffer(ws)
+        if not replay_ok:
+            logger.warning("relay: closing plugin WS after ring buffer replay failure")
+            await ws.close()
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
@@ -319,28 +325,48 @@ class HermesRelayServer:
                 logger.exception("push_event failed; dropping client")
                 self._clients.pop(ws, None)
 
-    async def _replay_ring_buffer(self, ws: aiohttp.web.WebSocketResponse) -> None:
+    async def _replay_ring_buffer(self, ws: aiohttp.web.WebSocketResponse) -> bool:
         """Send buffered events to a newly-connected plugin.
 
         Skips events older than ``_RING_BUFFER_MAX_AGE`` seconds so that a
         full gateway restart (which takes longer than a brief WS blip) does
         not replay stale commands like ``/restart`` — which would otherwise
         create an infinite restart loop.
+
+        Returns ``True`` if every buffered entry was sent successfully.
+        Returns ``False`` if a send failed mid-entry: in that case the
+        offending entry is purged from the ring buffer (a corrupted payload
+        that fails once will fail on every reconnect — keeping it would
+        trap the plugin in an infinite reconnect loop) and the caller must
+        close the now-dirty WebSocket.
         """
         if not self._ring_buffer:
-            return
+            return True
         now = time.monotonic()
         cutoff = now - self._RING_BUFFER_MAX_AGE
-        try:
-            for ts, event, media_payloads in self._ring_buffer:
-                if ts < cutoff:
-                    continue
+        # Iterate over a snapshot: we may purge an entry below.
+        for entry in list(self._ring_buffer):
+            ts, event, media_payloads = entry
+            if ts < cutoff:
+                continue
+            try:
                 for mp in media_payloads:
                     await ws.send_json(media_message(mp.descriptor))
                     await ws.send_bytes(mp.data)
                 await ws.send_json(event_message(event))
-        except Exception:
-            logger.warning("ring buffer replay failed for new client")
+            except Exception:
+                logger.warning(
+                    "ring buffer replay failed; purging corrupted entry "
+                    "(text_preview=%r, media=%d)",
+                    (event.text or "")[:120], len(media_payloads),
+                    exc_info=True,
+                )
+                try:
+                    self._ring_buffer.remove(entry)
+                except ValueError:
+                    pass  # already gone (concurrent replay on same ws)
+                return False
+        return True
 
     # ── Outbound dispatch (plugin -> adapter) ──────────────────────────
 
