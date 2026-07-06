@@ -1,4 +1,4 @@
-"""Tests for the Hermes relay WS send dispatch and binary media buffering."""
+"""Tests for the Hermes relay WS send dispatch."""
 from __future__ import annotations
 
 import asyncio
@@ -9,12 +9,10 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from onebot_adapter.config import AdapterConfig
-from onebot_adapter.relay.hermes_ws import HermesRelayServer, _Connection
+from onebot_adapter.relay.hermes_ws import HermesRelayServer
 from onebot_adapter.relay.protocol import (
-    MediaDescriptor,
     api_call_message,
     result_message,
-    send_media_message,
     send_message,
 )
 
@@ -73,6 +71,7 @@ async def test_send_text_group_with_reply():
 
 
 async def test_send_image_via_url():
+    """send_image with image_url forwards the URL directly to OneBot."""
     app, mock_api, _ = _make_relay_app()
     server = TestServer(app)
     await server.start_server()
@@ -87,12 +86,14 @@ async def test_send_image_via_url():
                 assert result["success"] is True
             segs = mock_api.send_group_msg.await_args.args[1]
             assert segs[0]["type"] == "image"
+            assert segs[0]["data"]["file"] == "http://x/1.jpg"
             assert segs[1]["type"] == "text"
     finally:
         await server.close()
 
 
-async def test_send_image_via_binary_media():
+async def test_send_image_via_local_path():
+    """send_image with image_url as a local path — forwarded to OneBot as-is."""
     app, mock_api, _ = _make_relay_app()
     server = TestServer(app)
     await server.start_server()
@@ -101,20 +102,19 @@ async def test_send_image_via_binary_media():
             async with client.ws_connect("/hermes?token=testtoken") as ws:
                 await ws.receive_json(timeout=2)
                 await ws.send_json(
-                    send_media_message(MediaDescriptor(id="mid1", mime="image/jpeg", name="i.jpg"))
+                    send_message("send_image", "r3b", "group:42", image_url="/tmp/test.jpg")
                 )
-                await ws.send_bytes(b"\x89PNGimagedata")
-                await ws.send_json(send_message("send_image", "r4", "group:42", media_id="mid1"))
-                result = await ws.receive_json(timeout=5)
+                result = await ws.receive_json(timeout=2)
                 assert result["success"] is True
             segs = mock_api.send_group_msg.await_args.args[1]
             assert segs[0]["type"] == "image"
-            assert segs[0]["data"]["file"].startswith("file://")
+            assert segs[0]["data"]["file"] == "/tmp/test.jpg"
     finally:
         await server.close()
 
 
-async def test_send_document_via_media_id():
+async def test_send_document_via_file_path():
+    """send_document with file_path — forwarded to OneBot upload API."""
     app, mock_api, _ = _make_relay_app()
     server = TestServer(app)
     await server.start_server()
@@ -122,19 +122,18 @@ async def test_send_document_via_media_id():
         async with TestClient(server) as client:
             async with client.ws_connect("/hermes?token=testtoken") as ws:
                 await ws.receive_json(timeout=2)
-
                 await ws.send_json(
-                    send_media_message(MediaDescriptor(id="doc1", mime="application/pdf", name="report.pdf"))
-                )
-                await ws.send_bytes(b"PDFCONTENT")
-                await ws.send_json(
-                    send_message("send_document", "r5", "group:42", media_id="doc1", filename="report.pdf")
+                    send_message(
+                        "send_document", "r5", "group:42",
+                        file_path="/tmp/report.pdf", filename="report.pdf",
+                    )
                 )
                 result = await ws.receive_json(timeout=5)
                 assert result["success"] is True
             mock_api.upload_group_file.assert_awaited_once()
             args = mock_api.upload_group_file.await_args.args
             assert args[0] == 42
+            assert args[1] == "/tmp/report.pdf"
             assert args[2] == "report.pdf"
     finally:
         await server.close()
@@ -183,19 +182,6 @@ async def test_unauthorized_rejected():
                 await client.ws_connect("/hermes?token=wrong")
     finally:
         await server.close()
-
-
-async def test_connection_media_buffer():
-    ws = MagicMock()
-    conn = _Connection(ws)
-
-    desc = MediaDescriptor(id="m1", mime="image/png")
-    conn.announce_media(desc)
-    assert list(conn._pending) == ["m1"]
-    conn.receive_binary(b"data")
-    assert len(conn._pending) == 0
-    assert conn.take_media("m1") == b"data"
-    assert conn.take_media("m1") is None
 
 
 # ── {@QQ号} marker parsing in send_text ─────────────────────────────────
