@@ -40,7 +40,7 @@ try:
         MessageType,
         SendResult,
     )
-    from gateway.session import SessionSource
+    from gateway.session import SessionSource, build_session_key
     _BASE_AVAILABLE = True
 except ImportError:
     _BASE_AVAILABLE = False
@@ -50,6 +50,7 @@ except ImportError:
     SendResult = None  # type: ignore[assignment]
     Platform = None  # type: ignore[assignment]
     SessionSource = None  # type: ignore[assignment]
+    build_session_key = None  # type: ignore[assignment]
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
@@ -355,7 +356,79 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             "OneBot plugin → Hermes: chat_id=%s",
             message_event.source.chat_id,
         )
+        # 群聊排队:shared 群聊(group:<gid> 无 :user: 且 Hermes group_sessions_per_user=False)
+        # 才注册 post_delivery callback,处理完后发 idle 帧给适配器,适配器 dequeue 下一条。
+        # per_user 群聊 / 私聊 / Hermes per_user 隔离时不注册(无需排队)。
+        self._maybe_register_idle_callback(data, message_event)
         await self.handle_message(message_event)
+
+    def _maybe_register_idle_callback(
+        self, data: dict[str, Any], message_event: Any
+    ) -> None:
+        """Register a post_delivery callback that fires an ``idle`` frame to
+        the adapter service after a shared-group turn finishes.
+
+        Conditions (all must hold):
+        - chat_id is ``group:<gid>`` form with NO ``:user:`` suffix (shared
+          group session; per_user group chats already isolate per-user in
+          Hermes and don't need queueing).
+        - Hermes ``group_sessions_per_user`` is False — read from
+          ``self.config.extra`` exactly like ``BasePlatformAdapter.handle_message``
+          does at base.py:4606, so the plugin's notion of "shared" matches
+          Hermes' actual session-key construction.  When True, Hermes gives
+          each participant their own session and queueing is pointless.
+        - The host exposes ``register_post_delivery_callback`` (older Hermes
+          builds don't — we silently skip and the adapter's busy-timeout
+          watchdog handles any stuck slot).
+        """
+        if not _BASE_AVAILABLE or build_session_key is None or SessionSource is None:
+            return
+        chat_id = data.get("chat_id", "")
+        if not chat_id.startswith("group:") or ":user:" in chat_id[len("group:"):]:
+            return  # DM or per_user group — no queueing.
+        try:
+            group_sessions_per_user = self.config.extra.get("group_sessions_per_user", True)
+        except Exception:
+            group_sessions_per_user = True
+        if group_sessions_per_user:
+            return  # Hermes isolates per-user; queueing pointless.
+        if not hasattr(self, "register_post_delivery_callback"):
+            return  # host too old — skip; adapter watchdog covers stuck slots.
+        # Compute the same session_key base.py:handle_message will compute so
+        # the callback registered here is the one base.py pops after the turn.
+        try:
+            session_key = build_session_key(
+                message_event.source,
+                group_sessions_per_user=group_sessions_per_user,
+                thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            )
+        except Exception:
+            logger.debug("OneBot: build_session_key failed, skipping idle callback")
+            return
+        if not session_key:
+            return
+        # generation ties the callback to the current gateway run so stale
+        # runs cannot fire (and clear) a fresher run's idle slot.
+        generation = None
+        active = getattr(self, "_active_sessions", {}).get(session_key)
+        if active is not None:
+            generation = getattr(active, "_hermes_run_generation", None)
+        gid = chat_id[len("group:"):].split(":", 1)[0]
+        ws = self._ws
+        if ws is None or ws.closed:
+            return
+
+        async def _fire_idle() -> None:
+            try:
+                await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
+                logger.debug("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
+            except Exception:
+                logger.debug("OneBot: idle frame send failed (ws closed?)", exc_info=True)
+
+        try:
+            self.register_post_delivery_callback(session_key, _fire_idle, generation=generation)
+        except Exception:
+            logger.debug("OneBot: register_post_delivery_callback failed", exc_info=True)
 
     # ── Slash-command registry push ─────────────────────────────────────
 

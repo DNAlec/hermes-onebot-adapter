@@ -96,6 +96,7 @@ def _parse_at_markers(text: str) -> list[dict]:
 class HermesRelayServer:
     _RING_BUFFER_SIZE = 50
     _RING_BUFFER_MAX_AGE = 30.0  # seconds; skip older events on replay
+    _WATCHDOG_INTERVAL = 30.0    # seconds between busy-timeout sweeps
 
     def __init__(
         self,
@@ -133,6 +134,15 @@ class HermesRelayServer:
         # (plugin reissues the same payload with a fresh req_id when the
         # adapter's result frame times out).  Lazy TTL eviction on lookup.
         self._send_cache: dict[tuple[str, str, str, str], tuple[float, str]] = {}
+        # ── 群聊排队(shared 会话模式:同群不同人串行,同人放行)─────────
+        # busy_groups: group_id(str) -> (busy_user_id, busy_since_monotonic)
+        # queues:      group_id(str) -> deque[NormalizedEvent]
+        # 只有 chat_id 形如 ``group:<gid>``(无 ``:user:`` 后缀)的 shared
+        # 群聊才走排队;per_user(``group:<gid>:user:<uid>``)和私聊直接放行。
+        # /命令(text 以 "/" 开头)绕过排队直接放行(与 ring buffer 同思路)。
+        self._busy_groups: dict[str, tuple[str, float]] = {}
+        self._queues: dict[str, deque[NormalizedEvent]] = {}
+        self._watchdog_task: asyncio.Task[None] | None = None
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the server (route stays bound)."""
@@ -140,6 +150,12 @@ class HermesRelayServer:
         # shortened TTL could otherwise leave stale entries that no longer
         # match the new policy.
         self._send_cache.clear()
+        # Trim any per-chat queues that exceed a newly-lowered cap.
+        new_cap = config.event_queue_max_per_chat
+        for gid, q in list(self._queues.items()):
+            while len(q) > new_cap:
+                q.popleft()
+                logger.warning("relay queue trimmed (config hot-reload): gid=%s", gid)
         self._config = config
 
     @property
@@ -195,6 +211,16 @@ class HermesRelayServer:
         if self._text_tasks:
             await asyncio.gather(*self._text_tasks, return_exceptions=True)
         self._text_tasks.clear()
+        # Stop the queue watchdog and clear all queue state.
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._watchdog_task = None
+        self._busy_groups.clear()
+        self._queues.clear()
 
     async def broadcast_commands_refresh(self) -> None:
         """Send a ``commands_refresh`` frame to every connected plugin client,
@@ -258,6 +284,18 @@ class HermesRelayServer:
             self._clients.discard(ws)
             if self._on_disconnect:
                 self._on_disconnect()
+            # When the last plugin client disconnects, clear all queue state:
+            # no one remains to fire idle frames, so busy slots would otherwise
+            # hang until the watchdog times them out.  Clearing immediately
+            # lets a reconnecting plugin start fresh.
+            if not self._clients:
+                if self._busy_groups:
+                    logger.info(
+                        "relay: last plugin disconnected, clearing %d busy group(s)",
+                        len(self._busy_groups),
+                    )
+                self._busy_groups.clear()
+                self._queues.clear()
             logger.info("Hermes plugin WS disconnected")
         return ws
 
@@ -274,7 +312,149 @@ class HermesRelayServer:
         # plugin, otherwise they create an infinite restart loop.
         if not event.text.startswith("/"):
             self._ring_buffer.append((time.monotonic(), event))
-        await self._broadcast_event(event)
+        await self._enqueue_or_broadcast(event)
+
+    async def _enqueue_or_broadcast(self, event: NormalizedEvent) -> None:
+        """Apply the per-chat queue policy then broadcast.
+
+        - private DMs and per_user group chats (``group:<gid>:user:<uid>``):
+          always broadcast immediately — each user has an independent Hermes
+          session, no cross-user interruption possible.
+        - shared group chats (``group:<gid>``, no ``:user:`` suffix):
+          serialize per group.  If the group is busy and the new message is
+          from a *different* user, queue it; if it's from the *same* user as
+          the in-flight turn, broadcast immediately (lets the user补充/打断
+          the current task).  ``/``-prefixed messages always bypass the
+          queue (slash commands must reach the gateway without delay).
+        """
+        gid = self._shared_group_id(event)
+        if gid is None:
+            # DM or per_user group — no queueing.
+            await self._broadcast_event(event)
+            return
+        # Slash commands bypass the queue regardless of busy state.
+        if event.text.startswith("/"):
+            await self._broadcast_event(event)
+            return
+        busy = self._busy_groups.get(gid)
+        if busy is None:
+            # Idle — claim the group and broadcast immediately.
+            self._busy_groups[gid] = (event.user_id, time.monotonic())
+            self._ensure_watchdog()
+            await self._broadcast_event(event)
+            return
+        busy_user_id, _since = busy
+        if event.user_id == busy_user_id:
+            # Same user as the in-flight turn — let it through.
+            await self._broadcast_event(event)
+            return
+        # Different user while busy — enqueue.
+        q = self._queues.setdefault(gid, deque())
+        cap = self._config.event_queue_max_per_chat
+        if len(q) >= cap:
+            dropped = q.popleft()
+            logger.warning(
+                "relay queue full (gid=%s cap=%d), dropping oldest text_preview=%r",
+                gid, cap, (dropped.text or "")[:120],
+            )
+        q.append(event)
+        logger.info(
+            "relay enqueue: gid=%s queued=%d busy_user=%s new_user=%s text_preview=%r",
+            gid, len(q), busy_user_id, event.user_id,
+            (event.text or "")[:120],
+        )
+
+    @staticmethod
+    def _shared_group_id(event: NormalizedEvent) -> str | None:
+        """Return the bare numeric group id when *event* belongs to a shared
+        group session (``chat_id`` == ``group:<gid>`` with no ``:user:``
+        suffix).  Returns ``None`` for DMs and per_user group sessions, which
+        are never queued.
+        """
+        cid = event.chat_id
+        if not cid.startswith("group:"):
+            return None
+        rest = cid[len("group:"):]
+        if ":user:" in rest:
+            return None
+        gid = rest.split(":", 1)[0]
+        return gid or None
+
+    def _ensure_watchdog(self) -> None:
+        """Start the busy-timeout watchdog if it isn't already running."""
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    async def _watchdog_loop(self) -> None:
+        """Periodically reap busy slots whose idle signal never arrived.
+
+        Guards against plugin crashes / lost idle frames that would otherwise
+        leave a group permanently stuck in busy state.  When a busy slot
+        exceeds ``event_queue_idle_timeout`` seconds, it is force-cleared and
+        the next queued message (if any) is dispatched.
+        """
+        while True:
+            await asyncio.sleep(self._WATCHDOG_INTERVAL)
+            now = time.monotonic()
+            timeout = self._config.event_queue_idle_timeout
+            for gid in list(self._busy_groups.keys()):
+                busy_user, since = self._busy_groups.get(gid, ("", now))
+                if now - since < timeout:
+                    continue
+                logger.warning(
+                    "relay busy watchdog: gid=%s busy_user=%s timeout=%.0fs — force-clearing",
+                    gid, busy_user, now - since,
+                )
+                self._dequeue_and_dispatch(gid)
+
+    def _dequeue_and_dispatch(self, gid: str) -> None:
+        """Clear the busy slot for *gid* and, if a queued message exists,
+        mark it busy with the queued message's user and broadcast it.
+
+        Synchronous by design — called from idle handler, watchdog, and
+        plugin-disconnect cleanup.  Broadcast is scheduled as a task so the
+        caller doesn't have to await it.
+        """
+        self._busy_groups.pop(gid, None)
+        q = self._queues.get(gid)
+        if not q:
+            if q is not None:
+                self._queues.pop(gid, None)
+            return
+        nxt = q.popleft()
+        if not q:
+            self._queues.pop(gid, None)
+        self._busy_groups[gid] = (nxt.user_id, time.monotonic())
+        self._ensure_watchdog()
+        asyncio.create_task(self._broadcast_event(nxt))
+        logger.info(
+            "relay dequeue: gid=%s remaining=%d new_busy_user=%s text_preview=%r",
+            gid, len(self._queues.get(gid, ())), nxt.user_id,
+            (nxt.text or "")[:120],
+        )
+
+    async def _handle_idle(self, data: dict[str, Any]) -> None:
+        """Handle an ``idle`` frame from the Hermes plugin.
+
+        The plugin fires this via its ``register_post_delivery_callback``
+        hook after a shared-group turn finishes.  We clear the busy slot for
+        the group and dispatch the next queued message (if any).
+        """
+        gid = str(data.get("group_id", ""))
+        if not gid:
+            # Fall back to parsing chat_id if group_id absent (defensive).
+            cid = str(data.get("chat_id", ""))
+            try:
+                _, num_id = parse_chat_id(cid)
+                gid = str(num_id)
+            except (ValueError, TypeError):
+                logger.warning("relay idle frame without group_id, ignoring: %s", data)
+                return
+        if gid not in self._busy_groups:
+            logger.debug("relay idle for non-busy gid=%s (already cleared)", gid)
+            return
+        logger.debug("relay idle: gid=%s — dispatching next queued", gid)
+        self._dequeue_and_dispatch(gid)
 
     async def _broadcast_event(self, event: NormalizedEvent) -> None:
         logger.debug("relay broadcast: sending to %d client(s)", len(self._clients))
@@ -295,13 +475,24 @@ class HermesRelayServer:
         not replay stale commands like ``/restart`` — which would otherwise
         create an infinite restart loop.
 
-        Returns ``True`` if every buffered entry was sent successfully.
-        Returns ``False`` if a send failed mid-entry: in that case the
-        offending entry is purged from the ring buffer and the caller must
+        The replay routes each event through ``_enqueue_or_broadcast`` so that
+        shared-group messages serialize: only the first broadcasts, the rest
+        enqueue behind a fresh busy slot.  Any pre-existing queue/busy state
+        from a prior session is cleared first so the replay rebuilds state
+        from scratch — queued events from the dropped session are discarded
+        because they're already in the ring buffer and will be re-evaluated.
+
+        Returns ``True`` if every buffered entry was processed without a send
+        failure.  Returns ``False`` if a send failed mid-entry: in that case
+        the offending entry is purged from the ring buffer and the caller must
         close the now-dirty WebSocket.
         """
         if not self._ring_buffer:
             return True
+        # Clear any leftover queue state from the previous (now-dead) session
+        # so the replay rebuilds busy/queue state cleanly from the buffer.
+        self._busy_groups.clear()
+        self._queues.clear()
         now = time.monotonic()
         cutoff = now - self._RING_BUFFER_MAX_AGE
         # Iterate over a snapshot: we may purge an entry below.
@@ -309,8 +500,15 @@ class HermesRelayServer:
             ts, event = entry
             if ts < cutoff:
                 continue
+            # Route through the queue policy so a reconnecting plugin doesn't
+            # receive a burst of shared-group messages all at once — only the
+            # first one broadcasts, the rest enqueue behind the busy slot.
+            # We detect send failures by checking the client set state before
+            # vs after: if the ws was dropped during broadcast, the entry is
+            # treated as failed and purged.
+            ws_before = ws in self._clients
             try:
-                await ws.send_json(event_message(event))
+                await self._enqueue_or_broadcast(event)
             except Exception:
                 logger.warning(
                     "ring buffer replay failed; purging corrupted entry "
@@ -322,6 +520,19 @@ class HermesRelayServer:
                     self._ring_buffer.remove(entry)
                 except ValueError:
                     pass  # already gone (concurrent replay on same ws)
+                return False
+            # If the ws was dropped during the broadcast (send failure inside
+            # _broadcast_event drops the client), treat as failed replay.
+            if ws_before and ws not in self._clients:
+                logger.warning(
+                    "ring buffer replay ws dropped mid-send; purging entry "
+                    "(text_preview=%r)",
+                    (event.text or "")[:120],
+                )
+                try:
+                    self._ring_buffer.remove(entry)
+                except ValueError:
+                    pass
                 return False
         return True
 
@@ -346,6 +557,9 @@ class HermesRelayServer:
             return
         if mtype == "commands_snapshot":
             self._store_commands(data.get("commands", []) or [])
+            return
+        if mtype == "idle":
+            await self._handle_idle(data)
             return
         await ws.send_json(error_message("unknown_type", f"unknown type {mtype!r}"))
 

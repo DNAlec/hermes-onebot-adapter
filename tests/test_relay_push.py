@@ -157,13 +157,21 @@ async def test_replay_ring_buffer_all_ok_returns_true_unit():
 
 
 async def test_replay_ring_buffer_purges_bad_entry():
-    """_replay_ring_buffer purges an entry whose send raises and returns False."""
+    """_replay_ring_buffer purges an entry whose broadcast raises and returns False.
+
+    The replay now routes events through ``_enqueue_or_broadcast`` →
+    ``_broadcast_event`` (broadcast to all clients in ``_clients``), so the
+    failing client must be a member of ``_clients`` and its ``send_json``
+    must raise.  When the broadcast drops the client, the replay detects the
+    ws was removed from ``_clients`` and treats the entry as failed.
+    """
     relay, _, _ = _make_relay()
     relay._ring_buffer.append((time.monotonic(), _make_event("good")))
     relay._ring_buffer.append((time.monotonic(), _make_event("bad")))
     assert len(relay._ring_buffer) == 2
 
     mock_ws = MagicMock()
+    mock_ws.closed = False
     call_count = [0]
 
     async def failing_send_json(frame):
@@ -172,8 +180,13 @@ async def test_replay_ring_buffer_purges_bad_entry():
             raise TypeError("poisoned")
 
     mock_ws.send_json = failing_send_json
+    # Register the mock client so _broadcast_event actually sends to it.
+    relay._clients.add(mock_ws)
 
     result = await relay._replay_ring_buffer(mock_ws)
     assert result is False
+    # The bad entry was purged; the good one remains.
     assert len(relay._ring_buffer) == 1
     assert relay._ring_buffer[0][1].text == "good"
+    # The failing client was dropped from _clients by _broadcast_event.
+    assert mock_ws not in relay._clients

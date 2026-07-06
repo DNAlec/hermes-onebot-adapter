@@ -177,6 +177,10 @@ class AdapterConfig:
     send_dedup_enabled: bool = True
     send_dedup_ttl_seconds: float = 10.0
 
+    # ── 群聊消息排队(shared 会话模式:同群不同人串行,同人放行)──
+    event_queue_max_per_chat: int = 50          # 单群排队上限,超限丢弃最旧
+    event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
+
     # ── /指令过滤 ──
     command_filter_enabled: bool = False                # 总开关：是否对 /指令 做权限过滤
     command_filter_unknown: bool = False                # 未知指令(不在 hermes 列表)是否过滤，默认放行
@@ -203,6 +207,10 @@ class AdapterConfig:
             errors.append("seq_map_size must be positive")
         if self.send_dedup_ttl_seconds <= 0:
             errors.append("send_dedup_ttl_seconds must be positive")
+        if self.event_queue_max_per_chat < 1:
+            errors.append("event_queue_max_per_chat must be at least 1")
+        if self.event_queue_idle_timeout <= 0:
+            errors.append("event_queue_idle_timeout must be positive")
         if self.webui_token_lifetime_hours < 1:
             errors.append("webui_token_lifetime_hours must be at least 1")
         if not self.reaction_emoji_id:
@@ -461,6 +469,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
         "reaction_emoji_enabled": "消息送达 Hermes 后在原消息贴表情回应;群配置可单独覆盖",
         "reaction_emoji_id": "贴表情回应使用的表情ID(默认 76=👍),QQ 表情编号",
+        "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限丢弃最旧",
+        "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():
