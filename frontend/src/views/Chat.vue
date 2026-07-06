@@ -40,10 +40,6 @@ async function saveGlobal() {
       group_keep_mention: c.group_keep_mention,
       group_auto_join: c.group_auto_join,
       global_admins: c.global_admins,
-      media_max_mb: c.media_max_mb,
-      media_max_count: c.media_max_count,
-      media_limit_reject_enabled: c.media_limit_reject_enabled,
-      media_limit_reject_message: c.media_limit_reject_message,
       dm_user_filter_mode: c.dm_user_filter_mode,
       dm_user_list: c.dm_user_list,
       message_show_group_id: c.message_show_group_id,
@@ -80,7 +76,7 @@ function addGroup() {
     mention_first_only: null, trigger_keywords: null, keyword_first_only: null, keep_mention: null,
     session_mode: "default", custom_prompt: "", admins: [],
     group_user_filter_mode: "blacklist", group_user_list: [],
-    welcome_enabled: false, welcome_message: "", media_max_mb: null, media_max_count: null, media_limit_reject_enabled: null, auto_join: false,
+    welcome_enabled: false, welcome_message: "", auto_join: false,
     message_show_group_id: null,
     reaction_emoji_enabled: null,
     command_filter_enabled: null, command_filter_unknown: null, command_permissions: null,
@@ -220,32 +216,6 @@ function resetHint() {
         <label>
           <input type="checkbox" v-model="cfg.group_auto_join" />
           <span>自动接受加群请求</span>
-        </label>
-        <label>
-          媒体大小限制 (MB)
-          <input type="number" v-model.number="cfg.media_max_mb" min="1" max="100" />
-        </label>
-        <label>
-          媒体数量上限
-          <input type="number" v-model.number="cfg.media_max_count" min="1" max="100" />
-        </label>
-        <label class="full">
-          <input type="checkbox" v-model="cfg.media_limit_reject_enabled" />
-          <span>媒体超出限制时回发提示（数量/大小超限或下载失败时,回复一条融合提示给用户）</span>
-        </label>
-        <label class="full">
-          回发提示文案模板
-          <textarea
-            v-model="cfg.media_limit_reject_message"
-            rows="3"
-            placeholder="输入提示文案模板"
-          ></textarea>
-          <span class="hint">
-            可用变量：<code>{skipped_count}</code> — 被跳过的媒体总数 ·
-            <code>{max_count}</code> — 数量上限 ·
-            <code>{max_mb}</code> — 单文件大小上限(MB) ·
-            <code>{details}</code> — 自动渲染的多行明细（每行 [图N]: 原因）
-          </span>
         </label>
       </div>
 
@@ -439,25 +409,6 @@ function resetHint() {
             <option value="default">跟随全局</option>
             <option value="shared">共享会话</option>
             <option value="per_user">独立会话</option>
-          </select>
-        </label>
-
-        <label>
-          媒体限制 (MB，空=跟随全局)
-          <input type="number" v-model.number="editingGroup.media_max_mb" min="1" max="100" placeholder="留空跟随全局" />
-        </label>
-
-        <label>
-          媒体数量上限（空=跟随全局）
-          <input type="number" v-model.number="editingGroup.media_max_count" min="1" max="100" placeholder="留空跟随全局" />
-        </label>
-
-        <label>
-          超出媒体限制时回发提示
-          <select v-model="editingGroup.media_limit_reject_enabled">
-            <option :value="null">跟随全局</option>
-            <option :value="true">启用</option>
-            <option :value="false">禁用</option>
           </select>
         </label>
 

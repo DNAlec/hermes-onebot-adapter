@@ -1,31 +1,29 @@
 """OneBot 11 event parser.
 
-Reduces raw OneBot 11 event dicts into :class:`NormalizedEvent` + a list of
-:class:`MediaPayload`. Handles:
+Reduces raw OneBot 11 event dicts into a :class:`NormalizedEvent`. Handles:
 
   * group @bot mention filtering
   * merged-forward (合并转发) recursive expansion via ``get_forward_msg``
     (top level) plus inline ``forward.data.content`` (NapCat nested forwards),
     with level-numbered begin/end tags
   * reply context via ``get_msg`` (text / image / voice / video / file / forward)
-  * multi-media download (all images/videos/files in a message, not just one)
-    with global count limit and per-file size limit
-  * placeholder insertion at media positions in text, preserving layout
-  * skipped-media placeholders with detailed reasons (size/count/failure)
+  * media URL passthrough — all media (images/videos/voice/files) are rendered
+    as URL placeholders in the text (e.g. ``[图1](https://...)``) so the LLM
+    can fetch them on demand via code execution or vision tools. No media is
+    downloaded by the adapter; no binary WS frames are produced.
 """
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot import segments as seg
-from onebot_adapter.onebot.media import make_media_payload
-from onebot_adapter.relay.protocol import FilteredEvent, MediaPayload, NormalizedEvent
+from onebot_adapter.relay.protocol import FilteredEvent, NormalizedEvent
 
 if TYPE_CHECKING:
     from onebot_adapter.onebot.name_resolver import NameResolver
@@ -33,8 +31,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_FORWARD_DEPTH = 4
-
-_MEDIA_CLASS_MAP = {"image": "image", "video": "video", "record": "audio", "file": "file"}
 
 _AT_PATTERN = re.compile(r"@(\d{5,11})")
 
@@ -61,36 +57,28 @@ def _format_sender_prefix(
 
 
 @dataclass
-class MediaDownloadContext:
-    """Shared state across a single ``parse_event`` call.
+class _MediaCounter:
+    """Tracks the global media index across a single ``parse_event`` call.
 
-    Tracks the global media index (so placeholder numbers align with
-    ``media_ids`` ordering) and enforces the total download count limit
-    across main message, forward expansion, and reply context.
-
-    ``skipped`` collects per-marker skip records (count/size/download-failure)
-    so the adapter service can send a single fused reject reply to the user;
-    forward-level skips (depth/fetch-failure) do NOT populate this list.
+    The counter ensures placeholder numbers (``[图1]``, ``[视频2]``…) align
+    across forward expansion, reply context, and the main message, even
+    though no media is downloaded — the numbers are purely for the LLM's
+    reference so it can correlate a placeholder with its URL.
     """
-    counter: int = 0          # 0-based; displayed placeholder number = counter + 1
-    downloaded: int = 0
-    max_count: int = 10
-    max_bytes: int = 5 * 1024 * 1024
-    skipped: list[dict] = field(default_factory=list)
+
+    counter: int = 0  # 0-based; displayed placeholder number = counter + 1
 
 
 # ── Placeholder rendering ────────────────────────────────────────────────
 
 
-def _render_placeholder(
-    marker: dict, status: str, reason: str = "", detail: str = "",
-) -> str:
-    """Render a final placeholder string from a media marker and status.
+def _render_url_placeholder(marker: dict) -> str:
+    """Render a media marker as a URL placeholder string.
 
-    *status* is one of:
-      ``"ok"``            — download succeeded
-      ``"skipped"``      — download skipped (reason/detail explain why)
-      ``"converted_raw"`` — voice conversion failed but raw bytes retained
+    Format: ``[图1](https://...)`` / ``[视频2](https://...)`` /
+    ``[语音3](https://...)`` / ``[文件4:name.ext](https://...)``.
+    When no URL is available (e.g. a file segment with only ``file_id``),
+    the parenthesised part is ``无URL``.
     """
     kind = marker["kind"]
     idx = marker["index"] + 1  # 1-based display number
@@ -106,78 +94,11 @@ def _render_placeholder(
     else:
         label = f"[媒体{idx}]"
 
-    if status == "skipped":
-        suffix = f"(已跳过:{reason}"
-        if detail:
-            suffix += f":{detail}"
-        suffix += ")"
-        label += suffix
-    elif status == "converted_raw":
-        label += "(语音转换失败,保留原始格式)"
-    return label
-
-
-async def _download_marker(
-    marker: dict,
-    session: aiohttp.ClientSession | None,
-    dl_ctx: MediaDownloadContext,
-) -> tuple[str, str, str, MediaPayload | None]:
-    """Download a single media marker.
-
-    Returns ``(status, reason, detail, media_payload)`` where *status* is
-    ``"ok"``, ``"skipped"``, or ``"converted_raw"``.
-    """
-    kind = marker["kind"]
-
-    # Build a skip record (shared shape for all skip reasons). ``idx`` is the
-    # 1-based display number so the reject reply matches the [图N] placeholder.
-    def _skip_record(reason: str, detail: str = "") -> dict:
-        return {
-            "kind": kind,
-            "idx": marker["index"] + 1,
-            "name": marker.get("file_info", {}).get("name", "") if kind == "file" else "",
-            "reason": reason,
-            "detail": detail,
-        }
-
-    # Check count limit first
-    if dl_ctx.downloaded >= dl_ctx.max_count:
-        rec = _skip_record(
-            "超出数量限制",
-            f"已下载{dl_ctx.downloaded}个达到上限{dl_ctx.max_count}",
-        )
-        dl_ctx.skipped.append(rec)
-        return ("skipped", rec["reason"], rec["detail"], None)
-
     if kind == "file":
-        fi = marker["file_info"]
-        url = fi.get("url", "")
-        name = fi.get("name", "")
+        url = marker.get("file_info", {}).get("url", "")
     else:
         url = marker.get("url", "")
-        name = ""
-
-    if not url:
-        rec = _skip_record("下载失败", "无URL")
-        dl_ctx.skipped.append(rec)
-        return ("skipped", rec["reason"], rec["detail"], None)
-
-    media_class = _MEDIA_CLASS_MAP.get(kind, "file")
-    mp, reason = await make_media_payload(
-        session, url,
-        media_class=media_class, name=name, max_bytes=dl_ctx.max_bytes,
-    )
-    if mp is not None:
-        dl_ctx.downloaded += 1
-        if reason:
-            # Conversion note (voice) — raw bytes retained
-            return ("converted_raw", reason, "", mp)
-        return ("ok", "", "", mp)
-
-    # Download failed or size exceeded — reason from make_media_payload
-    rec = _skip_record(reason or "下载失败")
-    dl_ctx.skipped.append(rec)
-    return ("skipped", rec["reason"], rec["detail"], None)
+    return f"{label}({url or '无URL'})"
 
 
 # ── @ mention name resolution ─────────────────────────────────────────────
@@ -312,11 +233,9 @@ async def parse_event(
     *,
     self_id: str,
     group_require_mention: bool,
-    media_max_bytes: int,
     api: Any = None,
     session: aiohttp.ClientSession | None = None,
     config: AdapterConfig | None = None,
-    media_max_count: int = 10,
     name_resolver: NameResolver | None = None,
     mention_first_only: bool = False,
     trigger_keywords: list[str] | None = None,
@@ -324,26 +243,31 @@ async def parse_event(
     keep_mention: bool = False,
     is_known_command_fn: Any = None,
     canonical_command_name_fn: Any = None,
-) -> tuple[NormalizedEvent, list[MediaPayload]] | FilteredEvent | None:
+) -> NormalizedEvent | FilteredEvent | None:
     """Parse a OneBot 11 message event.
 
     Returns:
-        * ``(NormalizedEvent, [MediaPayload, ...])`` for normal messages.
+        * :class:`NormalizedEvent` for normal messages.
         * :class:`FilteredEvent` when the message is a /command that was
           denied by the command filter (the caller should send the reject
           message and skip forwarding to Hermes).
         * ``None`` for non-message events, filtered messages, or empty
-          messages (no text and no media).
+          messages (no text).
 
-    When *config* is provided, it overrides *group_require_mention*,
-    *media_max_bytes*, and *media_max_count* with per-group resolved values,
-    and applies group allowlist/blocklist, session-mode chat_id, custom
-    prompts, and admin computation.
+    Media (images / videos / voice / files) are rendered as URL placeholders
+    in the text — no media is downloaded and no binary frames are produced.
+    The LLM is expected to fetch URLs on demand via code execution or
+    vision tools.
+
+    When *config* is provided, it overrides *group_require_mention* with
+    per-group resolved values, and applies group allowlist/blocklist,
+    session-mode chat_id, custom prompts, and admin computation.
 
     *is_known_command_fn* / *canonical_command_name_fn* are optional callables
     provided by the relay layer to check whether a command name is registered
     in Hermes.  When supplied and *config.command_filter_enabled* is True,
-    /commands are checked against the permission policy before media download.
+    /commands are checked against the permission policy before media
+    placeholders are rendered.
 
     Triggering: ``group_require_mention`` enables @-mention triggering
     (any-position unless ``mention_first_only`` is True, which requires the
@@ -382,15 +306,11 @@ async def parse_event(
         trigger_keywords = config.resolve_trigger_keywords(group_id)
         keyword_first_only = config.resolve_keyword_first_only(group_id)
         keep_mention = config.resolve_keep_mention(group_id)
-        media_max_bytes = config.resolve_media_max_bytes(group_id)
-        media_max_count = config.resolve_media_max_count(group_id)
         channel_prompt = config.resolve_custom_prompt(group_id)
         is_admin = config.is_admin(sender_id, group_id)
     elif config and not is_group:
         if not config.is_dm_allowed(sender_id):
             return None
-        media_max_bytes = config.resolve_media_max_bytes()
-        media_max_count = config.resolve_media_max_count()
         is_admin = config.is_admin(sender_id)
 
     # ── Session mode → chat_id ────────────────────────────────────────
@@ -440,9 +360,9 @@ async def parse_event(
     # ── /command filter ───────────────────────────────────────────────
     # After @bot stripping (group) or on raw segments (DM), check whether the
     # message is a /command and whether the sender has permission to use it.
-    # This runs *before* media download to avoid wasting bandwidth on denied
-    # commands.  Returns a FilteredEvent when denied; the caller sends the
-    # reject message via the OneBot HTTP API and skips Hermes forwarding.
+    # This runs *before* media placeholder rendering.  Returns a FilteredEvent
+    # when denied; the caller sends the reject message via the OneBot HTTP API
+    # and skips Hermes forwarding.
     if config and config.resolve_command_filter_enabled(group_id if is_group else None):
         filtered = _check_command_filter(
             event, raw_segments, config, is_group, group_id, sender_id, sender_name,
@@ -451,11 +371,10 @@ async def parse_event(
         if filtered is not None:
             return filtered
 
-    dl_ctx = MediaDownloadContext(max_count=media_max_count, max_bytes=media_max_bytes)
+    counter = _MediaCounter()
 
     # Media ordering matches placeholder numbering:
     #   1. forward media   2. reply media   3. main message media
-    all_media: list[MediaPayload] = []
     reply_to_text: str | None = None
     reply_to_id: int | None = None
 
@@ -464,27 +383,25 @@ async def parse_event(
     forward_text = ""
     if forward_id and api:
         logger.debug("parse_event: expanding forward msg_id=%s", forward_id)
-        forward_text, fwd_media = await _expand_forward(
-            api, forward_id, session, dl_ctx, depth=0,
+        forward_text = await _expand_forward(
+            api, forward_id, counter, depth=0,
             name_resolver=name_resolver, group_id=group_id,
         )
         # _expand_messages already wraps the result in
         # [合并转发开始:1]...[合并转发结束:1] — no extra wrapping here.
-        all_media.extend(fwd_media)
 
     # ── Reply context (引用回复) ──────────────────────────────────────
     reply_to_id = seg.extract_reply_id(raw_segments)
     if reply_to_id and api:
         logger.debug("parse_event: fetching reply context msg_id=%s", reply_to_id)
-        reply_to_text, reply_media = await _build_reply_context(
-            api, reply_to_id, session, dl_ctx,
+        reply_to_text = await _build_reply_context(
+            api, reply_to_id, counter,
             name_resolver=name_resolver, group_id=group_id,
         )
-        all_media.extend(reply_media)
 
     # ── Main message text + media ─────────────────────────────────────
     text, media_markers = seg.extract_text_with_placeholders(
-        raw_segments, start_index=dl_ctx.counter,
+        raw_segments, start_index=counter.counter,
     )
     if forward_text:
         text = forward_text + ("\n" + text if text else "")
@@ -493,31 +410,19 @@ async def parse_event(
         len(text), len(media_markers), bool(forward_text),
     )
 
-    main_media: list[MediaPayload] = []
     for i, marker in enumerate(media_markers):
         logger.debug(
-            "parse_event: download media %d/%d type=%s url=%s",
-            i + 1, len(media_markers), marker.get("type"), str(marker.get("url", ""))[:120],
+            "parse_event: render media %d/%d type=%s url=%s",
+            i + 1, len(media_markers), marker.get("kind"),
+            str(marker.get("url") or marker.get("file_info", {}).get("url", ""))[:120],
         )
-        status, reason, detail, mp = await _download_marker(marker, session, dl_ctx)
-        logger.debug(
-            "parse_event: media %d/%d status=%s reason=%s size=%d",
-            i + 1, len(media_markers), status, reason, len(mp.data) if mp else 0,
-        )
-        if mp:
-            main_media.append(mp)
-        dl_ctx.counter += 1
-        rendered = _render_placeholder(marker, status, reason, detail)
+        counter.counter += 1
+        rendered = _render_url_placeholder(marker)
         text = text.replace(marker["marker"], rendered)
-
-    all_media.extend(main_media)
 
     # ── Resolve @ mentions to @QQ号(昵称) ──────────────────────────────
     if name_resolver:
         text = await _resolve_at_mentions(text, group_id, name_resolver)
-
-    # ── Infer message_type ────────────────────────────────────────────
-    msg_type = _infer_message_type(all_media)
 
     # Group chat: prefix sender name + QQ号 (except slash commands)
     if is_group and text:
@@ -542,7 +447,7 @@ async def parse_event(
         gid_label = f"{group_id}({group_name})" if group_name else str(group_id)
         text = f"[群:{gid_label}]\n{text}"
 
-    if not text and not all_media:
+    if not text:
         return None
 
     norm = NormalizedEvent(
@@ -552,9 +457,7 @@ async def parse_event(
         user_id=sender_id,
         user_name=sender_name,
         text=text,
-        message_type=msg_type,  # type: ignore[arg-type]
-        media_ids=[mp.id for mp in all_media],
-        media_types=[mp.descriptor.mime for mp in all_media],
+        message_type="text",
         reply_to_message_id=str(reply_to_id) if reply_to_id else None,
         reply_to_text=reply_to_text,
         timestamp=float(event.get("time", 0) or 0),
@@ -563,33 +466,12 @@ async def parse_event(
         chat_name=chat_name,
         real_seq=str(event.get("real_seq", "") or ""),
         raw=event,
-        skipped_media=list(dl_ctx.skipped),
     )
     logger.debug(
-        "parse_event: normalized chat_id=%s msg_type=%s text_preview=%r media=%d",
-        norm.chat_id, norm.message_type, (norm.text or "")[:120], len(all_media),
+        "parse_event: normalized chat_id=%s msg_type=%s text_preview=%r",
+        norm.chat_id, norm.message_type, (norm.text or "")[:120],
     )
-    return norm, all_media
-
-
-def _infer_message_type(media: list[MediaPayload]) -> str:
-    """Determine message_type from the set of downloaded media."""
-    if not media:
-        return "text"
-    kinds: set[str] = set()
-    for mp in media:
-        mime = mp.descriptor.mime
-        if mime.startswith("image"):
-            kinds.add("photo")
-        elif mime.startswith("audio"):
-            kinds.add("voice")
-        elif mime.startswith("video"):
-            kinds.add("video")
-        else:
-            kinds.add("document")
-    if len(kinds) == 1:
-        return kinds.pop()
-    return "mixed"
+    return norm
 
 
 # ── Reply context ────────────────────────────────────────────────────────
@@ -598,19 +480,18 @@ def _infer_message_type(media: list[MediaPayload]) -> str:
 async def _build_reply_context(
     api: Any,
     reply_id: int,
-    session: aiohttp.ClientSession | None,
-    dl_ctx: MediaDownloadContext,
+    counter: _MediaCounter,
     name_resolver: NameResolver | None = None,
     group_id: str = "",
-) -> tuple[str | None, list[MediaPayload]]:
-    """Fetch the quoted message and build reply text + any quoted media."""
+) -> str | None:
+    """Fetch the quoted message and build reply text (URL placeholders only)."""
     try:
         quoted = await api.get_msg(reply_id)
     except Exception as exc:
         logger.warning("get_msg failed for reply_id=%s: %s", reply_id, exc)
-        return None, []
+        return None
     if not quoted:
-        return None, []
+        return None
 
     q_sender = quoted.get("sender", {}) or {}
     q_name = seg.sender_display(q_sender)
@@ -625,32 +506,26 @@ async def _build_reply_context(
         quoted.get("real_seq"), quoted.get("message_id"), quoted.get("group_id"),
         [s.get("type") for s in q_segments],
     )
-    media: list[MediaPayload] = []
 
     # Quoted message may itself be a forward
     q_forward_id = seg.extract_forward_id(q_segments)
     if q_forward_id:
-        fwd_text, fwd_media = await _expand_forward(
-            api, q_forward_id, session, dl_ctx, depth=0,
+        fwd_text = await _expand_forward(
+            api, q_forward_id, counter, depth=0,
             name_resolver=name_resolver, group_id=group_id,
         )
-        media.extend(fwd_media)
         label = fwd_text or "（无内容）"
         q_prefix = _format_sender_prefix(q_name, q_id, q_seq)
-        reply_text = f"{q_prefix}: {label}"
-        return reply_text, media
+        return f"{q_prefix}: {label}"
 
     # Regular quoted message: extract text with placeholders
     q_text, markers = seg.extract_text_with_placeholders(
-        q_segments, start_index=dl_ctx.counter,
+        q_segments, start_index=counter.counter,
     )
 
     for marker in markers:
-        status, reason, detail, mp = await _download_marker(marker, session, dl_ctx)
-        if mp:
-            media.append(mp)
-        dl_ctx.counter += 1
-        rendered = _render_placeholder(marker, status, reason, detail)
+        counter.counter += 1
+        rendered = _render_url_placeholder(marker)
         q_text = q_text.replace(marker["marker"], rendered)
 
     # Resolve @ mentions before adding sender prefix (avoids matching
@@ -659,9 +534,7 @@ async def _build_reply_context(
         q_text = await _resolve_at_mentions(q_text, group_id, name_resolver)
 
     q_prefix = _format_sender_prefix(q_name, q_id, q_seq)
-    reply_text = f"{q_prefix}: {q_text}" if q_text else None
-
-    return reply_text, media
+    return f"{q_prefix}: {q_text}" if q_text else None
 
 
 # ── Forward expansion (recursive) ────────────────────────────────────────
@@ -670,13 +543,12 @@ async def _build_reply_context(
 async def _expand_forward(
     api: Any,
     forward_id: str,
-    session: aiohttp.ClientSession | None,
-    dl_ctx: MediaDownloadContext,
+    counter: _MediaCounter,
     depth: int = 0,
     name_resolver: NameResolver | None = None,
     group_id: str = "",
-) -> tuple[str, list[MediaPayload]]:
-    """Fetch a merged-forward by id and expand it.
+) -> str:
+    """Fetch a merged-forward by id and expand it into text.
 
     This is the API-fetching entry point: it calls ``get_forward_msg`` once
     to obtain the top-level ``messages`` array, then delegates to
@@ -686,12 +558,12 @@ async def _expand_forward(
     here too to cap malicious/huge forwards.
     """
     if depth > _MAX_FORWARD_DEPTH:
-        return "[合并转发(已跳过:超过最大深度)]", []
+        return "[合并转发(已跳过:超过最大深度)]"
     try:
         fwd_data = await api.get_forward_msg(forward_id)
     except Exception as exc:
         logger.warning("get_forward_msg failed id=%s: %s", forward_id, exc)
-        return "[合并转发(已跳过:读取失败)]", []
+        return "[合并转发(已跳过:读取失败)]"
     messages: list[dict] = (fwd_data or {}).get("messages", []) or []
     logger.debug(
         "get_forward_msg response: forward_id=%s messages=%d depth=%d",
@@ -706,30 +578,29 @@ async def _expand_forward(
             msg.get("real_seq"), msg.get("message_id"), msg.get("group_id"), seg_types,
         )
     return await _expand_messages(
-        messages, session, dl_ctx, depth,
+        messages, counter, depth,
         name_resolver=name_resolver, group_id=group_id,
     )
 
 
 async def _expand_messages(
     messages: list[dict],
-    session: aiohttp.ClientSession | None,
-    dl_ctx: MediaDownloadContext,
+    counter: _MediaCounter,
     depth: int,
     name_resolver: NameResolver | None = None,
     group_id: str = "",
-) -> tuple[str, list[MediaPayload]]:
+) -> str:
     """Expand a list of message objects (each ``{sender, message, ...}``).
 
     Shared between the top-level ``get_forward_msg`` response and the inline
     ``forward.data.content`` array. Pure traversal: no API calls — nested
     forwards are read from their inline ``content`` field. Begin/end tags
     carry a level number to help the LLM understand nesting structure.
+    Media markers are rendered as URL placeholders (no downloads).
     """
     if depth > _MAX_FORWARD_DEPTH:
-        return "[合并转发(已跳过:超过最大深度)]", []
+        return "[合并转发(已跳过:超过最大深度)]"
     parts: list[str] = []
-    media: list[MediaPayload] = []
     level = depth + 1
     logger.debug("_expand_messages: depth=%d messages=%d", depth, len(messages))
 
@@ -742,26 +613,22 @@ async def _expand_messages(
         # Nested forward: expand from inline content (NapCat) — no API call.
         nested_content = seg.extract_forward_content(msg_segments)
         if nested_content:
-            nested_text, nested_media = await _expand_messages(
-                nested_content, session, dl_ctx, depth + 1,
+            nested_text = await _expand_messages(
+                nested_content, counter, depth + 1,
                 name_resolver=name_resolver, group_id=group_id,
             )
             if nested_text:
                 parts.append(f"{fwd_prefix}: {nested_text}")
-            media.extend(nested_media)
             continue
 
-        # Extract text with placeholders and download all media
+        # Extract text with placeholders and render media URLs
         msg_text, markers = seg.extract_text_with_placeholders(
-            msg_segments, start_index=dl_ctx.counter,
+            msg_segments, start_index=counter.counter,
         )
 
         for marker in markers:
-            status, reason, detail, mp = await _download_marker(marker, session, dl_ctx)
-            if mp:
-                media.append(mp)
-            dl_ctx.counter += 1
-            rendered = _render_placeholder(marker, status, reason, detail)
+            counter.counter += 1
+            rendered = _render_url_placeholder(marker)
             msg_text = msg_text.replace(marker["marker"], rendered)
 
         # Resolve @ mentions in sub-message text
@@ -774,4 +641,4 @@ async def _expand_messages(
     forward_text = "\n".join(parts)
     if forward_text:
         forward_text = f"[合并转发开始:{level}]\n{forward_text}\n[合并转发结束:{level}]"
-    return forward_text, media
+    return forward_text

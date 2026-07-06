@@ -36,11 +36,11 @@ def test_config_roundtrip(tmp_path):
     from onebot_adapter.config import load_config, save_config
 
     p = tmp_path / "cfg.json"
-    cfg = AdapterConfig(self_id="123456", media_max_mb=10)
+    cfg = AdapterConfig(self_id="123456", seq_map_size=100)
     save_config(cfg, p)
     loaded = load_config(p)
     assert loaded.self_id == "123456"
-    assert loaded.media_max_mb == 10
+    assert loaded.seq_map_size == 100
 
 
 def test_config_store_patch_and_notify():

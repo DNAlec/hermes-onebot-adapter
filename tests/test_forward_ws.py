@@ -73,11 +73,10 @@ async def test_forward_client_connects_to_mock_server():
             onebot_ws_token="testtoken",
             self_id="999",
             group_require_mention=True,
-            media_max_mb=5,
         )
         events: list = []
         client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e, m: events.append(e),
+            cfg, api=None, on_event=lambda e: events.append(e),
         )
         client.start()
         await asyncio.sleep(0.5)
@@ -96,12 +95,11 @@ async def test_forward_client_parses_message():
             onebot_ws_token="testtoken",
             self_id="999",
             group_require_mention=True,
-            media_max_mb=5,
             dm_user_filter_mode="blacklist",
         )
         events: list = []
         client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e, m: events.append(e),
+            cfg, api=None, on_event=lambda e: events.append(e),
         )
         client.start()
         await asyncio.sleep(0.5)
@@ -289,7 +287,7 @@ async def test_forward_client_filters_non_message_events():
         )
         events: list = []
         client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e, m: events.append(e),
+            cfg, api=None, on_event=lambda e: events.append(e),
         )
         client.start()
         await asyncio.sleep(0.5)

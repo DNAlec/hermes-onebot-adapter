@@ -33,33 +33,6 @@ from onebot_adapter.webui import routes as webui_routes
 logger = logging.getLogger(__name__)
 
 
-_MEDIA_KIND_LABELS = {"image": "图", "video": "视频", "record": "语音", "file": "文件"}
-
-
-def _render_media_reject_details(skipped: list[dict]) -> str:
-    """Render ``skipped_media`` records into a multi-line detail block.
-
-    Each line: ``[图3]: 文件大小8MB超过限制5MB`` — label mirrors the parser's
-    placeholder numbering so the user can correlate with the [图N] tokens in
-    the relayed text. Returns the joined string for ``{details}`` substitution.
-    """
-    lines: list[str] = []
-    for rec in skipped:
-        kind = rec.get("kind", "media")
-        idx = rec.get("idx", 0)
-        name = rec.get("name", "")
-        tag = _MEDIA_KIND_LABELS.get(kind, "媒体")
-        if kind == "file" and name:
-            label = f"[文件{idx}:{name}]"
-        else:
-            label = f"[{tag}{idx}]"
-        reason = rec.get("reason", "")
-        detail = rec.get("detail", "")
-        if detail:
-            lines.append(f"{label}: {reason}:{detail}")
-        else:
-            lines.append(f"{label}: {reason}")
-    return "\n".join(lines)
 
 
 class AdapterService:
@@ -234,16 +207,15 @@ class AdapterService:
         self._state["onebot_connected"] = self._onebot_connected()
         self._state["hermes_plugin_connected"] = bool(self._relay and self._relay.has_clients)
 
-    async def _on_onebot_event(self, event, media) -> None:
+    async def _on_onebot_event(self, event) -> None:
         self._update_status()
         logger.debug(
-            "app _on_onebot_event: relaying to Hermes chat_id=%s msg_type=%s media=%d text_preview=%r",
-            event.chat_id, event.message_type, len(media), (event.text or "")[:500],
+            "app _on_onebot_event: relaying to Hermes chat_id=%s msg_type=%s text_preview=%r",
+            event.chat_id, event.message_type, (event.text or "")[:500],
         )
         if self._relay:
-            await self._relay.push_event(event, media)
+            await self._relay.push_event(event)
             await self._maybe_react(event)
-        await self._maybe_media_reject(event)
 
     async def _maybe_react(self, event) -> None:
         """消息通过过滤并送达 Hermes 后,在原消息上贴表情回应(可配置)。
@@ -304,47 +276,6 @@ class AdapterService:
                 message=getattr(filtered, "reject_message", "") or "⛔ 指令被过滤",
                 reply_to=getattr(filtered, "reply_to_message_id", None),
             )
-
-    async def _maybe_media_reject(self, event) -> None:
-        """媒体超出数量/大小限制或下载失败时,向原会话回发一条融合提示。
-
-        触发条件:``event.skipped_media`` 非空且当前会话的
-        ``media_limit_reject_enabled`` 解析为真。事件已照常转发给 Hermes
-        (LLM 仍能在文本占位符里看到跳过原因);此处仅给用户一条额外提示,
-        带 reply 段指向原消息。失败仅记 debug 日志,不影响主流程。
-        """
-        skipped = getattr(event, "skipped_media", None) or []
-        if not skipped:
-            return
-        cfg = self.store.config
-        try:
-            is_group, num_id = parse_chat_id(event.chat_id)
-        except (ValueError, TypeError):
-            return
-        group_id = str(num_id) if is_group else None
-        if not cfg.resolve_media_limit_reject_enabled(group_id):
-            return
-        if not self._relay:
-            return
-        max_count = cfg.resolve_media_max_count(group_id)
-        max_mb = cfg.resolve_media_max_bytes(group_id) // 1024 // 1024
-        details = _render_media_reject_details(skipped)
-        text = cfg.resolve_media_limit_reject_message(group_id)
-        text = text.replace("{skipped_count}", str(len(skipped)))
-        text = text.replace("{max_count}", str(max_count))
-        text = text.replace("{max_mb}", str(max_mb))
-        text = text.replace("{details}", details)
-        try:
-            await self._relay.send_reject_message(
-                chat_id=event.chat_id,
-                message=text,
-                reply_to=event.message_id,
-            )
-            logger.debug(
-                "media reject sent: chat=%s skipped=%d", event.chat_id, len(skipped),
-            )
-        except Exception:
-            logger.debug("media reject send failed (chat=%s)", event.chat_id)
 
     async def _on_hermes_startup(self, app: aiohttp.web.Application) -> None:
         cfg = self.store.config

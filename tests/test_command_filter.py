@@ -265,12 +265,11 @@ async def test_parser_command_filter_disabled_passthrough():
         _group_cmd_event("/help"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
     )
     assert result is not None
     assert not isinstance(result, FilteredEvent)
-    event, _ = result
+    event = result
     assert "/help" in event.text
 
 
@@ -286,7 +285,6 @@ async def test_parser_command_filter_admin_denied_returns_filtered_event():
         _group_cmd_event("/kick 123"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=canonical,
@@ -310,7 +308,6 @@ async def test_parser_command_filter_admin_allowed_for_admin():
         _group_cmd_event("/kick 123", user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="kick"),
@@ -331,7 +328,6 @@ async def test_parser_command_filter_disabled_command():
         _group_cmd_event("/kick", user_id=100),  # even admin
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="kick"),
@@ -349,7 +345,6 @@ async def test_parser_command_filter_everyone_allowed():
         _group_cmd_event("/help"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="help"),
@@ -366,7 +361,6 @@ async def test_parser_command_filter_unknown_passthrough_default():
         _group_cmd_event("/foobar"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="foobar"),
@@ -383,7 +377,6 @@ async def test_parser_command_filter_unknown_filtered_when_enabled():
         _group_cmd_event("/foobar"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="foobar"),
@@ -398,7 +391,6 @@ async def test_parser_command_filter_no_is_known_fn_treats_as_unknown():
         _group_cmd_event("/foobar"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
     )
     assert isinstance(result, FilteredEvent)
@@ -414,7 +406,6 @@ async def test_parser_command_filter_non_command_passthrough():
         _group_cmd_event("hello world"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=MagicMock(return_value=True),
     )
@@ -434,7 +425,6 @@ async def test_parser_command_filter_dm_also_applies():
         _msg_event("/kick", message_type="private", user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="kick"),
@@ -454,7 +444,6 @@ async def test_parser_command_filter_per_group_override():
         _group_cmd_event("/kick"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="kick"),
@@ -481,7 +470,6 @@ async def test_parser_command_filter_runs_before_media_download():
         _group_cmd_event("/kick", segments=segs),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024 * 1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="kick"),
@@ -502,7 +490,6 @@ async def test_parser_command_filter_reject_message_includes_cmd():
         _group_cmd_event("/kick"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="kick"),
@@ -524,7 +511,6 @@ async def test_parser_command_filter_alias_resolved():
         _group_cmd_event("/bg"),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=canonical,
@@ -545,7 +531,6 @@ async def test_parser_command_filter_works_without_mention_requirement():
         _group_cmd_event("/kick", mention=False),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         is_known_command_fn=is_known,
         canonical_command_name_fn=MagicMock(return_value="kick"),

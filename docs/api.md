@@ -153,8 +153,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
   "dm_user_filter_mode": "whitelist",
   "dm_user_list": [],
   "groups": {},
-  "media_max_mb": 5,
-  "media_max_count": 10,
   "platform_hint": "...",
   "hermes_ws_port": 18810,
   "hermes_ws_path": "/hermes",
@@ -186,7 +184,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 请求 `200`：
 ```json
-{"media_max_mb": 10, "log_level": "DEBUG"}
+{"log_level": "DEBUG"}
 ```
 
 响应 `200` — 返回更新后的完整配置（与 `GET /api/config` 同结构）。
@@ -323,8 +321,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
       "group_user_list": [],
       "welcome_enabled": false,
       "welcome_message": "",
-      "media_max_mb": null,
-      "media_max_count": null,
       "auto_join": false,
       "message_show_group_id": null,
       "command_filter_enabled": null,
@@ -535,8 +531,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `dm_user_filter_mode` | string | `"whitelist"` | 私聊过滤：`whitelist` / `blacklist` |
 | `dm_user_list` | string[] | `[]` | 私聊用户过滤列表 |
 | `groups` | object | `{}` | 群组配置，key 为群号字符串 |
-| `media_max_mb` | int | `5` | 媒体文件最大体积（MB） |
-| `media_max_count` | int | `10` | 单条消息媒体最大数量 |
 | `platform_hint` | string | 默认提示词 | 注入 LLM 系统提示的平台说明 |
 | `hermes_ws_port` | int | `18810` | Hermes 插件 WS 端口 |
 | `hermes_ws_path` | string | `"/hermes"` | Hermes 插件 WS 路径 |
@@ -577,8 +571,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `group_user_list` | string[] | `[]` | 用户过滤列表 |
 | `welcome_enabled` | bool | `false` | 新人欢迎是否启用 |
 | `welcome_message` | string | `""` | 欢迎消息模板 |
-| `media_max_mb` | int\|null | `null` | 媒体最大体积 MB |
-| `media_max_count` | int\|null | `null` | 媒体最大数量 |
 | `auto_join` | bool | `false` | 自动加入 |
 | `message_show_group_id` | bool\|null | `null` | 显示群号标识 |
 | `command_filter_enabled` | bool\|null | `null` | 指令过滤开关 |

@@ -82,8 +82,6 @@ def _make_adapter():
     adapter._session = None
     adapter._ws = None
     adapter._recv_task = None
-    adapter._media_buffer = {}
-    adapter._pending_media = asyncio.Queue()
     adapter._futures = {}
     adapter._onebot_connected = False
     adapter._self_id = ""
@@ -156,13 +154,6 @@ async def test_handle_text_ready_frame():
     }))
     assert adapter._onebot_connected is True
     assert adapter._self_id == "123456"
-
-
-async def test_handle_text_media_then_binary():
-    adapter = _make_adapter()
-    await adapter._handle_text(json.dumps({"type": "media", "id": "m1", "mime": "image/jpeg"}))
-    await adapter._handle_binary(b"\x89PNGdata")
-    assert adapter._media_buffer.get("m1") == b"\x89PNGdata"
 
 
 async def test_handle_text_result_resolves_future():
