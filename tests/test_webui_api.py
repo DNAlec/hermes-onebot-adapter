@@ -49,9 +49,9 @@ async def test_status_endpoint_with_token(client):
 async def test_config_get_put(client):
     got = await (await client.get("/api/config", headers=_auth())).json()
     assert got["self_id"] == "123"
-    resp = await client.put("/api/config", json={"self_id": "999", "media_max_mb": 8}, headers=_auth())
+    resp = await client.put("/api/config", json={"self_id": "999", "seq_map_size": 100}, headers=_auth())
     assert resp.status == 200
-    assert (await resp.json())["media_max_mb"] == 8
+    assert (await resp.json())["seq_map_size"] == 100
 
 
 async def test_config_get_does_not_expose_webui_token(client):
@@ -81,7 +81,7 @@ async def test_config_get_requires_auth(client):
 
 
 async def test_config_put_requires_auth(client):
-    resp = await client.put("/api/config", json={"media_max_mb": 8})
+    resp = await client.put("/api/config", json={"seq_map_size": 100})
     assert resp.status == 401
 
 

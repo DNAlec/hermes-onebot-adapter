@@ -35,11 +35,9 @@ from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.relay.protocol import (
     MediaDescriptor,
-    MediaPayload,
     NormalizedEvent,
     error_message,
     event_message,
-    media_message,
     parse_chat_id,
     pong_message,
     ready_message,
@@ -148,7 +146,7 @@ class HermesRelayServer:
         self._seq_map = seq_map
         self._name_resolver = name_resolver
         self._clients: dict[aiohttp.web.WebSocketResponse, _Connection] = {}
-        self._ring_buffer: deque[tuple[float, NormalizedEvent, list[MediaPayload]]] = deque(
+        self._ring_buffer: deque[tuple[float, NormalizedEvent]] = deque(
             maxlen=self._RING_BUFFER_SIZE,
         )
         # Slash-command registry pushed by the Hermes plugin.  Maps lowercase
@@ -298,28 +296,25 @@ class HermesRelayServer:
 
     # ── Inbound push (adapter -> plugin) ───────────────────────────────
 
-    async def push_event(self, event: NormalizedEvent, media_payloads: list[MediaPayload]) -> None:
+    async def push_event(self, event: NormalizedEvent) -> None:
         logger.debug(
-            "relay push: chat_id=%s msg_type=%s media=%d clients=%d text_preview=%r",
-            event.chat_id, event.message_type, len(media_payloads), len(self._clients),
+            "relay push: chat_id=%s msg_type=%s clients=%d text_preview=%r",
+            event.chat_id, event.message_type, len(self._clients),
             (event.text or "")[:500],
         )
         # Skip slash commands from the ring buffer — control commands like
         # /restart, /stop, /update must not be replayed to a reconnecting
         # plugin, otherwise they create an infinite restart loop.
         if not event.text.startswith("/"):
-            self._ring_buffer.append((time.monotonic(), event, media_payloads))
-        await self._broadcast_event(event, media_payloads)
+            self._ring_buffer.append((time.monotonic(), event))
+        await self._broadcast_event(event)
 
-    async def _broadcast_event(self, event: NormalizedEvent, media_payloads: list[MediaPayload]) -> None:
+    async def _broadcast_event(self, event: NormalizedEvent) -> None:
         logger.debug("relay broadcast: sending to %d client(s)", len(self._clients))
         frame = event_message(event)
         logger.debug("relay broadcast event frame: %s", json.dumps(frame, ensure_ascii=False)[:2000])
         for ws in list(self._clients):
             try:
-                for mp in media_payloads:
-                    await ws.send_json(media_message(mp.descriptor))
-                    await ws.send_bytes(mp.data)
                 await ws.send_json(frame)
             except Exception:
                 logger.exception("push_event failed; dropping client")
@@ -335,9 +330,7 @@ class HermesRelayServer:
 
         Returns ``True`` if every buffered entry was sent successfully.
         Returns ``False`` if a send failed mid-entry: in that case the
-        offending entry is purged from the ring buffer (a corrupted payload
-        that fails once will fail on every reconnect — keeping it would
-        trap the plugin in an infinite reconnect loop) and the caller must
+        offending entry is purged from the ring buffer and the caller must
         close the now-dirty WebSocket.
         """
         if not self._ring_buffer:
@@ -346,19 +339,16 @@ class HermesRelayServer:
         cutoff = now - self._RING_BUFFER_MAX_AGE
         # Iterate over a snapshot: we may purge an entry below.
         for entry in list(self._ring_buffer):
-            ts, event, media_payloads = entry
+            ts, event = entry
             if ts < cutoff:
                 continue
             try:
-                for mp in media_payloads:
-                    await ws.send_json(media_message(mp.descriptor))
-                    await ws.send_bytes(mp.data)
                 await ws.send_json(event_message(event))
             except Exception:
                 logger.warning(
                     "ring buffer replay failed; purging corrupted entry "
-                    "(text_preview=%r, media=%d)",
-                    (event.text or "")[:120], len(media_payloads),
+                    "(text_preview=%r)",
+                    (event.text or "")[:120],
                     exc_info=True,
                 )
                 try:

@@ -97,9 +97,6 @@ class GroupConfig:
     group_user_list: list[str] = field(default_factory=list)  # 默认空：黑名单空=允许所有人
     welcome_enabled: bool = False
     welcome_message: str = ""
-    media_max_mb: int | None = None           # None=跟随全局
-    media_max_count: int | None = None       # None=跟随全局
-    media_limit_reject_enabled: bool | None = None  # None=跟随全局,True=超出限制时回发提示
     auto_join: bool = False
     message_show_group_id: bool | None = None
     reaction_emoji_enabled: bool | None = None  # None=跟随全局,True=在送达的消息上贴表情回应
@@ -158,12 +155,6 @@ class AdapterConfig:
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # ── 其他 ──
-    media_max_mb: int = 5
-    media_max_count: int = 10
-    media_limit_reject_enabled: bool = True  # 媒体超出数量/大小限制或下载失败时,回发一条融合提示
-    media_limit_reject_message: str = (
-        "⚠️ 本条消息有 {skipped_count} 个媒体未处理:\n{details}"
-    )
     platform_hint: str = DEFAULT_PLATFORM_HINT
     hermes_ws_port: int = 18810
     hermes_ws_path: str = "/hermes"
@@ -198,14 +189,6 @@ class AdapterConfig:
             errors.append(f"onebot_mode must be one of {sorted(_VALID_MODES)}")
         if self.onebot_mode == NAPCAT_MODE_FORWARD and not self.onebot_forward_ws_url:
             errors.append("onebot_forward_ws_url required when onebot_mode=forward")
-        if self.media_max_mb <= 0:
-            errors.append("media_max_mb must be positive")
-        if self.media_max_count <= 0:
-            errors.append("media_max_count must be positive")
-        if not isinstance(self.media_limit_reject_enabled, bool):
-            errors.append("media_limit_reject_enabled must be bool")
-        if not isinstance(self.media_limit_reject_message, str) or not self.media_limit_reject_message.strip():
-            errors.append("media_limit_reject_message must be a non-empty string")
         if self.group_session_mode not in _VALID_SESSION_MODES:
             errors.append(f"group_session_mode must be one of {sorted(_VALID_SESSION_MODES)}")
         if self.log_message_preview < 0:
@@ -253,12 +236,6 @@ class AdapterConfig:
                 errors.append(f"group {gid} auto_join must be bool")
             if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
                 errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
-            if gc.media_max_mb is not None and (not isinstance(gc.media_max_mb, int) or gc.media_max_mb <= 0):
-                errors.append(f"group {gid} media_max_mb must be a positive int or null")
-            if gc.media_max_count is not None and (not isinstance(gc.media_max_count, int) or gc.media_max_count <= 0):
-                errors.append(f"group {gid} media_max_count must be a positive int or null")
-            if gc.media_limit_reject_enabled is not None and not isinstance(gc.media_limit_reject_enabled, bool):
-                errors.append(f"group {gid} media_limit_reject_enabled must be bool or null")
             if gc.session_mode not in _VALID_SESSION_MODES and gc.session_mode != "default":
                 errors.append(f"group {gid} session_mode must be one of {sorted(_VALID_SESSION_MODES | {'default'})}")
             if gc.command_permissions is not None:
@@ -343,32 +320,6 @@ class AdapterConfig:
     def resolve_custom_prompt(self, group_id: str) -> str | None:
         gc = self.get_group_config(group_id)
         return gc.custom_prompt if gc.custom_prompt else None
-
-    def resolve_media_max_bytes(self, group_id: str | None = None) -> int:
-        if group_id:
-            gc = self.get_group_config(group_id)
-            if gc.media_max_mb is not None:
-                return gc.media_max_mb * 1024 * 1024
-        return self.media_max_mb * 1024 * 1024
-
-    def resolve_media_max_count(self, group_id: str | None = None) -> int:
-        if group_id:
-            gc = self.get_group_config(group_id)
-            if gc.media_max_count is not None:
-                return gc.media_max_count
-        return self.media_max_count
-
-    def resolve_media_limit_reject_enabled(self, group_id: str | None = None) -> bool:
-        """媒体超出限制回发提示开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
-        if group_id:
-            gc = self.get_group_config(group_id)
-            if gc.media_limit_reject_enabled is not None:
-                return gc.media_limit_reject_enabled
-        return self.media_limit_reject_enabled
-
-    def resolve_media_limit_reject_message(self, group_id: str | None = None) -> str:
-        """媒体超出限制回发提示文案模板。无 per-group 覆盖字段(文案仅全局可配)。"""
-        return self.media_limit_reject_message
 
     def resolve_message_show_group_id(self, group_id: str) -> bool:
         gc = self.get_group_config(group_id)

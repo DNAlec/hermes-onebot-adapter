@@ -85,9 +85,6 @@ export interface GroupConfig {
   group_user_list: string[];
   welcome_enabled: boolean;
   welcome_message: string;
-  media_max_mb: number | null;
-  media_max_count: number | null;
-  media_limit_reject_enabled: boolean | null;
   auto_join: boolean;
   message_show_group_id: boolean | null;
   reaction_emoji_enabled: boolean | null;
@@ -116,10 +113,6 @@ export interface Config {
   dm_user_filter_mode: string;
   dm_user_list: string[];
   groups: Record<string, GroupConfig>;
-  media_max_mb: number;
-  media_max_count: number;
-  media_limit_reject_enabled: boolean;
-  media_limit_reject_message: string;
   platform_hint: string;
   hermes_ws_port: number;
   hermes_ws_path: string;

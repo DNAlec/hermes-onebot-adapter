@@ -35,7 +35,7 @@ class OneBotForwardClient:
         self,
         config: AdapterConfig,
         api: Any,
-        on_event: Callable[[Any, list], Any] | None = None,
+        on_event: Callable[[Any], Any] | None = None,
         on_connect: Callable[[], Any] | None = None,
         on_disconnect: Callable[[], Any] | None = None,
         session: aiohttp.ClientSession | None = None,
@@ -206,8 +206,6 @@ class OneBotForwardClient:
             trigger_keywords=self._config.group_trigger_keywords,
             keyword_first_only=self._config.group_keyword_first_only,
             keep_mention=self._config.group_keep_mention,
-            media_max_bytes=self._config.media_max_mb * 1024 * 1024,
-            media_max_count=self._config.media_max_count,
             api=self._api,
             session=self._session,
             config=self._config,
@@ -232,11 +230,11 @@ class OneBotForwardClient:
                 except Exception:
                     logger.exception("OneBot forward: on_filtered callback failed")
             return
-        event, media = parsed
+        event = parsed
         log_recv_line(event, self._config.log_message_preview)
         logger.debug("OneBot forward parsed text preview: %r", (event.text or "")[:500])
         if self._on_event:
             try:
-                await self._on_event(event, media)
+                await self._on_event(event)
             except Exception:
                 logger.exception("OneBot forward: on_event callback failed")

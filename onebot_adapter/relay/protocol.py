@@ -76,12 +76,6 @@ class NormalizedEvent:
     user_name: str
     text: str
     message_type: MessageType = "text"
-    media_ids: list[str] = field(default_factory=list)
-    media_types: list[str] = field(default_factory=list)
-    # Adapter-internal: media markers skipped during parse (count/size/download-failure).
-    # NOT serialized to the plugin (plugin doesn't need it); the adapter service
-    # reads it from the in-memory object to decide whether to send a reject reply.
-    skipped_media: list[dict[str, Any]] = field(default_factory=list)
     reply_to_message_id: str | None = None
     reply_to_text: str | None = None
     timestamp: float = 0.0
@@ -100,8 +94,6 @@ class NormalizedEvent:
             "user_name": self.user_name,
             "text": self.text,
             "message_type": self.message_type,
-            "media_ids": self.media_ids,
-            "media_types": self.media_types,
             "reply_to_message_id": self.reply_to_message_id,
             "reply_to_text": self.reply_to_text,
             "timestamp": self.timestamp,

@@ -39,9 +39,6 @@ try:
         MessageEvent,
         MessageType,
         SendResult,
-        cache_document_from_bytes,
-        cache_image_from_bytes,
-        cache_video_from_bytes,
     )
     from gateway.session import SessionSource
     _BASE_AVAILABLE = True
@@ -53,9 +50,6 @@ except ImportError:
     SendResult = None  # type: ignore[assignment]
     Platform = None  # type: ignore[assignment]
     SessionSource = None  # type: ignore[assignment]
-    cache_document_from_bytes = None  # type: ignore[assignment]
-    cache_image_from_bytes = None  # type: ignore[assignment]
-    cache_video_from_bytes = None  # type: ignore[assignment]
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
@@ -94,8 +88,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._recv_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
-        self._media_buffer: dict[str, bytes] = {}
-        self._pending_media: asyncio.Queue[str] = asyncio.Queue()
         self._futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._onebot_connected = False
         self._self_id = ""
@@ -262,11 +254,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                         await self._handle_text(msg.data)
                     except Exception:
                         logger.exception("OneBot: error handling text frame, continuing")
-                elif msg.type == aiohttp.WSMsgType.BINARY:
-                    try:
-                        await self._handle_binary(msg.data)
-                    except Exception:
-                        logger.exception("OneBot: error handling binary frame, continuing")
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
                     break
         except asyncio.CancelledError:
@@ -295,13 +282,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             )
             return
 
-        if mtype == "media":
-            # A binary frame with this id will follow immediately
-            mid = data.get("id", "")
-            if mid:
-                self._pending_media.put_nowait(mid)
-            return
-
         if mtype == "event":
             await self._handle_event(data)
             return
@@ -323,76 +303,20 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         logger.debug("OneBot: unhandled frame type %s", mtype)
 
-    async def _handle_binary(self, data: bytes) -> None:
-        try:
-            mid = await asyncio.wait_for(self._pending_media.get(), timeout=5.0)
-        except TimeoutError:
-            logger.warning("OneBot: unexpected binary frame, dropping")
-            return
-        self._media_buffer[mid] = data
-
     async def _handle_event(self, data: dict[str, Any]) -> None:
         event = data.get("event")
         if event != "message":
             return
 
-        media_ids: list[str] = data.get("media_ids", []) or []
-        media_types_from_protocol: list[str] = data.get("media_types", []) or []
         logger.debug(
-            "OneBot plugin recv event: chat_id=%s msg_type=%s text_len=%d media=%d",
+            "OneBot plugin recv event: chat_id=%s msg_type=%s text_len=%d",
             data.get("chat_id", ""), data.get("message_type", "text"),
-            len(data.get("text", "") or ""), len(media_ids),
+            len(data.get("text", "") or ""),
         )
         logger.debug("OneBot plugin event text preview: %r", (data.get("text", "") or "")[:500])
-        media_urls: list[str] = []
-        media_types: list[str] = []
-
-        for i, mid in enumerate(media_ids):
-            raw = self._media_buffer.pop(mid, None)
-            if raw is None:
-                logger.warning("OneBot: media %s missing from buffer", mid)
-                continue
-            mtype = media_types_from_protocol[i] if i < len(media_types_from_protocol) else ""
-            try:
-                if mtype.startswith("image/"):
-                    path = cache_image_from_bytes(raw)
-                    media_urls.append(path)
-                    media_types.append(mtype)
-                elif mtype.startswith("audio/"):
-                    path = _cache_audio(raw)
-                    media_urls.append(path)
-                    media_types.append(mtype)
-                elif mtype.startswith("video/"):
-                    path = cache_video_from_bytes(raw)
-                    media_urls.append(path)
-                    media_types.append(mtype)
-                else:
-                    path = cache_document_from_bytes(raw, mid)
-                    media_urls.append(path)
-                    media_types.append(mtype or "application/octet-stream")
-            except Exception:
-                logger.exception("OneBot: failed to cache media %s", mid)
-            else:
-                logger.debug("OneBot plugin cached media mid=%s type=%s path=%s", mid, mtype, path)
 
         text = data.get("text", "")
         msg_type_str = data.get("message_type", "text")
-        # "mixed" type: degrade to the first media's type. Hermes core
-        # processes media individually via media_types list (run.py:8061+),
-        # so message_type is only a coarse hint here.
-        if msg_type_str == "mixed":
-            if media_types:
-                first_type = media_types[0]
-                if first_type.startswith("image/"):
-                    msg_type_str = "photo"
-                elif first_type.startswith("audio/"):
-                    msg_type_str = "voice"
-                elif first_type.startswith("video/"):
-                    msg_type_str = "video"
-                else:
-                    msg_type_str = "document"
-            else:
-                msg_type_str = "text"
         msg_type = _MESSAGE_TYPE_MAP.get(msg_type_str, MessageType.TEXT)
 
         # Set admin context for tool gating — from event (computed by adapter)
@@ -422,8 +346,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             source=source,
             raw_message=data,
             message_id=data.get("message_id", ""),
-            media_urls=media_urls,
-            media_types=media_types,
+            media_urls=[],
+            media_types=[],
             reply_to_message_id=data.get("reply_to_message_id"),
             reply_to_text=data.get("reply_to_text"),
             timestamp=timestamp,
@@ -746,19 +670,6 @@ _MESSAGE_TYPE_MAP = {
     "video": MessageType.VIDEO if _BASE_AVAILABLE else None,
     "document": MessageType.DOCUMENT if _BASE_AVAILABLE else None,
 } if _BASE_AVAILABLE else {}
-
-
-def _cache_audio(data: bytes) -> str:
-    """Cache WAV audio bytes via Hermes' audio cache."""
-    try:
-        from gateway.platforms.base import cache_audio_from_bytes
-        return cache_audio_from_bytes(data, ext=".wav")
-    except ImportError:
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix=".wav")
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        return path
 
 
 def _result_to_send_result(result: dict[str, Any]) -> SendResult:
