@@ -459,23 +459,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             self._futures.pop(req_id, None)
             return {"success": False, "error": f"timeout waiting for {action} result"}
 
-    async def _send_media_bytes(
-        self, action: str, chat_id: str, data: bytes, mime: str, name: str, **extra: Any,
-    ) -> dict[str, Any]:
-        """Upload bytes via send_media + binary frame, then send the action."""
-        if not self._ws or self._ws.closed:
-            return {"success": False, "error": "adapter WS not connected"}
-        media_id = str(uuid.uuid4())
-        await self._ws.send_json({
-            "type": "send_media",
-            "id": media_id,
-            "mime": mime,
-            "name": name,
-            "size": len(data),
-        })
-        await self._ws.send_bytes(data)
-        return await self._request(action, chat_id=chat_id, media_id=media_id, filename=name, **extra)
-
     # ── Required abstract methods ────────────────────────────────────────
 
     async def send(
@@ -531,24 +514,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_image: chat_id=%s url=%s", chat_id, image_url)
-            if image_url.startswith(("http://", "https://")):
-                payload: dict[str, Any] = {"chat_id": chat_id, "image_url": image_url}
-                if caption:
-                    payload["caption"] = strip_markdown(caption)
-                if reply_to:
-                    payload["reply_to"] = reply_to
-                result = await self._request("send_image", **payload)
-            else:
-                with open(image_url, "rb") as f:
-                    data = f.read()
-                extra: dict[str, Any] = {}
-                if caption:
-                    extra["caption"] = strip_markdown(caption)
-                if reply_to:
-                    extra["reply_to"] = reply_to
-                result = await self._send_media_bytes(
-                    "send_image", chat_id, data, "image/jpeg", "image.jpg", **extra,
-                )
+            payload: dict[str, Any] = {"chat_id": chat_id, "image_url": image_url}
+            if caption:
+                payload["caption"] = strip_markdown(caption)
+            if reply_to:
+                payload["reply_to"] = reply_to
+            result = await self._request("send_image", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_image failed: %s", exc)
@@ -565,11 +536,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_voice: chat_id=%s path=%s", chat_id, audio_path)
-            with open(audio_path, "rb") as f:
-                data = f.read()
-            result = await self._send_media_bytes(
-                "send_voice", chat_id, data, "audio/wav", "voice.wav",
-            )
+            payload: dict[str, Any] = {"chat_id": chat_id, "audio_path": audio_path}
+            if reply_to:
+                payload["reply_to"] = reply_to
+            result = await self._request("send_voice", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_voice failed: %s", exc)
@@ -586,14 +556,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_video: chat_id=%s path=%s", chat_id, video_path)
-            with open(video_path, "rb") as f:
-                data = f.read()
-            extra: dict[str, Any] = {}
+            payload: dict[str, Any] = {"chat_id": chat_id, "video_path": video_path}
             if caption:
-                extra["caption"] = strip_markdown(caption)
-            result = await self._send_media_bytes(
-                "send_video", chat_id, data, "video/mp4", "video.mp4", **extra,
-            )
+                payload["caption"] = strip_markdown(caption)
+            if reply_to:
+                payload["reply_to"] = reply_to
+            result = await self._request("send_video", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_video failed: %s", exc)
@@ -611,12 +579,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_document: chat_id=%s path=%s", chat_id, file_path)
-            name = file_name or os.path.basename(file_path)
-            with open(file_path, "rb") as f:
-                data = f.read()
-            result = await self._send_media_bytes(
-                "send_document", chat_id, data, "application/octet-stream", name,
-            )
+            payload: dict[str, Any] = {"chat_id": chat_id, "file_path": file_path}
+            if file_name:
+                payload["filename"] = file_name
+            result = await self._request("send_document", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_document failed: %s", exc)

@@ -1,6 +1,5 @@
 """Relay between the adapter service and the Hermes plugin."""
 from onebot_adapter.relay.protocol import (
-    MediaDescriptor,
     NormalizedEvent,
     api_call_message,
     envelope,
@@ -10,12 +9,10 @@ from onebot_adapter.relay.protocol import (
     pong_message,
     ready_message,
     result_message,
-    send_media_message,
     send_message,
 )
 
 __all__ = [
-    "MediaDescriptor",
     "NormalizedEvent",
     "api_call_message",
     "envelope",
@@ -25,6 +22,5 @@ __all__ = [
     "pong_message",
     "ready_message",
     "result_message",
-    "send_media_message",
     "send_message",
 ]

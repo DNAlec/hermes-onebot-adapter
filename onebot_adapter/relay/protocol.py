@@ -1,10 +1,9 @@
 """Normalized wire protocol between the adapter service and the Hermes plugin.
 
-All text frames are JSON objects with a ``type`` field.  Binary frames are
-used **only** for the outbound (plugin → adapter) ``send_media`` path: the
-plugin uploads image/voice/video/document bytes, and the adapter writes them
-to a temp file before forwarding to OneBot.  Inbound (adapter → plugin) events
-carry media as URL placeholders in the event text — no binary frames.
+All frames are JSON text frames — no binary frames. Media (images, videos,
+voice, files) is passed as file paths or URLs in the JSON payload (path
+passthrough). The adapter forwards these directly to OneBot/NapCat, which
+reads the local file or downloads the URL itself.
 
 Direction notation:
   A->P : adapter service -> Hermes plugin (inbound events, responses)
@@ -23,7 +22,6 @@ TypeKind = Literal[
     "pong",
     "event",
     "send",
-    "send_media",
     "api_call",
     "result",
     "error",
@@ -43,24 +41,12 @@ def envelope(type_: TypeKind, **fields: Any) -> dict[str, Any]:
 
 
 @dataclass
-class MediaDescriptor:
-    id: str
-    mime: str
-    name: str = ""
-    size: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "mime": self.mime, "name": self.name, "size": self.size}
-
-
-@dataclass
 class NormalizedEvent:
     """OneBot 11 event reduced to a Hermes-neutral shape.
 
     Media is NOT included as binary payloads — all images/videos/voice/files
     are rendered as URL placeholders in ``text`` (e.g. ``[图1](https://...)``)
-    so the LLM can fetch them on demand.  ``message_type`` is always ``"text"``
-    for this reason.
+    so the LLM can fetch them on demand.
     """
 
     message_id: str
@@ -166,10 +152,6 @@ def send_message(action: SendAction, req_id: str, chat_id: str, **payload: Any) 
     msg = envelope("send", action=action, req_id=req_id, chat_id=chat_id)
     msg.update(payload)
     return msg
-
-
-def send_media_message(media: MediaDescriptor) -> dict[str, Any]:
-    return envelope("send_media", **media.to_dict())
 
 
 def api_call_message(action: str, req_id: str, params: dict[str, Any]) -> dict[str, Any]:

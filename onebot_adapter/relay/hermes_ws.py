@@ -2,14 +2,12 @@
 
 The plugin authenticates with a bearer token (query param ``token`` or
 ``Authorization`` header). Inbound OneBot events are pushed here; plugin
-send / api-call requests are dispatched to the OneBot HTTP API.
+send / api-call requests are dispatched to the OneBot API.
 
-Binary media flow (plugin -> adapter):
-  1. Plugin sends ``send_media`` text frame announcing id/mime/name.
-  2. Plugin sends one binary frame with the bytes.
-  3. Plugin sends a ``send`` frame referencing ``media_id``.
-The adapter writes the bytes to a temp file and passes a ``file://`` URI to
-OneBot's OneBot HTTP API.
+All frames on this WS are JSON text frames — no binary frames. Media is
+passed as file paths / URLs in the JSON payload (path passthrough), and
+the adapter forwards them to OneBot/NapCat which reads the local files
+or downloads URLs itself.
 """
 from __future__ import annotations
 
@@ -30,11 +28,9 @@ import aiohttp.web
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot import api as ob
 from onebot_adapter.onebot.log_format import log_send_line
-from onebot_adapter.onebot.media import cleanup_temp_uri, write_temp_media
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.relay.protocol import (
-    MediaDescriptor,
     NormalizedEvent,
     error_message,
     event_message,
@@ -65,13 +61,13 @@ def _send_fingerprint(action: str, data: dict[str, Any]) -> str:
     if action == "send_text":
         raw = str(data.get("content", ""))
     elif action == "send_image":
-        raw = f"{data.get('image_url', '')}|{data.get('media_id', '')}|{data.get('caption', '')}"
+        raw = f"{data.get('image_url', '')}|{data.get('caption', '')}"
     elif action == "send_voice":
-        raw = f"{data.get('audio_path', '')}|{data.get('media_id', '')}"
+        raw = f"{data.get('audio_path', '')}"
     elif action == "send_video":
-        raw = f"{data.get('video_path', '')}|{data.get('media_id', '')}|{data.get('caption', '')}"
+        raw = f"{data.get('video_path', '')}|{data.get('caption', '')}"
     elif action == "send_document":
-        raw = f"{data.get('file_path', '')}|{data.get('media_id', '')}|{data.get('filename', '')}"
+        raw = f"{data.get('file_path', '')}|{data.get('filename', '')}"
     else:  # defensive: never expected since caller filters by _DEDUP_ACTIONS
         raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -95,29 +91,6 @@ def _parse_at_markers(text: str) -> list[dict]:
     if not segs:
         segs.append(ob.text_segment(text))
     return segs
-
-
-class _Connection:
-    """Per-WS-connection state, tracking pending binary media frames."""
-
-    def __init__(self, ws: aiohttp.web.WebSocketResponse) -> None:
-        self.ws = ws
-        self._buffer: dict[str, bytes] = {}
-        self._pending: deque[str] = deque()
-
-    def announce_media(self, desc: MediaDescriptor) -> None:
-        self._buffer[desc.id] = b""
-        self._pending.append(desc.id)
-
-    def receive_binary(self, data: bytes) -> None:
-        if not self._pending:
-            logger.warning("relay: unexpected binary frame, dropping")
-            return
-        mid = self._pending.popleft()
-        self._buffer[mid] = data
-
-    def take_media(self, media_id: str) -> bytes | None:
-        return self._buffer.pop(media_id, None)
 
 
 class HermesRelayServer:
@@ -145,7 +118,7 @@ class HermesRelayServer:
         self._on_filtered = on_filtered
         self._seq_map = seq_map
         self._name_resolver = name_resolver
-        self._clients: dict[aiohttp.web.WebSocketResponse, _Connection] = {}
+        self._clients: set[aiohttp.web.WebSocketResponse] = set()
         self._ring_buffer: deque[tuple[float, NormalizedEvent]] = deque(
             maxlen=self._RING_BUFFER_SIZE,
         )
@@ -233,7 +206,7 @@ class HermesRelayServer:
                 await ws.send_json(commands_refresh_message())
             except Exception:
                 logger.warning("relay: failed to send commands_refresh to a client")
-                self._clients.pop(ws, None)
+                self._clients.discard(ws)
 
     async def broadcast_self_id(self, self_id: str) -> None:
         """Push an updated self_id to every connected plugin client by sending
@@ -249,7 +222,7 @@ class HermesRelayServer:
                 await ws.send_json(msg)
             except Exception:
                 logger.warning("relay: failed to send self_id update to a client")
-                self._clients.pop(ws, None)
+                self._clients.discard(ws)
 
     async def _handler(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
         token = request.query.get("token") or _bearer(request.headers.get("Authorization", ""))
@@ -257,8 +230,7 @@ class HermesRelayServer:
             return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         ws = aiohttp.web.WebSocketResponse()
         await ws.prepare(request)
-        conn = _Connection(ws)
-        self._clients[ws] = conn
+        self._clients.add(ws)
         if self._on_connect:
             self._on_connect()
         logger.info("Hermes plugin WS connected from %s", request.remote)
@@ -270,9 +242,6 @@ class HermesRelayServer:
             )
         )
         # Replay buffered events so a reconnecting plugin doesn't miss messages.
-        # If replay hits a corrupted buffer entry, the WS is already dirty —
-        # close it so the message loop exits cleanly instead of thrashing;
-        # the bad entry has been purged, so the next reconnect replays clean.
         replay_ok = await self._replay_ring_buffer(ws)
         if not replay_ok:
             logger.warning("relay: closing plugin WS after ring buffer replay failure")
@@ -280,15 +249,13 @@ class HermesRelayServer:
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    task = asyncio.create_task(self._handle_text(conn, msg.data))
+                    task = asyncio.create_task(self._handle_text(ws, msg.data))
                     self._text_tasks.add(task)
                     task.add_done_callback(self._text_tasks.discard)
-                elif msg.type == aiohttp.WSMsgType.BINARY:
-                    conn.receive_binary(msg.data)
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
         finally:
-            self._clients.pop(ws, None)
+            self._clients.discard(ws)
             if self._on_disconnect:
                 self._on_disconnect()
             logger.info("Hermes plugin WS disconnected")
@@ -318,7 +285,7 @@ class HermesRelayServer:
                 await ws.send_json(frame)
             except Exception:
                 logger.exception("push_event failed; dropping client")
-                self._clients.pop(ws, None)
+                self._clients.discard(ws)
 
     async def _replay_ring_buffer(self, ws: aiohttp.web.WebSocketResponse) -> bool:
         """Send buffered events to a newly-connected plugin.
@@ -360,42 +327,32 @@ class HermesRelayServer:
 
     # ── Outbound dispatch (plugin -> adapter) ──────────────────────────
 
-    async def _handle_text(self, conn: _Connection, raw: str) -> None:
+    async def _handle_text(self, ws: aiohttp.web.WebSocketResponse, raw: str) -> None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            await conn.ws.send_json(error_message("bad_json", "invalid JSON frame"))
+            await ws.send_json(error_message("bad_json", "invalid JSON frame"))
             return
         mtype = data.get("type")
         logger.debug("relay recv from plugin: type=%s action=%s raw=%s", mtype, data.get("action", ""), raw[:2000])
         if mtype == "ping":
-            await conn.ws.send_json(pong_message())
-            return
-        if mtype == "send_media":
-            desc = MediaDescriptor(
-                id=data.get("id", str(uuid.uuid4())),
-                mime=data.get("mime", "application/octet-stream"),
-                name=data.get("name", ""),
-                size=int(data.get("size", 0)),
-            )
-            conn.announce_media(desc)
+            await ws.send_json(pong_message())
             return
         if mtype == "send":
-            await self._handle_send(conn, data)
+            await self._handle_send(ws, data)
             return
         if mtype == "api_call":
-            await self._handle_api_call(conn, data)
+            await self._handle_api_call(ws, data)
             return
         if mtype == "commands_snapshot":
             self._store_commands(data.get("commands", []) or [])
             return
-        await conn.ws.send_json(error_message("unknown_type", f"unknown type {mtype!r}"))
+        await ws.send_json(error_message("unknown_type", f"unknown type {mtype!r}"))
 
-    async def _handle_send(self, conn: _Connection, data: dict[str, Any]) -> None:
+    async def _handle_send(self, ws: aiohttp.web.WebSocketResponse, data: dict[str, Any]) -> None:
         req_id = data.get("req_id", str(uuid.uuid4()))
         action = data.get("action")
         chat_id = data.get("chat_id", "")
-        temp_uris: list[str] = []
         try:
             is_group, num_id = parse_chat_id(chat_id)
             segs: list[dict] = []
@@ -417,7 +374,7 @@ class HermesRelayServer:
                             "relay dedup hit: action=%s chat_id=%s cached_msg_id=%s age=%.1fs",
                             action, chat_id, cached_msg_id, age,
                         )
-                        await conn.ws.send_json(
+                        await ws.send_json(
                             result_message(req_id, True, message_id=cached_msg_id or None)
                         )
                         return
@@ -433,23 +390,32 @@ class HermesRelayServer:
                 segs.extend(_parse_at_markers(content))
 
             elif action == "send_image":
-                file_ref = await self._resolve_file_ref(conn, data, temp_uris, default_ext=".jpg")
+                file_ref = str(data.get("image_url", ""))
+                if not file_ref:
+                    raise ValueError("no image_url provided")
                 segs.append(ob.image_segment(file_ref))
                 if data.get("caption"):
                     segs.append(ob.text_segment(data["caption"]))
 
             elif action == "send_voice":
-                file_ref = await self._resolve_file_ref(conn, data, temp_uris, default_ext=".wav")
+                file_ref = str(data.get("audio_path", ""))
+                if not file_ref:
+                    raise ValueError("no audio_path provided")
                 segs.append(ob.record_segment(file_ref))
 
             elif action == "send_video":
-                file_ref = await self._resolve_file_ref(conn, data, temp_uris, default_ext=".mp4")
+                file_ref = str(data.get("video_path", ""))
+                if not file_ref:
+                    raise ValueError("no video_path provided")
                 segs.append(ob.video_segment(file_ref))
                 if data.get("caption"):
                     segs.append(ob.text_segment(data["caption"]))
 
             elif action == "send_document":
-                file_ref, filename = await self._resolve_file_ref_with_name(conn, data, temp_uris)
+                file_ref = str(data.get("file_path", ""))
+                if not file_ref:
+                    raise ValueError("no file_path provided")
+                filename = data.get("filename") or file_ref.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
                 group_name = ""
                 if is_group and self._name_resolver:
                     try:
@@ -465,17 +431,17 @@ class HermesRelayServer:
                     name_resolver=self._name_resolver,
                 )
                 if is_group:
-                    await self._api.upload_group_file(num_id, _local_path(file_ref), filename)
+                    await self._api.upload_group_file(num_id, file_ref, filename)
                 else:
-                    await self._api.upload_private_file(num_id, _local_path(file_ref), filename)
+                    await self._api.upload_private_file(num_id, file_ref, filename)
                 # 写入去重缓存(send_document 无 message_id,缓存空串;命中时回 None)。
                 if dedup_key is not None:
                     self._send_cache[dedup_key] = (time.monotonic(), "")
-                await conn.ws.send_json(result_message(req_id, True))
+                await ws.send_json(result_message(req_id, True))
                 return
 
             else:
-                await conn.ws.send_json(result_message(req_id, False, error=f"unknown action {action!r}"))
+                await ws.send_json(result_message(req_id, False, error=f"unknown action {action!r}"))
                 return
 
             if is_group:
@@ -511,49 +477,12 @@ class HermesRelayServer:
                         self._seq_map.add(str(num_id), int(rs), msg_id)
                 except Exception as exc:
                     logger.debug("get_msg for seq_map failed (msg_id=%s): %s", msg_id, exc)
-            await conn.ws.send_json(result_message(req_id, True, message_id=msg_id))
+            await ws.send_json(result_message(req_id, True, message_id=msg_id))
         except Exception as exc:
             logger.exception("send failed")
-            await conn.ws.send_json(result_message(req_id, False, error=str(exc)))
-        finally:
-            for uri in temp_uris:
-                cleanup_temp_uri(uri)
+            await ws.send_json(result_message(req_id, False, error=str(exc)))
 
-    async def _resolve_file_ref(
-        self, conn: _Connection, data: dict[str, Any], temp_uris: list[str], *, default_ext: str
-    ) -> str:
-        """Return a file reference for OneBot segments: URL, path, or temp file URI."""
-        if data.get("image_url") or data.get("audio_path") or data.get("video_path"):
-            return str(data.get("image_url") or data.get("audio_path") or data.get("video_path"))
-        media_id = data.get("media_id")
-        if media_id:
-            raw = conn.take_media(media_id)
-            if raw is None:
-                raise ValueError(f"media_id {media_id!r} not found")
-            name = data.get("filename") or data.get("name") or f"upload{default_ext}"
-            uri = await write_temp_media(raw, name, data.get("mime", ""))
-            temp_uris.append(uri)
-            return uri
-        raise ValueError("no image_url / audio_path / video_path / media_id provided")
-
-    async def _resolve_file_ref_with_name(
-        self, conn: _Connection, data: dict[str, Any], temp_uris: list[str]
-    ) -> tuple[str, str]:
-        if data.get("file_path"):
-            name = data.get("filename") or data["file_path"].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            return str(data["file_path"]), name
-        media_id = data.get("media_id")
-        if media_id:
-            raw = conn.take_media(media_id)
-            if raw is None:
-                raise ValueError(f"media_id {media_id!r} not found")
-            name = data.get("filename") or data.get("name") or "document"
-            uri = await write_temp_media(raw, name, data.get("mime", ""))
-            temp_uris.append(uri)
-            return uri, name
-        raise ValueError("no file_path / media_id provided")
-
-    async def _handle_api_call(self, conn: _Connection, data: dict[str, Any]) -> None:
+    async def _handle_api_call(self, ws: aiohttp.web.WebSocketResponse, data: dict[str, Any]) -> None:
         req_id = data.get("req_id", str(uuid.uuid4()))
         action = data.get("action", "")
         params = data.get("params", {}) or {}
@@ -567,10 +496,10 @@ class HermesRelayServer:
                 "relay api_call result: action=%s ok=True data=%s",
                 action, json.dumps(result.get("data"), ensure_ascii=False)[:2000],
             )
-            await conn.ws.send_json(result_message(req_id, True, data=result.get("data")))
+            await ws.send_json(result_message(req_id, True, data=result.get("data")))
         except Exception as exc:
             logger.warning("api_call %s failed: %s", action, exc)
-            await conn.ws.send_json(result_message(req_id, False, error=str(exc)))
+            await ws.send_json(result_message(req_id, False, error=str(exc)))
 
     def _resolve_seq_params(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         """拦截需要 real_seq→message_id 转换的 action。
@@ -644,9 +573,3 @@ def _bearer(header: str) -> str:
     if header.lower().startswith("bearer "):
         return header[7:].strip()
     return ""
-
-
-def _local_path(uri: str) -> str:
-    if uri.startswith("file://"):
-        return uri[7:]
-    return uri
