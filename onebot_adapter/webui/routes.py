@@ -78,6 +78,7 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_get("/api/hermes_mode", _get_hermes_mode(store, state))
     app.router.add_put("/api/hermes_mode", _put_hermes_mode(store))
     app.router.add_post("/api/hermes_mode/refresh", _refresh_hermes_mode(state))
+    app.router.add_get("/api/update_check", _update_check)
     app.router.add_get("/", _index)
     app.router.add_get("/{tail:.*}", _spa_handler)
 
@@ -662,6 +663,17 @@ def _refresh_hermes_mode(state: dict[str, Any]):
         return aiohttp.web.json_response({"ok": True, "note": "已请求插件重新上报,稍后刷新页面查看"})
 
     return handler
+
+
+async def _update_check(_: aiohttp.web.Request) -> aiohttp.web.Response:
+    from onebot_adapter.update_check import check_for_updates
+
+    try:
+        result = await check_for_updates()
+    except Exception as exc:
+        logger.exception("update check failed")
+        return aiohttp.web.json_response({"error": str(exc)}, status=500)
+    return aiohttp.web.json_response(result)
 
 
 async def _index(_: aiohttp.web.Request) -> aiohttp.web.Response:

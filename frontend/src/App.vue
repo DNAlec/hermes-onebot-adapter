@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
 import { RouterView, RouterLink, useRouter } from "vue-router";
-import { getStatus, type Status, clearToken } from "./api";
+import { getStatus, getUpdateCheck, type Status, type UpdateInfo, clearToken } from "./api";
 
 const status = ref<Status | null>(null);
+const updateInfo = ref<UpdateInfo | null>(null);
 let timer: number | undefined;
 const router = useRouter();
 
@@ -15,6 +16,17 @@ async function refreshStatus() {
   }
 }
 
+async function checkUpdate() {
+  try {
+    const info = await getUpdateCheck();
+    if (info.has_update) {
+      updateInfo.value = info;
+    }
+  } catch {
+    // silently ignore
+  }
+}
+
 function logout() {
   clearToken();
   router.push("/login");
@@ -22,6 +34,7 @@ function logout() {
 
 onMounted(() => {
   refreshStatus();
+  checkUpdate();
   timer = window.setInterval(refreshStatus, 5000);
 });
 onUnmounted(() => {
@@ -35,6 +48,16 @@ onUnmounted(() => {
       <div class="topbar-left">
         <h1>Hermes OneBot Adapter</h1>
         <span v-if="status" class="version-tag">v{{ status.adapter_version }}</span>
+        <a
+          v-if="updateInfo?.has_update"
+          class="update-badge"
+          :href="updateInfo.changelog_url"
+          target="_blank"
+          rel="noopener"
+          title="有新版本 v{{ updateInfo.latest_version }}，点击查看更新日志"
+        >
+          v{{ updateInfo.latest_version }} →
+        </a>
       </div>
       <nav>
         <RouterLink to="/">仪表盘</RouterLink>
@@ -142,6 +165,21 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: var(
   border-radius: 4px;
   padding: 0.15rem 0.4rem;
   font-family: monospace;
+}
+
+.update-badge {
+  font-size: 0.75rem;
+  color: #d97706;
+  background: rgba(245,158,11,0.12);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: 4px;
+  padding: 0.15rem 0.4rem;
+  font-family: monospace;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+.update-badge:hover {
+  background: rgba(245,158,11,0.22);
 }
 
 .content { padding: 1.5rem; max-width: 1000px; width: 100%; margin: 0 auto; flex: 1; }
