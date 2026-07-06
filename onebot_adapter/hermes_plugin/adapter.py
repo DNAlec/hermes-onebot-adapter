@@ -309,15 +309,13 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             return
 
         logger.debug(
-            "OneBot plugin recv event: chat_id=%s msg_type=%s text_len=%d",
-            data.get("chat_id", ""), data.get("message_type", "text"),
+            "OneBot plugin recv event: chat_id=%s text_len=%d",
+            data.get("chat_id", ""),
             len(data.get("text", "") or ""),
         )
         logger.debug("OneBot plugin event text preview: %r", (data.get("text", "") or "")[:500])
 
         text = data.get("text", "")
-        msg_type_str = data.get("message_type", "text")
-        msg_type = _MESSAGE_TYPE_MAP.get(msg_type_str, MessageType.TEXT)
 
         # Set admin context for tool gating — from event (computed by adapter)
         self._current_is_admin = data.get("is_admin", False)
@@ -342,7 +340,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         message_event = MessageEvent(
             text=text,
-            message_type=msg_type,
+            message_type=MessageType.TEXT,
             source=source,
             raw_message=data,
             message_id=data.get("message_id", ""),
@@ -354,8 +352,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             channel_prompt=data.get("channel_prompt"),
         )
         logger.debug(
-            "OneBot plugin → Hermes: chat_id=%s msg_type=%s",
-            message_event.source.chat_id, msg_type,
+            "OneBot plugin → Hermes: chat_id=%s",
+            message_event.source.chat_id,
         )
         await self.handle_message(message_event)
 
@@ -662,14 +660,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-
-_MESSAGE_TYPE_MAP = {
-    "text": MessageType.TEXT if _BASE_AVAILABLE else None,
-    "photo": MessageType.PHOTO if _BASE_AVAILABLE else None,
-    "voice": MessageType.VOICE if _BASE_AVAILABLE else None,
-    "video": MessageType.VIDEO if _BASE_AVAILABLE else None,
-    "document": MessageType.DOCUMENT if _BASE_AVAILABLE else None,
-} if _BASE_AVAILABLE else {}
 
 
 def _result_to_send_result(result: dict[str, Any]) -> SendResult:

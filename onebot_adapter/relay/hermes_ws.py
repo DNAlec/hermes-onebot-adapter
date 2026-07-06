@@ -298,8 +298,8 @@ class HermesRelayServer:
 
     async def push_event(self, event: NormalizedEvent) -> None:
         logger.debug(
-            "relay push: chat_id=%s msg_type=%s clients=%d text_preview=%r",
-            event.chat_id, event.message_type, len(self._clients),
+            "relay push: chat_id=%s clients=%d text_preview=%r",
+            event.chat_id, len(self._clients),
             (event.text or "")[:500],
         )
         # Skip slash commands from the ring buffer — control commands like

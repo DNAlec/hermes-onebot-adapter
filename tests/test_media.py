@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 from onebot_adapter.onebot.media import cleanup_temp_uri, write_temp_media
 
 

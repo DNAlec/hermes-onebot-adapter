@@ -210,8 +210,8 @@ class AdapterService:
     async def _on_onebot_event(self, event) -> None:
         self._update_status()
         logger.debug(
-            "app _on_onebot_event: relaying to Hermes chat_id=%s msg_type=%s text_preview=%r",
-            event.chat_id, event.message_type, (event.text or "")[:500],
+            "app _on_onebot_event: relaying to Hermes chat_id=%s text_preview=%r",
+            event.chat_id, (event.text or "")[:500],
         )
         if self._relay:
             await self._relay.push_event(event)

@@ -8,9 +8,6 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-from aiohttp.test_utils import TestClient, TestServer
-
 from onebot_adapter.onebot import parser
 
 
@@ -47,7 +44,6 @@ async def test_parser_image_url_placeholder():
     )
     assert result is not None
     event = result
-    assert event.message_type == "text"
     assert "[图1](https://example.com/cat.jpg)" in event.text
 
 
@@ -173,7 +169,6 @@ async def test_parser_reply_with_image():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
@@ -203,7 +198,6 @@ async def test_parser_reply_with_multiple_images():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
@@ -237,7 +231,6 @@ async def test_parser_forward_with_image():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
@@ -274,7 +267,6 @@ async def test_parser_forward_with_multiple_media_types():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
@@ -319,7 +311,6 @@ async def test_parser_nested_forward_inline_content():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
@@ -366,7 +357,6 @@ async def test_parser_nested_forward_inline_content_3levels():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
@@ -406,7 +396,6 @@ async def test_parser_forward_depth_limit_inline():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
@@ -443,7 +432,6 @@ async def test_parser_reply_with_forward():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
-        session=None,
     )
     assert result is not None
     event = result
