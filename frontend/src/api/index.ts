@@ -231,3 +231,15 @@ export const putHermesMode = (group_sessions_per_user: boolean) =>
   ).then((r) => r.data);
 export const refreshHermesMode = () =>
   api.post<{ ok: boolean; note?: string; error?: string }>("/hermes_mode/refresh").then((r) => r.data);
+
+// ── Version update check ──
+
+export interface UpdateInfo {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  changelog_url: string;
+}
+
+export const getUpdateCheck = () =>
+  api.get<UpdateInfo>("/update_check").then((r) => r.data);

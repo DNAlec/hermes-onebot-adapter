@@ -24,6 +24,7 @@ classifiers = [
 keywords = ["onebot", "qq", "hermes", "napcat", "chatbot", "onebot11"]
 dependencies = [
     "aiohttp>=3.10,<4",
+    "packaging>=23",
     "ruamel.yaml>=0.18",
 ]
 
