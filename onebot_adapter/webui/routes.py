@@ -196,9 +196,13 @@ def _status(store: ConfigStore, state: dict[str, Any]):
         cfg = store.config
         relay = state.get("relay")
         per_user = getattr(relay, "hermes_group_sessions_per_user", True) if relay else True
+        plugin_ver = getattr(relay, "plugin_version", None) if relay else None
+        mismatch = getattr(relay, "version_mismatch", True) if relay else True
         return aiohttp.web.json_response(
             {
                 "adapter_version": __version__,
+                "plugin_version": plugin_ver,
+                "version_mismatch": mismatch,
                 "onebot_connected": bool(state.get("onebot_connected")),
                 "hermes_plugin_connected": bool(state.get("hermes_plugin_connected")),
                 "onebot_mode": cfg.onebot_mode,

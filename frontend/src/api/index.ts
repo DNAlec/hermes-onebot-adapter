@@ -60,6 +60,8 @@ api.interceptors.response.use(
 
 export interface Status {
   adapter_version: string;
+  plugin_version: string | null;
+  version_mismatch: boolean;
   onebot_connected: boolean;
   hermes_plugin_connected: boolean;
   onebot_mode: string;

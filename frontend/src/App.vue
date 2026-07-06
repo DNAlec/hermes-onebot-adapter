@@ -34,6 +34,7 @@ onUnmounted(() => {
     <header class="topbar">
       <div class="topbar-left">
         <h1>Hermes OneBot Adapter</h1>
+        <span v-if="status" class="version-tag">v{{ status.adapter_version }}</span>
       </div>
       <nav>
         <RouterLink to="/">仪表盘</RouterLink>
@@ -132,6 +133,16 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: var(
   white-space: nowrap;
 }
 .logout-btn:hover { color: var(--danger); border-color: var(--danger); }
+
+.version-tag {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.15rem 0.4rem;
+  font-family: monospace;
+}
 
 .content { padding: 1.5rem; max-width: 1000px; width: 100%; margin: 0 auto; flex: 1; }
 

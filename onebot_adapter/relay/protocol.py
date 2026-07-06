@@ -31,6 +31,7 @@ TypeKind = Literal[
     "idle",
     "hermes_mode_report",
     "mode_refresh",
+    "plugin_info",
 ]
 
 ChatType = Literal["dm", "group"]
@@ -233,6 +234,13 @@ def mode_refresh_message() -> dict[str, Any]:
     """A->P: adapter service → Hermes plugin.  Ask the plugin to re-read
     Hermes config and push a fresh ``hermes_mode_report`` frame."""
     return envelope("mode_refresh")
+
+
+def plugin_info_message(plugin_version: str) -> dict[str, Any]:
+    """P->A: Hermes plugin → adapter service.  Plugin reports its own version
+    (read from ``plugin.yaml`` at startup) so the adapter can detect version
+    mismatches and warn the user in the WebUI."""
+    return envelope("plugin_info", plugin_version=plugin_version)
 
 
 def parse_chat_id(chat_id: str) -> tuple[bool, int]:
