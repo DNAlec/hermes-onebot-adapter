@@ -144,6 +144,9 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # receive loop is started so any commands_refresh request from the
         # adapter can also be handled.
         asyncio.create_task(self._push_commands_snapshot())
+        # Push Hermes' group_sessions_per_user so the adapter can decide
+        # whether shared-group queueing is needed.
+        asyncio.create_task(self._push_hermes_mode_report())
         return True
 
     async def _ws_connect(self) -> None:
@@ -237,6 +240,9 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 # Re-push commands snapshot after reconnect so the adapter has
                 # the latest registry even across WS drops.
                 asyncio.create_task(self._push_commands_snapshot())
+                # Re-push Hermes mode so the adapter has the current
+                # group_sessions_per_user value.
+                asyncio.create_task(self._push_hermes_mode_report())
                 delay = _RECONNECT_INITIAL_DELAY  # reset backoff on success
             except Exception as exc:
                 logger.warning("OneBot: reconnect failed: %s", exc)
@@ -300,6 +306,11 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if mtype == "commands_refresh":
             logger.info("OneBot: commands_refresh requested by adapter, re-pushing snapshot")
             asyncio.create_task(self._push_commands_snapshot())
+            return
+
+        if mtype == "mode_refresh":
+            logger.info("OneBot: mode_refresh requested by adapter, re-pushing hermes_mode_report")
+            asyncio.create_task(self._push_hermes_mode_report())
             return
 
         logger.debug("OneBot: unhandled frame type %s", mtype)
@@ -369,9 +380,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         the adapter service after a shared-group turn finishes.
 
         Conditions (all must hold):
-        - chat_id is ``group:<gid>`` form with NO ``:user:`` suffix (shared
-          group session; per_user group chats already isolate per-user in
-          Hermes and don't need queueing).
+        - chat_id is a group chat (``group:<gid>``).  DMs don't queue.
         - Hermes ``group_sessions_per_user`` is False — read from
           ``self.config.extra`` exactly like ``BasePlatformAdapter.handle_message``
           does at base.py:4606, so the plugin's notion of "shared" matches
@@ -384,8 +393,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if not _BASE_AVAILABLE or build_session_key is None or SessionSource is None:
             return
         chat_id = data.get("chat_id", "")
-        if not chat_id.startswith("group:") or ":user:" in chat_id[len("group:"):]:
-            return  # DM or per_user group — no queueing.
+        if not chat_id.startswith("group:"):
+            return  # DM — no queueing.
         try:
             group_sessions_per_user = self.config.extra.get("group_sessions_per_user", True)
         except Exception:
@@ -413,7 +422,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         active = getattr(self, "_active_sessions", {}).get(session_key)
         if active is not None:
             generation = getattr(active, "_hermes_run_generation", None)
-        gid = chat_id[len("group:"):].split(":", 1)[0]
+        gid = chat_id[len("group:"):]
         ws = self._ws
         if ws is None or ws.closed:
             return
@@ -499,6 +508,34 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.debug("OneBot: pushed commands_snapshot (%d commands) to adapter", len(cmds))
         except Exception:
             logger.exception("OneBot: failed to push commands_snapshot")
+
+    async def _push_hermes_mode_report(self) -> None:
+        """Read Hermes' ``group_sessions_per_user`` config and push it to the
+        adapter service as a ``hermes_mode_report`` frame.
+
+        Read from ``self.config.extra`` exactly like
+        ``BasePlatformAdapter.handle_message`` (base.py:4606) — Hermes injects
+        the top-level value into platform ``extra`` via setdefault in
+        ``_create_adapter`` (run.py:8355-8363).  Default True when missing.
+        """
+        if not self._ws or self._ws.closed:
+            return
+        try:
+            group_sessions_per_user = self.config.extra.get("group_sessions_per_user", True)
+        except Exception:
+            group_sessions_per_user = True
+        try:
+            await self._ws.send_json({
+                "type": "hermes_mode_report",
+                "v": 1,
+                "group_sessions_per_user": bool(group_sessions_per_user),
+            })
+            logger.debug(
+                "OneBot: pushed hermes_mode_report (group_sessions_per_user=%s) to adapter",
+                group_sessions_per_user,
+            )
+        except Exception:
+            logger.exception("OneBot: failed to push hermes_mode_report")
 
     # ── Outbound send helpers ────────────────────────────────────────────
 

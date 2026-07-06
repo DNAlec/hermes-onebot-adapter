@@ -104,16 +104,6 @@ async def test_format_send_line_text():
     assert "hello" in line
 
 
-async def test_format_send_line_per_user_chat_id():
-    """per_user 会话模式:chat_id 为 group:<gid>:user:<uid>,num_id 应取群号。"""
-    segs = [{"type": "text", "data": {"text": "hello"}}]
-    line = await format_send_line(
-        chat_id="group:42:user:100", segs=segs, is_group=True, group_name="TestGroup"
-    )
-    assert "[42(TestGroup)]" in line
-    assert "100" not in line.split("]")[0]  # user_id 不出现在群标签里
-
-
 async def test_format_send_line_dm():
     segs = [{"type": "text", "data": {"text": "hi"}}]
     line = await format_send_line(chat_id="2270892742", segs=segs, is_group=False)

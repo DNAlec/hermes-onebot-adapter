@@ -69,7 +69,7 @@ const groupCount = () => cfg.value ? Object.keys(cfg.value.groups || {}).length 
         <h3>群聊统计</h3>
         <dl>
           <dt>已配置群</dt><dd>{{ groupCount() }}</dd>
-          <dt>默认 Session</dt><dd>{{ cfg?.group_session_mode === 'per_user' ? '独立会话' : '共享会话' }}</dd>
+          <dt>群成员隔离</dt><dd>{{ status.hermes_group_sessions_per_user ? '是（每人独立会话）' : '否（全群共享会话）' }}</dd>
           <dt>全局管理员</dt><dd>{{ cfg?.global_admins?.length || 0 }} 人</dd>
         </dl>
       </div>

@@ -37,19 +37,17 @@ def test_group_config_defaults():
     gc = GroupConfig(group_id="123")
     assert gc.enabled is True
     assert gc.require_mention is None
-    assert gc.session_mode == "default"
     assert gc.custom_prompt == ""
     assert gc.admins == []
 
 
 def test_group_config_to_dict_roundtrip():
-    gc = GroupConfig(group_id="42", name="Test", admins=["1", "2"], session_mode="per_user")
+    gc = GroupConfig(group_id="42", name="Test", admins=["1", "2"])
     d = gc.to_dict()
     gc2 = GroupConfig.from_dict(d)
     assert gc2.group_id == "42"
     assert gc2.name == "Test"
     assert gc2.admins == ["1", "2"]
-    assert gc2.session_mode == "per_user"
 
 
 # ── AdapterConfig group/user helpers ─────────────────────────────────────
@@ -235,19 +233,6 @@ def test_resolve_reaction_emoji_group_none_follows_global():
 
 
 
-def test_resolve_session_mode_global():
-    cfg = AdapterConfig(group_session_mode="per_user")
-    assert cfg.resolve_session_mode("999") == "per_user"
-
-
-def test_resolve_session_mode_group_override():
-    cfg = AdapterConfig(
-    group_session_mode="shared",
-    groups={"42": GroupConfig(group_id="42", session_mode="per_user").to_dict()},
-)
-    assert cfg.resolve_session_mode("42") == "per_user"
-
-
 def test_resolve_custom_prompt_global_none():
     cfg = AdapterConfig()
     assert cfg.resolve_custom_prompt("999") is None
@@ -307,21 +292,9 @@ async def test_parser_group_disabled():
     assert result is None
 
 
-async def test_parser_group_session_per_user_chat_id():
-    cfg = AdapterConfig(group_require_mention=False,
-        groups={"42": GroupConfig(group_id="42", session_mode="per_user").to_dict()})
-    result = await parse_event(
-        _msg_event("hi", message_type="group", group_id=42, user_id=100),
-        self_id="999", group_require_mention=False,
-        config=cfg,
-    )
-    assert result is not None
-    event = result
-    assert event.chat_id == "group:42:user:100"
-
-
-async def test_parser_group_session_shared_chat_id():
-    cfg = AdapterConfig(group_require_mention=False, group_session_mode="shared")
+async def test_parser_group_chat_id():
+    """群聊 chat_id 固定为 group:<gid>(Hermes 自己决定是否隔离)。"""
+    cfg = AdapterConfig(group_require_mention=False)
     result = await parse_event(
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
         self_id="999", group_require_mention=False,

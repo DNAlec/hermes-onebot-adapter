@@ -134,12 +134,12 @@ class HermesRelayServer:
         # (plugin reissues the same payload with a fresh req_id when the
         # adapter's result frame times out).  Lazy TTL eviction on lookup.
         self._send_cache: dict[tuple[str, str, str, str], tuple[float, str]] = {}
-        # ── 群聊排队(shared 会话模式:同群不同人串行,同人放行)─────────
-        # busy_groups: group_id(str) -> (busy_user_id, busy_since_monotonic)
-        # queues:      group_id(str) -> deque[NormalizedEvent]
-        # 只有 chat_id 形如 ``group:<gid>``(无 ``:user:`` 后缀)的 shared
-        # 群聊才走排队;per_user(``group:<gid>:user:<uid>``)和私聊直接放行。
-        # /命令(text 以 "/" 开头)绕过排队直接放行(与 ring buffer 同思路)。
+        # ── 群聊排队 ──────────────────────────────────────────────────────
+        # Hermes 顶层 group_sessions_per_user 由插件上报(hermes_mode_report 帧)。
+        # True  → Hermes 每个群成员独立 session,无需排队(默认值,安全)
+        # False → 全群共享 session,需排队防止不同成员互相打断
+        # 排队生效条件:per_user=False AND config.event_queue_enabled=True
+        self._hermes_group_sessions_per_user: bool = True
         self._busy_groups: dict[str, tuple[str, float]] = {}
         self._queues: dict[str, deque[NormalizedEvent]] = {}
         self._watchdog_task: asyncio.Task[None] | None = None
@@ -156,12 +156,49 @@ class HermesRelayServer:
             while len(q) > new_cap:
                 q.popleft()
                 logger.warning("relay queue trimmed (config hot-reload): gid=%s", gid)
+        # 排队总开关从 True→False:清空所有 busy/queue,立即放行。
+        old_enabled = self._config.event_queue_enabled if hasattr(self, "_config") else True
+        if old_enabled and not config.event_queue_enabled:
+            if self._busy_groups:
+                logger.info(
+                    "relay: event_queue_enabled disabled, clearing %d busy group(s)",
+                    len(self._busy_groups),
+                )
+            self._busy_groups.clear()
+            self._queues.clear()
         self._config = config
 
     @property
     def commands(self) -> list[dict[str, Any]]:
         """Return the current slash-command registry as a list of dicts."""
         return list(self._commands.values())
+
+    @property
+    def hermes_group_sessions_per_user(self) -> bool:
+        """Hermes 顶层 group_sessions_per_user,由插件通过 hermes_mode_report 帧上报。
+
+        True=每个群成员独立 session(默认,安全);False=全群共享 session,排队有意义。
+        """
+        return self._hermes_group_sessions_per_user
+
+    def _store_hermes_mode(self, group_sessions_per_user: bool) -> None:
+        """缓存插件上报的 Hermes group_sessions_per_user 值。"""
+        old = self._hermes_group_sessions_per_user
+        self._hermes_group_sessions_per_user = bool(group_sessions_per_user)
+        if old != self._hermes_group_sessions_per_user:
+            logger.info(
+                "relay: hermes group_sessions_per_user updated: %s -> %s",
+                old, self._hermes_group_sessions_per_user,
+            )
+            # 从隔离→不隔离,排队可能突然生效;从非隔离→隔离,清空 busy/queue
+            if self._hermes_group_sessions_per_user:
+                if self._busy_groups:
+                    logger.info(
+                        "relay: per_user became True, clearing %d busy group(s)",
+                        len(self._busy_groups),
+                    )
+                self._busy_groups.clear()
+                self._queues.clear()
 
     def is_known_command(self, name: str) -> bool:
         """Check whether *name* (lowercase, without "/") is a registered
@@ -232,6 +269,19 @@ class HermesRelayServer:
                 await ws.send_json(commands_refresh_message())
             except Exception:
                 logger.warning("relay: failed to send commands_refresh to a client")
+                self._clients.discard(ws)
+
+    async def broadcast_mode_refresh(self) -> None:
+        """Send a ``mode_refresh`` frame to every connected plugin client,
+        asking it to re-read Hermes config and push a fresh
+        ``hermes_mode_report`` (current group_sessions_per_user)."""
+        from onebot_adapter.relay.protocol import mode_refresh_message
+
+        for ws in list(self._clients):
+            try:
+                await ws.send_json(mode_refresh_message())
+            except Exception:
+                logger.warning("relay: failed to send mode_refresh to a client")
                 self._clients.discard(ws)
 
     async def broadcast_self_id(self, self_id: str) -> None:
@@ -317,23 +367,26 @@ class HermesRelayServer:
     async def _enqueue_or_broadcast(self, event: NormalizedEvent) -> None:
         """Apply the per-chat queue policy then broadcast.
 
-        - private DMs and per_user group chats (``group:<gid>:user:<uid>``):
-          always broadcast immediately — each user has an independent Hermes
-          session, no cross-user interruption possible.
-        - shared group chats (``group:<gid>``, no ``:user:`` suffix):
-          serialize per group.  If the group is busy and the new message is
-          from a *different* user, queue it; if it's from the *same* user as
-          the in-flight turn, broadcast immediately (lets the user补充/打断
-          the current task).  ``/``-prefixed messages always bypass the
-          queue (slash commands must reach the gateway without delay).
+        排队生效条件(全部满足):
+        - chat_id 是群聊(``group:<gid>``);私聊直接放行
+        - Hermes 不隔离群成员(``group_sessions_per_user=False``,由插件上报)
+        - 适配器排队总开关打开(``event_queue_enabled=True``)
+        - 非 /命令(/命令绕过排队,与 ring buffer 同思路)
+
+        排队规则:群未 busy → 标记 busy 并广播;群 busy 且新消息来自同人 → 放行
+        (可补充当前任务);群 busy 且来自不同人 → 入队 FIFO。
         """
-        gid = self._shared_group_id(event)
+        gid = self._group_id_of(event)
         if gid is None:
-            # DM or per_user group — no queueing.
+            # 私聊 — 不排队
             await self._broadcast_event(event)
             return
-        # Slash commands bypass the queue regardless of busy state.
+        # /命令绕过排队
         if event.text.startswith("/"):
+            await self._broadcast_event(event)
+            return
+        # Hermes 隔离群成员 或 适配器总开关关 → 不排队
+        if self._hermes_group_sessions_per_user or not self._config.event_queue_enabled:
             await self._broadcast_event(event)
             return
         busy = self._busy_groups.get(gid)
@@ -365,19 +418,14 @@ class HermesRelayServer:
         )
 
     @staticmethod
-    def _shared_group_id(event: NormalizedEvent) -> str | None:
-        """Return the bare numeric group id when *event* belongs to a shared
-        group session (``chat_id`` == ``group:<gid>`` with no ``:user:``
-        suffix).  Returns ``None`` for DMs and per_user group sessions, which
-        are never queued.
+    def _group_id_of(event: NormalizedEvent) -> str | None:
+        """Return the bare numeric group id when *event* belongs to a group
+        chat (``chat_id`` == ``group:<gid>``).  Returns ``None`` for DMs.
         """
         cid = event.chat_id
         if not cid.startswith("group:"):
             return None
-        rest = cid[len("group:"):]
-        if ":user:" in rest:
-            return None
-        gid = rest.split(":", 1)[0]
+        gid = cid[len("group:"):]
         return gid or None
 
     def _ensure_watchdog(self) -> None:
@@ -557,6 +605,9 @@ class HermesRelayServer:
             return
         if mtype == "commands_snapshot":
             self._store_commands(data.get("commands", []) or [])
+            return
+        if mtype == "hermes_mode_report":
+            self._store_hermes_mode(bool(data.get("group_sessions_per_user", True)))
             return
         if mtype == "idle":
             await self._handle_idle(data)

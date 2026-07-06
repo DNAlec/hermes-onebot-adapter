@@ -147,7 +147,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
   "group_trigger_keywords": [],
   "group_keyword_first_only": false,
   "group_keep_mention": false,
-  "group_session_mode": "shared",
   "global_admins": [],
   "group_auto_join": false,
   "dm_user_filter_mode": "whitelist",
@@ -314,7 +313,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
       "trigger_keywords": [],
       "keyword_first_only": null,
       "keep_mention": null,
-      "session_mode": "default",
       "custom_prompt": "",
       "admins": [],
       "group_user_filter_mode": "blacklist",
@@ -525,7 +523,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `group_trigger_keywords` | string[] | `[]` | 群聊关键词触发列表 |
 | `group_keyword_first_only` | bool | `false` | True=关键词须在开头 |
 | `group_keep_mention` | bool | `false` | True=保留 @bot 段 |
-| `group_session_mode` | string | `"shared"` | 群会话模式：`shared` / `per_user` |
 | `global_admins` | string[] | `[]` | 全局管理员 QQ 号列表 |
 | `group_auto_join` | bool | `false` | 是否自动加入新群 |
 | `dm_user_filter_mode` | string | `"whitelist"` | 私聊过滤：`whitelist` / `blacklist` |
@@ -547,6 +544,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `log_retention_days` | int | `3` | 日志保留天数 |
 | `message_show_group_id` | bool | `false` | 消息是否显示群号标识 |
 | `seq_map_size` | int | `4500` | seq map 环形缓冲区大小 |
+| `event_queue_enabled` | bool | `true` | 群聊排队总开关：Hermes 不隔离群成员时是否排队 |
 | `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限丢弃最旧（详见[群聊消息排队](#群聊消息排队)） |
 | `event_queue_idle_timeout` | float | `300.0` | 群聊排队：plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy 状态 |
 | `command_filter_enabled` | bool | `false` | 指令过滤总开关 |
@@ -566,7 +564,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `trigger_keywords` | string[]\|null | `null` | 关键词列表（`[]`=强制禁用） |
 | `keyword_first_only` | bool\|null | `null` | 关键词须在开头 |
 | `keep_mention` | bool\|null | `null` | 保留 @ 段 |
-| `session_mode` | string | `"default"` | 会话模式：`default`/`shared`/`per_user` |
 | `custom_prompt` | string | `""` | 群专属提示词（覆盖全局 platform_hint） |
 | `admins` | string[] | `[]` | 群管理员 QQ 号 |
 | `group_user_filter_mode` | string | `"blacklist"` | 用户过滤：`whitelist`/`blacklist` |
@@ -583,22 +580,23 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ## 群聊消息排队
 
-适配器内置 shared 群聊消息排队机制，防止群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes 配置 `group_sessions_per_user: false`（全群共享 session）时生效**；`per_user` 模式每人独立 session，无需排队。
+适配器内置 shared 群聊消息排队机制，防止群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes 配置 `group_sessions_per_user: false`（全群共享 session）且适配器 `event_queue_enabled: true` 时生效**；`per_user` 模式每人独立 session，无需排队。
 
 ### 触发条件
 
-- 适配器收到的消息 `chat_id` 形如 `group:<gid>`（shared 群聊，无 `:user:` 后缀）
 - Hermes 端 `group_sessions_per_user=false`（插件读 `self.config.extra.get("group_sessions_per_user", True)` 判定，与 `BasePlatformAdapter.handle_message` 完全一致）
+- 适配器端 `event_queue_enabled=true`（WebUI 连接管理页可切换）
 
 ### 排队规则
 
 | 场景 | 行为 |
 |------|------|
 | 私聊（`chat_id` 为纯 QQ 号） | 直接转发，不排队 |
-| per_user 群聊（`group:<gid>:user:<uid>`） | 直接转发，不排队 |
-| shared 群聊未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
-| shared 群聊 busy，新消息同一发送者 | **直接转发**（同人可补充当前任务） |
-| shared 群聊 busy，新消息不同发送者 | 入队等待 |
+| Hermes 隔离群成员（per_user=True） | 直接转发，不排队 |
+| 适配器排队总开关关闭 | 直接转发，不排队 |
+| 群未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
+| 群 busy，新消息同一发送者 | **直接转发**（同人可补充当前任务） |
+| 群 busy，新消息不同发送者 | 入队等待 |
 | `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
 ### idle 信号

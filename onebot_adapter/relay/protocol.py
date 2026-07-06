@@ -29,6 +29,8 @@ TypeKind = Literal[
     "commands_refresh",
     "filtered",
     "idle",
+    "hermes_mode_report",
+    "mode_refresh",
 ]
 
 ChatType = Literal["dm", "group"]
@@ -217,21 +219,32 @@ def idle_message(chat_id: str, group_id: str) -> dict[str, Any]:
     return envelope("idle", chat_id=chat_id, group_id=group_id)
 
 
+def hermes_mode_report_message(group_sessions_per_user: bool) -> dict[str, Any]:
+    """P->A: Hermes plugin -> adapter service.  Plugin pushes Hermes' current
+    ``group_sessions_per_user`` config value so the adapter can decide whether
+    shared-group queueing is needed (False ⇒全群共享 session ⇒ 排队有意义;
+    True ⇒ 每人独立 session ⇒ 无需排队).  Sent on connect/reconnect and on
+    ``mode_refresh`` request.
+    """
+    return envelope("hermes_mode_report", group_sessions_per_user=bool(group_sessions_per_user))
+
+
+def mode_refresh_message() -> dict[str, Any]:
+    """A->P: adapter service → Hermes plugin.  Ask the plugin to re-read
+    Hermes config and push a fresh ``hermes_mode_report`` frame."""
+    return envelope("mode_refresh")
+
+
 def parse_chat_id(chat_id: str) -> tuple[bool, int]:
     """Parse a normalized chat_id into ``(is_group, numeric_id)``.
 
     Supported formats:
-      - ``"group:<gid>"``           → (True, <gid>)            shared session
-      - ``"group:<gid>:user:<uid>"`` → (True, <gid>)            per_user session
-      - ``"<uid>"``                 → (False, <uid>)           DM
+      - ``"group:<gid>"``  → (True, <gid>)   群聊(全群共享 session,Hermes 隔离由其自己配置决定)
+      - ``"<uid>"``        → (False, <uid>)  私聊
 
-    For per_user group sessions the user id is dropped (the message is still
-    sent to the group, not to the individual user).  Raises ``ValueError`` on
-    malformed input.
+    Raises ``ValueError`` on malformed input.
     """
     if chat_id.startswith("group:"):
-        rest = chat_id[len("group:"):]
-        # rest is "<gid>" or "<gid>:user:<uid>"
-        gid_str = rest.split(":", 1)[0]
+        gid_str = chat_id[len("group:"):]
         return True, int(gid_str)
     return False, int(chat_id)
