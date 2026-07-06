@@ -3,9 +3,9 @@ from onebot_adapter.relay.protocol import (
     MediaDescriptor,
     NormalizedEvent,
     event_message,
-    media_message,
     ready_message,
     result_message,
+    send_media_message,
     send_message,
 )
 
@@ -59,7 +59,7 @@ def test_protocol_envelopes():
     )
     assert event_message(ev)["type"] == "event"
     assert ready_message(True, "0.1.0")["onebot_connected"] is True
-    assert media_message(MediaDescriptor(id="m1", mime="image/jpeg"))["type"] == "media"
+    assert send_media_message(MediaDescriptor(id="m1", mime="image/jpeg"))["type"] == "send_media"
     assert send_message("send_text", "r1", "group:42", content="x")["action"] == "send_text"
     assert result_message("r1", True, message_id="9")["success"] is True
 

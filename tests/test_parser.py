@@ -43,7 +43,6 @@ async def test_parse_private_text():
     assert event.text == "hello"
     assert event.chat_id == "100"
     assert event.chat_type == "dm"
-    assert event.message_type == "text"
 
 
 async def test_parse_group_with_mention():
@@ -275,7 +274,6 @@ async def test_parse_image_url_placeholder():
     )
     assert result is not None
     event = result
-    assert event.message_type == "text"
     assert "[图1](http://x/img.png)" in event.text
 
 
@@ -294,7 +292,6 @@ async def test_parse_reply_with_image():
     )
     assert result is not None
     event = result
-    assert event.message_type == "text"
     assert "[图1](http://x/q.png)" in event.reply_to_text
 
 

@@ -19,8 +19,6 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
-
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot import segments as seg
 from onebot_adapter.relay.protocol import FilteredEvent, NormalizedEvent
@@ -234,7 +232,6 @@ async def parse_event(
     self_id: str,
     group_require_mention: bool,
     api: Any = None,
-    session: aiohttp.ClientSession | None = None,
     config: AdapterConfig | None = None,
     name_resolver: NameResolver | None = None,
     mention_first_only: bool = False,
@@ -457,7 +454,6 @@ async def parse_event(
         user_id=sender_id,
         user_name=sender_name,
         text=text,
-        message_type="text",
         reply_to_message_id=str(reply_to_id) if reply_to_id else None,
         reply_to_text=reply_to_text,
         timestamp=float(event.get("time", 0) or 0),
@@ -468,8 +464,8 @@ async def parse_event(
         raw=event,
     )
     logger.debug(
-        "parse_event: normalized chat_id=%s msg_type=%s text_preview=%r",
-        norm.chat_id, norm.message_type, (norm.text or "")[:120],
+        "parse_event: normalized chat_id=%s text_preview=%r",
+        norm.chat_id, (norm.text or "")[:120],
     )
     return norm
 

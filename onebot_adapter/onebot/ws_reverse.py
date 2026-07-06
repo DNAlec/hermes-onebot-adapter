@@ -117,7 +117,6 @@ class OneBotReverseServer:
             keyword_first_only=self._config.group_keyword_first_only,
             keep_mention=self._config.group_keep_mention,
             api=self._api,
-            session=self._session,
             config=self._config,
             name_resolver=self._name_resolver,
             is_known_command_fn=self._is_known_command_fn,

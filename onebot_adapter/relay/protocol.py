@@ -1,8 +1,10 @@
 """Normalized wire protocol between the adapter service and the Hermes plugin.
 
-All text frames are JSON objects with a ``type`` field. Media payloads are
-carried as WebSocket binary frames, preceded by a ``media`` control message
-that announces the binary frame's id and metadata.
+All text frames are JSON objects with a ``type`` field.  Binary frames are
+used **only** for the outbound (plugin → adapter) ``send_media`` path: the
+plugin uploads image/voice/video/document bytes, and the adapter writes them
+to a temp file before forwarding to OneBot.  Inbound (adapter → plugin) events
+carry media as URL placeholders in the event text — no binary frames.
 
 Direction notation:
   A->P : adapter service -> Hermes plugin (inbound events, responses)
@@ -19,7 +21,6 @@ TypeKind = Literal[
     "ready",
     "ping",
     "pong",
-    "media",
     "event",
     "send",
     "send_media",
@@ -31,7 +32,6 @@ TypeKind = Literal[
     "filtered",
 ]
 
-MessageType = Literal["text", "photo", "voice", "video", "document", "mixed"]
 ChatType = Literal["dm", "group"]
 SendAction = Literal["send_text", "send_image", "send_voice", "send_video", "send_document"]
 
@@ -54,20 +54,14 @@ class MediaDescriptor:
 
 
 @dataclass
-class MediaPayload:
-    """A media descriptor plus its raw bytes, ready to ship over WS."""
-
-    descriptor: MediaDescriptor
-    data: bytes
-
-    @property
-    def id(self) -> str:
-        return self.descriptor.id
-
-
-@dataclass
 class NormalizedEvent:
-    """OneBot 11 event reduced to a Hermes-neutral shape."""
+    """OneBot 11 event reduced to a Hermes-neutral shape.
+
+    Media is NOT included as binary payloads — all images/videos/voice/files
+    are rendered as URL placeholders in ``text`` (e.g. ``[图1](https://...)``)
+    so the LLM can fetch them on demand.  ``message_type`` is always ``"text"``
+    for this reason.
+    """
 
     message_id: str
     chat_id: str
@@ -75,7 +69,6 @@ class NormalizedEvent:
     user_id: str
     user_name: str
     text: str
-    message_type: MessageType = "text"
     reply_to_message_id: str | None = None
     reply_to_text: str | None = None
     timestamp: float = 0.0
@@ -93,7 +86,6 @@ class NormalizedEvent:
             "user_id": self.user_id,
             "user_name": self.user_name,
             "text": self.text,
-            "message_type": self.message_type,
             "reply_to_message_id": self.reply_to_message_id,
             "reply_to_text": self.reply_to_text,
             "timestamp": self.timestamp,
@@ -164,10 +156,6 @@ def ready_message(onebot_connected: bool, adapter_version: str, self_id: str = "
         adapter_version=adapter_version,
         self_id=self_id,
     )
-
-
-def media_message(media: MediaDescriptor) -> dict[str, Any]:
-    return envelope("media", **media.to_dict())
 
 
 def event_message(event: NormalizedEvent) -> dict[str, Any]:

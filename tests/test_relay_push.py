@@ -22,7 +22,7 @@ def _make_relay():
     return relay, mock_api, cfg
 
 
-def _make_event(text: str = "hello", msg_type: str = "text") -> NormalizedEvent:
+def _make_event(text: str = "hello") -> NormalizedEvent:
     return NormalizedEvent(
         message_id="1",
         chat_id="100",
@@ -30,7 +30,6 @@ def _make_event(text: str = "hello", msg_type: str = "text") -> NormalizedEvent:
         user_id="u1",
         user_name="Alice",
         text=text,
-        message_type=msg_type,  # type: ignore[arg-type]
         chat_name="Alice",
     )
 
