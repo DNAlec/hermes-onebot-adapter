@@ -143,6 +143,8 @@ class HermesRelayServer:
         self._busy_groups: dict[str, tuple[str, float]] = {}
         self._queues: dict[str, deque[NormalizedEvent]] = {}
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._plugin_version: str | None = None
+        self._version_mismatch: bool = True
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the server (route stays bound)."""
@@ -181,6 +183,19 @@ class HermesRelayServer:
         """
         return self._hermes_group_sessions_per_user
 
+    @property
+    def plugin_version(self) -> str | None:
+        """插件上报的版本号,插件未连接时为 None。"""
+        return self._plugin_version
+
+    @property
+    def version_mismatch(self) -> bool:
+        """插件版本与适配器版本是否不匹配。
+
+        True 表示版本不一致(含插件未连接/未上报),WebUI 应提示重新安装插件。
+        """
+        return self._version_mismatch
+
     def _store_hermes_mode(self, group_sessions_per_user: bool) -> None:
         """缓存插件上报的 Hermes group_sessions_per_user 值。"""
         old = self._hermes_group_sessions_per_user
@@ -199,6 +214,18 @@ class HermesRelayServer:
                     )
                 self._busy_groups.clear()
                 self._queues.clear()
+
+    def _store_plugin_version(self, plugin_version: str) -> None:
+        """缓存插件上报的版本号并比对。"""
+        self._plugin_version = plugin_version
+        self._version_mismatch = plugin_version != self._adapter_version
+        if self._version_mismatch:
+            logger.warning(
+                "relay: plugin version mismatch — adapter=%s plugin=%s",
+                self._adapter_version, plugin_version,
+            )
+        else:
+            logger.info("relay: plugin version matches adapter (%s)", plugin_version)
 
     def is_known_command(self, name: str) -> bool:
         """Check whether *name* (lowercase, without "/") is a registered
@@ -346,6 +373,8 @@ class HermesRelayServer:
                     )
                 self._busy_groups.clear()
                 self._queues.clear()
+                self._plugin_version = None
+                self._version_mismatch = True
             logger.info("Hermes plugin WS disconnected")
         return ws
 
@@ -611,6 +640,9 @@ class HermesRelayServer:
             return
         if mtype == "idle":
             await self._handle_idle(data)
+            return
+        if mtype == "plugin_info":
+            self._store_plugin_version(str(data.get("plugin_version", "")))
             return
         await ws.send_json(error_message("unknown_type", f"unknown type {mtype!r}"))
 

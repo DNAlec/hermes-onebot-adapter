@@ -17,8 +17,10 @@ import json
 import logging
 import os
 import random
+import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -56,6 +58,20 @@ _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
 _RECONNECT_INITIAL_DELAY = 1.0
 _RECONNECT_MAX_DELAY = 30.0
+
+_PLUGIN_YAML_PATH = Path(__file__).parent / "plugin.yaml"
+_VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
+
+
+def _read_plugin_version() -> str:
+    try:
+        text = _PLUGIN_YAML_PATH.read_text(encoding="utf-8")
+        m = _VERSION_RE.search(text)
+        if m:
+            return m.group(1).strip().strip("\"'")
+    except (OSError, FileNotFoundError):
+        pass
+    return "unknown"
 
 
 class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
@@ -95,6 +111,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._current_is_admin = False
         self._current_group_id = ""
         self._current_user_id = ""
+        self._plugin_version = _read_plugin_version()
 
         # Inject self into onebot_tools so tool handlers can call _api_call
         try:
@@ -147,6 +164,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # Push Hermes' group_sessions_per_user so the adapter can decide
         # whether shared-group queueing is needed.
         asyncio.create_task(self._push_hermes_mode_report())
+        # Push installed plugin version so the adapter can detect mismatches.
+        asyncio.create_task(self._push_plugin_info())
         return True
 
     async def _ws_connect(self) -> None:
@@ -243,6 +262,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 # Re-push Hermes mode so the adapter has the current
                 # group_sessions_per_user value.
                 asyncio.create_task(self._push_hermes_mode_report())
+                # Re-push plugin version.
+                asyncio.create_task(self._push_plugin_info())
                 delay = _RECONNECT_INITIAL_DELAY  # reset backoff on success
             except Exception as exc:
                 logger.warning("OneBot: reconnect failed: %s", exc)
@@ -508,6 +529,21 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.debug("OneBot: pushed commands_snapshot (%d commands) to adapter", len(cmds))
         except Exception:
             logger.exception("OneBot: failed to push commands_snapshot")
+
+    async def _push_plugin_info(self) -> None:
+        """Push the installed plugin version to the adapter service.
+        Sent once on initial connect so the adapter can detect mismatches."""
+        if not self._ws or self._ws.closed:
+            return
+        try:
+            await self._ws.send_json({
+                "type": "plugin_info",
+                "v": 1,
+                "plugin_version": self._plugin_version,
+            })
+            logger.debug("OneBot: pushed plugin_info (version=%s) to adapter", self._plugin_version)
+        except Exception:
+            logger.exception("OneBot: failed to push plugin_info")
 
     async def _push_hermes_mode_report(self) -> None:
         """Read Hermes' ``group_sessions_per_user`` config and push it to the

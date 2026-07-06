@@ -10,6 +10,8 @@ import os
 import shutil
 from pathlib import Path
 
+from ruamel.yaml import YAML
+
 from onebot_adapter import __version__
 
 logger = logging.getLogger(__name__)
@@ -86,11 +88,18 @@ def install(
 
     # Copy plugin files
     dest.mkdir(parents=True, exist_ok=True)
+    _yaml = YAML()
     for fname in _PLUGIN_FILES:
         src_file = PLUGIN_SRC / fname
         if not src_file.exists():
             continue
-        shutil.copy2(src_file, dest / fname)
+        if fname == "plugin.yaml":
+            data = _yaml.load(src_file.read_text(encoding="utf-8"))
+            data["version"] = __version__
+            out_path = dest / fname
+            _yaml.dump(data, out_path)
+        else:
+            shutil.copy2(src_file, dest / fname)
         result["copied"].append(fname)
 
     # Clean stale .pyc
