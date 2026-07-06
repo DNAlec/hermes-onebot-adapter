@@ -124,7 +124,7 @@ def test_save_config_includes_comments(tmp_path):
     assert "_comment_onebot_mode" in data
     assert "_comment_onebot_ws_token" in data
     assert "_comment_hermes_ws_token" in data
-    assert "_comment_group_session_mode" in data
+    assert "_comment_webui_token_lifetime_hours" in data
     assert "_comment_dm_user_filter_mode" in data
     assert "_comment_log_level" in data
     assert "_comment_groups" in data

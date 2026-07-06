@@ -310,13 +310,11 @@ async def parse_event(
             return None
         is_admin = config.is_admin(sender_id)
 
-    # ── Session mode → chat_id ────────────────────────────────────────
+    # ── chat_id ──────────────────────────────────────────────────────
+    # 群聊固定发 group:<gid>;Hermes 端的 session 隔离由其自己的
+    # group_sessions_per_user 配置决定(适配器通过插件上报获知,用于排队判定)。
     if is_group:
-        session_mode = config.resolve_session_mode(group_id) if config else "shared"
-        if session_mode == "per_user":
-            chat_id = f"group:{group_id}:user:{sender_id}"
-        else:
-            chat_id = f"group:{group_id}"
+        chat_id = f"group:{group_id}"
     else:
         chat_id = sender_id
 

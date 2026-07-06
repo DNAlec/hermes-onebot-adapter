@@ -21,10 +21,6 @@ NAPCAT_MODE_REVERSE = "reverse"
 NAPCAT_MODE_FORWARD = "forward"
 _VALID_MODES = {NAPCAT_MODE_REVERSE, NAPCAT_MODE_FORWARD}
 
-SESSION_SHARED = "shared"
-SESSION_PER_USER = "per_user"
-_VALID_SESSION_MODES = {SESSION_SHARED, SESSION_PER_USER}
-
 USER_FILTER_WHITELIST = "whitelist"
 USER_FILTER_BLACKLIST = "blacklist"
 _VALID_USER_FILTER_MODES = {USER_FILTER_WHITELIST, USER_FILTER_BLACKLIST}
@@ -42,8 +38,7 @@ DEFAULT_PLATFORM_HINT = (
     "群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n"
     "# chat_id 格式\n"
     "- 私聊: <QQ号>(如 100)\n"
-    "- 群聊(默认 shared 模式): group:<群号>(如 group:42)\n"
-    "- 群聊 per_user 会话模式: group:<群号>:user:<QQ号>(如 group:42:user:100)\n\n"
+    "- 群聊: group:<群号>(如 group:42)\n\n"
     "# 入站消息格式(你看到的样子)\n"
     "- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n"
     "  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n"
@@ -89,7 +84,6 @@ class GroupConfig:
     trigger_keywords: list[str] | None = None  # None=跟随全局，[] = 强制禁用关键词
     keyword_first_only: bool | None = None   # None=跟随全局，True=关键词须在开头
     keep_mention: bool | None = None         # None=跟随全局，True=保留@bot段
-    session_mode: str = "default"             # "default" | "shared" | "per_user"
     custom_prompt: str = ""                   # 空=用全局 platform_hint
     admins: list[str] = field(default_factory=list)
     # ── 群成员准入（黑名单/白名单）──
@@ -143,7 +137,6 @@ class AdapterConfig:
     group_trigger_keywords: list[str] = field(default_factory=list)  # 关键词触发，空=不启用
     group_keyword_first_only: bool = False       # True=关键词须出现在文本开头
     group_keep_mention: bool = False              # True=触发后保留@bot段（不 strip）
-    group_session_mode: str = SESSION_SHARED
     global_admins: list[str] = field(default_factory=list)
     group_auto_join: bool = False
 
@@ -177,7 +170,8 @@ class AdapterConfig:
     send_dedup_enabled: bool = True
     send_dedup_ttl_seconds: float = 10.0
 
-    # ── 群聊消息排队(shared 会话模式:同群不同人串行,同人放行)──
+    # ── 群聊消息排队(仅在 Hermes group_sessions_per_user=false 全群共享 session 时生效)──
+    event_queue_enabled: bool = True            # 总开关:Hermes 不隔离群成员时是否排队
     event_queue_max_per_chat: int = 50          # 单群排队上限,超限丢弃最旧
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
 
@@ -193,8 +187,6 @@ class AdapterConfig:
             errors.append(f"onebot_mode must be one of {sorted(_VALID_MODES)}")
         if self.onebot_mode == NAPCAT_MODE_FORWARD and not self.onebot_forward_ws_url:
             errors.append("onebot_forward_ws_url required when onebot_mode=forward")
-        if self.group_session_mode not in _VALID_SESSION_MODES:
-            errors.append(f"group_session_mode must be one of {sorted(_VALID_SESSION_MODES)}")
         if self.log_message_preview < 0:
             errors.append("log_message_preview must be non-negative")
         if self.log_retention_days < 1:
@@ -244,8 +236,6 @@ class AdapterConfig:
                 errors.append(f"group {gid} auto_join must be bool")
             if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
                 errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
-            if gc.session_mode not in _VALID_SESSION_MODES and gc.session_mode != "default":
-                errors.append(f"group {gid} session_mode must be one of {sorted(_VALID_SESSION_MODES | {'default'})}")
             if gc.command_permissions is not None:
                 for cmd, perm in gc.command_permissions.items():
                     if perm not in _VALID_COMMAND_PERM_LEVELS:
@@ -318,12 +308,6 @@ class AdapterConfig:
         if gc.keep_mention is not None:
             return gc.keep_mention
         return self.group_keep_mention
-
-    def resolve_session_mode(self, group_id: str) -> str:
-        gc = self.get_group_config(group_id)
-        if gc.session_mode == "default":
-            return self.group_session_mode
-        return gc.session_mode
 
     def resolve_custom_prompt(self, group_id: str) -> str | None:
         gc = self.get_group_config(group_id)
@@ -463,12 +447,13 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "webui_token": "WebUI 登录鉴权 token,自动生成,请勿清空",
         "webui_token_lifetime_hours": "WebUI 登录有效期(小时),最小 1,默认 168(7天);改后已登录会话立即失效",
         "webui_token_epoch": "token 纪元(内部状态,勿手动修改);改 lifetime 时自动递增使旧 session token 失效",
-        "group_session_mode": "可选值: shared(共享会话,默认) | per_user(独立会话)",
         "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
         "reaction_emoji_enabled": "消息送达 Hermes 后在原消息贴表情回应;群配置可单独覆盖",
         "reaction_emoji_id": "贴表情回应使用的表情ID(默认 76=👍),QQ 表情编号",
+        "event_queue_enabled": "群聊排队总开关:Hermes 不隔离群成员(group_sessions_per_user=false)时,"
+                              "是否对群消息排队串行处理",
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限丢弃最旧",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
     }
