@@ -18,26 +18,15 @@ _cache: dict | None = None
 _cache_at: float = 0.0
 
 _TAG_RE = re.compile(r"^v?(\d+\.\d+\.\S+)$")
-_GIT_DESCRIBE_RE = re.compile(r"^(\d+\.\d+\.\S+?)(?:-\d+-g[0-9a-f]+)?(?:-dirty)?$")
+_DEV_SUFFIX_RE = re.compile(r"\.dev\d+.*$")
 
 
 def _parse_version(raw: str) -> Version | None:
+    base = _DEV_SUFFIX_RE.sub("", raw)
     try:
-        return Version(raw)
+        return Version(base)
     except InvalidVersion:
-        pass
-    stripped = raw.removesuffix("-dirty")
-    try:
-        return Version(stripped)
-    except InvalidVersion:
-        pass
-    m = _GIT_DESCRIBE_RE.match(raw)
-    if m:
-        try:
-            return Version(m.group(1))
-        except InvalidVersion:
-            pass
-    return None
+        return None
 
 
 async def check_for_updates() -> dict:
