@@ -61,9 +61,9 @@ Key modules:
 - `onebot_adapter/onebot/ws_api.py` — `WsApiTransport`: OneBot 11 API 调用的 WebSocket 传输层。用 `echo` 字段做请求-响应关联(`dict[echo, asyncio.Future]`)。`register(ws)`/`unregister(ws)` 在 WS 连接建立/断开时由 `ws_reverse`/`ws_forward` 调用;`on_text(raw)` 在 `_handle_text` 开头先被调用,命中 pending echo 的响应帧被拦截并 resolve 对应 future(返回 True),否则返回 False 交给 parser。`request(action, params, timeout)` 分配 uuid4 echo,`ws.send_json`,await future。无活跃连接抛 `RuntimeError`;WS 断开 reject 所有 pending。多连接场景(`reverse` 多实例拨入)取第一个活跃 ws 发请求。
 - `onebot_adapter/onebot/api.py` — `OneBotApi`:通过注入的 `WsApiTransport` 在同一条 OneBot WS 连接上发送所有 API 调用。`send_group_msg`/`get_login_info`/`get_msg` 等方法封装常用 action,上层 `relay/hermes_ws`、`webui/routes`、`name_resolver`、`parser` 统一调用。**不再有独立的 HTTP API 端口/配置**(历史字段 `onebot_http_api`/`onebot_access_token` 已删除)。
 - `onebot_adapter/relay/protocol.py` — wire protocol between adapter service and plugin. `NormalizedEvent`, `FilteredEvent`, `CommandInfo` dataclasses. All frames are JSON with `type` + `v` fields. `NormalizedEvent.real_seq` carries the NapCat per-group sequence (empty when absent).
-- `onebot_adapter/relay/hermes_ws.py` — `HermesRelayServer`: WS endpoint the plugin connects to. Stores the slash-command registry pushed by the plugin (`commands_snapshot` frame). `is_known_command()` / `canonical_command_name()` feed the parser's /command filter. Ring buffer (`_RING_BUFFER_SIZE=50`, `_RING_BUFFER_MAX_AGE=30s`) replays recent text-only events to reconnecting plugins; entries older than 30s are skipped **and slash commands (text starting with `/`) are never buffered** — both prevent stale `/restart` commands from creating an infinite restart loop across gateway restarts. No binary frames are sent on the /hermes WS (media is URL passthrough).
+- `onebot_adapter/relay/hermes_ws.py` — `HermesRelayServer`: WS endpoint the plugin connects to. Stores the slash-command registry pushed by the plugin (`commands_snapshot` frame). `is_known_command()` / `canonical_command_name()` feed the parser's /command filter. Ring buffer (`_RING_BUFFER_SIZE=50`, `_RING_BUFFER_MAX_AGE=30s`) replays recent text-only events to reconnecting plugins; entries older than 30s are skipped **and slash commands (text starting with `/`) are never buffered** — both prevent stale `/restart` commands from creating an infinite restart loop across gateway restarts. No binary frames are sent on the /hermes WS (media is URL passthrough). **群聊排队**：`_enqueue_or_broadcast` 按 chat_id 形式判定排队策略；`_handle_idle` 处理插件发来的 idle 帧；`_watchdog_loop` 兜底超时。详见下方"群聊消息排队"段。
 - `onebot_adapter/onebot/ws_reverse.py` / `ws_forward.py` — OneBot transport (reverse WS server / forward WS client). Both call `parse_event()` with the same params and handle `FilteredEvent` via an `on_filtered` callback. Both register/unregister their WS with `WsApiTransport` on connect/disconnect, and call `transport.on_text(raw)` at the top of `_handle_text` to intercept API response frames before the parser sees them.
-- `onebot_adapter/hermes_plugin/adapter.py` — `OneBotAdapter(BasePlatformAdapter)` runs inside the Hermes gateway. Imports from `gateway.*` and `hermes_cli.*` are lazy (try/except) so the file is importable standalone. On connect/reconnect it pushes a `commands_snapshot` frame built from `hermes_cli.commands.COMMAND_REGISTRY` + `hermes_cli.plugins.get_plugin_commands()`. `_handle_event` sets `_current_group_id` for tool-layer seq resolution. Media is received as URL placeholders in event text (no binary frames, no `cache_*_from_bytes` imports). Outbound sends pass file paths/URLs as strings in the JSON `send` frame — no binary upload, no `send_bytes`.
+- `onebot_adapter/hermes_plugin/adapter.py` — `OneBotAdapter(BasePlatformAdapter)` runs inside the Hermes gateway. Imports from `gateway.*` and `hermes_cli.*` are lazy (try/except) so the file is importable standalone. On connect/reconnect it pushes a `commands_snapshot` frame built from `hermes_cli.commands.COMMAND_REGISTRY` + `hermes_cli.plugins.get_plugin_commands()`. `_handle_event` sets `_current_group_id` for tool-layer seq resolution and calls `_maybe_register_idle_callback` to register a `register_post_delivery_callback` hook for shared-group queueing (see "群聊消息排队" section). Media is received as URL placeholders in event text (no binary frames, no `cache_*_from_bytes` imports). Outbound sends pass file paths/URLs as strings in the JSON `send` frame — no binary upload, no `send_bytes`.
 - `onebot_adapter/hermes_plugin/onebot_tools.py` — OneBot API tools. Tool schemas use `real_seq` (the prefix-shown group sequence); `onebot_get_group_msg_history` keeps `message_seq` (actually accepts NapCat short `message_id`, **not** `real_seq`). `onebot_get_forward_msg` keeps `message_id` (forward id, not a sequence). Tools pass `real_seq` + `group_id` to the adapter; the adapter's `_handle_api_call` intercepts and converts via SeqMap.
 - `onebot_adapter/onebot/seq_map.py` — `SeqMap`: **global FIFO** `real_seq → message_id` ring buffer (configurable via `seq_map_size`, default 4500, aligned with NapCat's 5000-entry `MessageUnique` LRU). Populated in `ws_reverse`/`ws_forward` `_handle_text` **before** parser gating (all messages, not just triggered ones) and in `HermesRelayServer._handle_send` for bot's own outgoing messages (via `get_msg` to fetch `real_seq`). Used by `HermesRelayServer._resolve_seq_params` to convert LLM-supplied `real_seq` back to `message_id` for OneBot API calls. On miss, passes through `real_seq` as `message_id` (go-cqhttp/Lagrange compat).
 - `onebot_adapter/webui/routes.py` — REST API + static SPA hosting. Static dir search order: package `webui/static/` → `frontend/dist/` → site-packages. `/api/send` and `/api/groups` call `api.call()` / `send_group_msg` which ride the WS API transport.
@@ -81,6 +81,32 @@ Key modules:
 ## /command filter
 
 Implemented across `config.py` (permission model), `parser.py` (`_check_command_filter` + `_extract_command_name`), `relay/protocol.py` (`FilteredEvent`, `CommandInfo`), `hermes_plugin/adapter.py` (`_collect_commands` → `commands_snapshot`), `relay/hermes_ws.py` (`_store_commands`, `send_reject_message`). Permission levels: `everyone` / `admin` / `disabled` / unconfigured (passthrough). Filtering runs **before** media download. Denied commands return `FilteredEvent`; the service sends the reject message via the OneBot HTTP API and does not forward to Hermes.
+
+## 群聊消息排队（shared 会话串行化）
+
+防止 shared 群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes `group_sessions_per_user=false`（全群共享 session）时生效**；per_user 模式每人独立 session，无需排队。
+
+**机制**：适配器侧 `HermesRelayServer` 维护 per-group busy 槽 + FIFO 队列；插件侧利用 Hermes 已有的 `register_post_delivery_callback` hook（base.py:3919），在 shared 群聊每轮处理完成后发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧给适配器，适配器 dequeue 下一条。
+
+**判定规则**（`HermesRelayServer._enqueue_or_broadcast`）：
+- 私聊、per_user 群聊（`chat_id` 含 `:user:`）：直接广播，不排队
+- shared 群聊（`chat_id == group:<gid>`，无 `:user:`）：
+  - 群未 busy → 标记 busy（记录 user_id + 时间戳），广播
+  - 群 busy 且新消息 user_id == busy_user_id → **直接放行**（同人可补充当前任务）
+  - 群 busy 且 user_id 不同 → 入队 `self._queues[gid]`（FIFO）
+- `/` 开头的消息：**始终绕过排队直接广播**（与 ring buffer 跳过 /command 同思路）
+
+**插件侧判定**（`hermes_plugin/adapter.py::_maybe_register_idle_callback`）：读 `self.config.extra.get("group_sessions_per_user", True)`——与 `BasePlatformAdapter.handle_message`（base.py:4606）完全一致（Hermes 在 `_create_adapter` 时通过 `config.extra.setdefault("group_sessions_per_user", self.config.group_sessions_per_user)` 把顶层值注入 platform extra，run.py:8355-8363）。只有 `group_sessions_per_user=False` 且 chat_id 是 shared 群聊形式时才注册 post_delivery callback。callback 用 `generation` 关联当前 gateway run，防 stale run 错误触发 idle。
+
+**看门狗**（`_watchdog_loop`）：周期扫 `_busy_groups`，超过 `event_queue_idle_timeout`（默认 300s，可配置）未收到 idle 帧则强制清空 busy 并派发下一条。兜底 plugin 崩溃 / idle 帧丢失导致永久卡死。
+
+**清理时机**：最后一个 plugin client 断开时清空所有 busy/queue（无人发 idle，留着只会等看门狗超时）；`stop()` 取消 watchdog 并清空状态；ring buffer replay 开始时清空 queue/busy（重新建立状态）。
+
+**与 ring buffer 的关系**：push_event 始终写 ring buffer（用于 plugin 重连重放）；replay 时走 `_enqueue_or_broadcast` 重新评估排队状态，避免重连瞬间把多条 shared 群消息一次性推给 plugin。
+
+**配置**（`config.py`，WebUI 高级设置页可调）：
+- `event_queue_max_per_chat`（默认 50）：单群队列上限，超限丢弃最旧
+- `event_queue_idle_timeout`（默认 300.0 秒）：看门狗超时阈值
 
 ## Config file
 

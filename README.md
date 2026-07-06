@@ -192,6 +192,32 @@ ws://127.0.0.1:3001
 
 被过滤的指令会通过 OneBot HTTP API 向原聊天发送拒绝消息，不会送入 Hermes 处理。指令过滤在媒体下载之前执行，避免浪费带宽。
 
+## 群聊消息排队
+
+适配器内置 shared 群聊消息排队机制，防止群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes 配置 `group_sessions_per_user: false`（全群共享 session）时生效**；`per_user` 模式每人独立 session，无需排队。
+
+### 排队规则
+
+| 场景 | 行为 |
+|------|------|
+| 私聊 | 直接转发，不排队 |
+| per_user 群聊（`group:<gid>:user:<uid>`） | 直接转发，不排队 |
+| shared 群聊未 busy | 标记 busy，转发 |
+| shared 群聊 busy，新消息同一发送者 | **直接转发**（同人可补充当前任务） |
+| shared 群聊 busy，新消息不同发送者 | 入队等待 |
+| `/` 开头的消息 | **始终直接转发**（绕过排队） |
+
+### idle 信号
+
+处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后插件向适配器发 `idle` 帧，适配器清空 busy 并从队列取下一条转发。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
+
+### 配置项（WebUI「高级设置」页面）
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `event_queue_max_per_chat` | `50` | 单群队列上限，超限丢弃最旧 |
+| `event_queue_idle_timeout` | `300.0` | plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy |
+
 ## 开发
 
 ```bash

@@ -134,6 +134,9 @@ export interface Config {
   // ── 发送去重 ──
   send_dedup_enabled: boolean;
   send_dedup_ttl_seconds: number;
+  // ── 群聊排队 ──
+  event_queue_max_per_chat: number;
+  event_queue_idle_timeout: number;
   // ── /指令过滤 ──
   command_filter_enabled: boolean;
   command_filter_unknown: boolean;

@@ -28,6 +28,7 @@ TypeKind = Literal[
     "commands_snapshot",
     "commands_refresh",
     "filtered",
+    "idle",
 ]
 
 ChatType = Literal["dm", "group"]
@@ -201,6 +202,19 @@ def filtered_message(event: FilteredEvent) -> dict[str, Any]:
     forwarded to the Hermes plugin as a regular ``event``).  Delivered to the
     adapter service's ``on_filtered`` callback so it can send a reject reply."""
     return envelope("filtered", **event.to_dict())
+
+
+def idle_message(chat_id: str, group_id: str) -> dict[str, Any]:
+    """P->A: Hermes plugin -> adapter service.  Plugin fires this after a
+    shared-group session finishes processing a turn (via the host's
+    ``register_post_delivery_callback`` hook).  The adapter uses it as the
+    "busy -> idle" signal to dequeue the next queued message for that group.
+
+    ``chat_id`` is the original event chat_id (``group:<gid>`` form, no
+    ``:user:`` suffix — only shared groups send idle).  ``group_id`` is the
+    bare numeric group id used as the queue key.
+    """
+    return envelope("idle", chat_id=chat_id, group_id=group_id)
 
 
 def parse_chat_id(chat_id: str) -> tuple[bool, int]:

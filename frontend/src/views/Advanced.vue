@@ -42,6 +42,8 @@ async function save() {
       send_dedup_enabled: c.send_dedup_enabled,
       send_dedup_ttl_seconds: c.send_dedup_ttl_seconds,
       seq_map_size: c.seq_map_size,
+      event_queue_max_per_chat: c.event_queue_max_per_chat,
+      event_queue_idle_timeout: c.event_queue_idle_timeout,
     });
     msg.value = "✅ 设置已保存";
     msgType.value = "success";
@@ -203,6 +205,30 @@ async function changeToken() {
         去重 TTL(秒)
         <input type="number" v-model.number="cfg.send_dedup_ttl_seconds" min="1" step="1" />
         <span class="hint">相同内容在此时间内被重复发送时直接返回缓存结果(默认 10 秒)。值越小误去重风险越低,但可能漏掉间隔较长的重试。</span>
+      </label>
+    </div>
+
+    <div class="section">
+      <h3>群聊消息排队</h3>
+      <p class="hint">
+        shared 群聊会话模式下,当上一条消息未处理完毕时,后续来自不同群成员的消息会排队等待,
+        同一发送者的消息直接放行(可补充当前任务),/命令绕过排队。
+        仅在 Hermes 配置 group_sessions_per_user=false(全群共享 session)时生效;
+        per_user 模式下每人独立 session,无需排队。
+      </p>
+      <p class="hint">
+        处理完成的"idle"信号由 Hermes 插件通过 register_post_delivery_callback 钩子发送;
+        若插件崩溃或信号丢失,看门狗会在超时后强制清空 busy 状态。
+      </p>
+      <label>
+        单群队列上限
+        <input type="number" v-model.number="cfg.event_queue_max_per_chat" min="1" max="500" />
+        <span class="hint">每个群聊的排队消息上限(默认 50),超限丢弃最旧的一条。防止刷屏爆内存。</span>
+      </label>
+      <label>
+        busy 超时(秒)
+        <input type="number" v-model.number="cfg.event_queue_idle_timeout" min="10" step="10" />
+        <span class="hint">plugin 未发 idle 信号的超时阈值(默认 300 秒),超时后强制清空 busy 状态并派发下一条。设太小会误杀长任务,太大会延迟恢复。</span>
       </label>
     </div>
 

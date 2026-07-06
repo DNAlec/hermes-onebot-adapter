@@ -547,6 +547,8 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `log_retention_days` | int | `3` | 日志保留天数 |
 | `message_show_group_id` | bool | `false` | 消息是否显示群号标识 |
 | `seq_map_size` | int | `4500` | seq map 环形缓冲区大小 |
+| `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限丢弃最旧（详见[群聊消息排队](#群聊消息排队)） |
+| `event_queue_idle_timeout` | float | `300.0` | 群聊排队：plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy 状态 |
 | `command_filter_enabled` | bool | `false` | 指令过滤总开关 |
 | `command_filter_unknown` | bool | `false` | 未知指令是否过滤 |
 | `command_permissions` | object | `{}` | 全局指令权限：`{指令名: "everyone"/"admin"/"disabled"}` |
@@ -578,3 +580,37 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `command_permissions` | object\|null | `null` | 群级指令权限覆盖 |
 
 > `null` 值表示跟随全局配置。`[]`（空数组）和 `{}`（空对象）表示强制设为空（不等于 null）。
+
+## 群聊消息排队
+
+适配器内置 shared 群聊消息排队机制，防止群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes 配置 `group_sessions_per_user: false`（全群共享 session）时生效**；`per_user` 模式每人独立 session，无需排队。
+
+### 触发条件
+
+- 适配器收到的消息 `chat_id` 形如 `group:<gid>`（shared 群聊，无 `:user:` 后缀）
+- Hermes 端 `group_sessions_per_user=false`（插件读 `self.config.extra.get("group_sessions_per_user", True)` 判定，与 `BasePlatformAdapter.handle_message` 完全一致）
+
+### 排队规则
+
+| 场景 | 行为 |
+|------|------|
+| 私聊（`chat_id` 为纯 QQ 号） | 直接转发，不排队 |
+| per_user 群聊（`group:<gid>:user:<uid>`） | 直接转发，不排队 |
+| shared 群聊未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
+| shared 群聊 busy，新消息同一发送者 | **直接转发**（同人可补充当前任务） |
+| shared 群聊 busy，新消息不同发送者 | 入队等待 |
+| `/` 开头的消息 | **始终直接转发**（绕过排队） |
+
+### idle 信号
+
+处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后，插件向适配器发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧，适配器清空 busy 并从队列取下一条转发。
+
+### 看门狗兜底
+
+若插件崩溃或 idle 帧丢失导致 busy 状态永久卡死，看门狗会在 `event_queue_idle_timeout`（默认 300 秒）后强制清空 busy 并派发下一条。
+
+### 清理时机
+
+- 最后一个 Hermes 插件连接断开时清空所有 busy/queue
+- 适配器服务停止时清空所有状态
+- 插件重连重放 ring buffer 时清空 queue/busy（重新建立状态）
