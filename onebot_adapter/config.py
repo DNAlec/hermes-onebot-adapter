@@ -165,11 +165,11 @@ class AdapterConfig:
     message_show_group_id: bool = True
     seq_map_size: int = 4500
     reaction_emoji_enabled: bool = True
-    reaction_emoji_id: str = "76"
-    reaction_emoji_id_queued: str = "⏳"      # 消息排队时贴的表情ID,空=不入队时不贴表情
+    reaction_emoji_id: str = "124"
+    reaction_emoji_id_queued: str = "123"      # 消息排队时贴的表情ID,空=不贴表情
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
-    send_dedup_ttl_seconds: float = 90.0
+    send_dedup_ttl_seconds: float = 10.0
 
     # ── 群聊消息排队(仅在 Hermes group_sessions_per_user=false 全群共享 session 时生效)──
     event_queue_enabled: bool = True            # 总开关:Hermes 不隔离群成员时是否排队
@@ -452,12 +452,12 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
         "reaction_emoji_enabled": "消息送达 Hermes 后在原消息贴表情回应;群配置可单独覆盖",
-        "reaction_emoji_id": "贴表情回应使用的表情ID(默认 76=👍),QQ 表情编号",
+        "reaction_emoji_id": "贴表情回应使用的表情ID(默认 124),QQ 表情编号",
         "event_queue_enabled": "群聊排队总开关:Hermes 不隔离群成员(group_sessions_per_user=false)时,"
                               "是否对群消息排队串行处理",
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
-        "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认⏳),空=排队时不贴表情",
+        "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():
