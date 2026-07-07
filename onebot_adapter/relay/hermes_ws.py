@@ -765,19 +765,44 @@ class HermesRelayServer:
                 preview=self._config.log_message_preview,
                 name_resolver=self._name_resolver,
             )
-            # bot 自发消息也存入 SeqMap:调 get_msg 拿 real_seq
-            if self._seq_map is not None and is_group and msg_id:
-                try:
-                    got = await self._api.get_msg(int(msg_id))
-                    rs = str(got.get("real_seq", "") or "")
-                    if rs:
-                        self._seq_map.add(str(num_id), int(rs), msg_id)
-                except Exception as exc:
-                    logger.debug("get_msg for seq_map failed (msg_id=%s): %s", msg_id, exc)
+            # result frame 必须先回 plugin,SeqMap 补写后置为 fire-and-forget。
+            # 原因:get_msg 走同一条 OneBot WS,NapCat 串行处理 API 请求,
+            # 多人并发 send 时 get_msg 排队累积延迟会拖慢 result frame 回传,
+            # 触发 plugin _RESULT_TIMEOUT(30s)→ Gateway _send_with_retry 重试 →
+            # dedup TTL 过期 → 群里重复发送(刷屏)。
             await ws.send_json(result_message(req_id, True, message_id=msg_id))
+            if self._seq_map is not None and is_group and msg_id:
+                task = asyncio.create_task(
+                    self._populate_seq_map(str(num_id), msg_id),
+                    name=f"seq_map_populate:{num_id}:{msg_id}",
+                )
+                self._text_tasks.add(task)
+                task.add_done_callback(self._text_tasks.discard)
         except Exception as exc:
             logger.exception("send failed")
             await ws.send_json(result_message(req_id, False, error=str(exc)))
+
+    async def _populate_seq_map(self, group_id: str, msg_id: str) -> None:
+        """Fire-and-forget: fetch real_seq for a bot-sent group message and
+        populate the SeqMap so later tool calls can resolve real_seq → message_id.
+
+        Runs after the ``result`` frame has already been sent to the plugin so
+        that a slow/queued ``get_msg`` on NapCat's serial WS cannot delay the
+        result frame and trigger a Gateway send retry (which caused the
+        multi-user flood).  Errors are logged at warning level (vs the
+        previous debug) because this task runs detached and silent failures
+        would mask a persistent NapCat issue.
+        """
+        try:
+            got = await self._api.get_msg(int(msg_id))
+            rs = str(got.get("real_seq", "") or "")
+            if rs:
+                self._seq_map.add(group_id, int(rs), msg_id)
+                logger.debug("seq_map populated: group=%s msg_id=%s real_seq=%s", group_id, msg_id, rs)
+            else:
+                logger.debug("seq_map populate: no real_seq in get_msg response (msg_id=%s)", msg_id)
+        except Exception as exc:
+            logger.warning("seq_map populate failed (group=%s msg_id=%s): %s", group_id, msg_id, exc)
 
     async def _handle_api_call(self, ws: aiohttp.web.WebSocketResponse, data: dict[str, Any]) -> None:
         req_id = data.get("req_id", str(uuid.uuid4()))
