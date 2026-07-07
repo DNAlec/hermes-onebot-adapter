@@ -113,6 +113,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._watchdog_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Background tasks spawned by _handle_event to run handle_message off
+        # the receive loop (avoids the bypass-command self-deadlock).  Tracked
+        # so disconnect() can cancel them cleanly.
+        self._event_tasks: set[asyncio.Task[None]] = set()
         # Limit concurrent in-flight send requests to prevent retry storms
         # from overwhelming the serial OneBot WS API.  See _MAX_INFLIGHT_SENDS.
         self._send_semaphore = asyncio.Semaphore(_MAX_INFLIGHT_SENDS)
@@ -210,6 +214,13 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             except (asyncio.CancelledError, Exception):
                 pass
             self._recv_task = None
+        # Cancel any in-flight event dispatch tasks so a lingering
+        # handle_message doesn't try to send on a closing WS.
+        for task in list(self._event_tasks):
+            task.cancel()
+        if self._event_tasks:
+            await asyncio.gather(*self._event_tasks, return_exceptions=True)
+        self._event_tasks.clear()
         if self._ws and not self._ws.closed:
             await self._ws.close()
         if self._session and not self._session.closed:
@@ -408,7 +419,38 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # 才注册 post_delivery callback,处理完后发 idle 帧给适配器,适配器 dequeue 下一条。
         # per_user 群聊 / 私聊 / Hermes per_user 隔离时不注册(无需排队)。
         self._maybe_register_idle_callback(data, message_event)
-        await self.handle_message(message_event)
+        # Dispatch handle_message as a background task so the receive loop is
+        # NOT blocked.  Previously this was ``await self.handle_message(...)``
+        # which deadlocked when handle_message hit the bypass-active-session
+        # path (/approve, /deny, /status, …): that path inline-awaits
+        # ``_send_with_retry`` → ``self.send()`` → ``self._request()``, which
+        # sends a ``send`` frame and awaits the matching ``result`` frame.
+        # The ``result`` frame arrives on this same WS and is processed by
+        # ``_receive_loop`` — but ``_receive_loop`` was blocked here, so the
+        # result frame could never be processed, the 30s timeout fired, the
+        # gateway retried with an identical payload, and the adapter
+        # (unaware of the deadlock) sent the message again — producing
+        # duplicate messages in the chat.  Scheduling as a fire-and-forget
+        # task keeps the receive loop free to process result frames, breaking
+        # the self-deadlock.  This mirrors the normal-message path
+        # (``_start_session_processing`` → ``create_task``) which was never
+        # affected.
+        task = asyncio.create_task(self._dispatch_event(message_event))
+        self._event_tasks.add(task)
+        task.add_done_callback(self._event_tasks.discard)
+
+    async def _dispatch_event(self, message_event: Any) -> None:
+        """Run ``handle_message`` off the receive loop.
+
+        Exceptions are logged instead of propagating — ``_receive_loop``
+        already swallows per-frame exceptions, and a background task that
+        raises would otherwise surface as "Task exception was never
+        retrieved".
+        """
+        try:
+            await self.handle_message(message_event)
+        except Exception:
+            logger.exception("OneBot: handle_message raised in background task")
 
     def _maybe_register_idle_callback(
         self, data: dict[str, Any], message_event: Any
