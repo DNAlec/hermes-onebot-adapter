@@ -339,3 +339,72 @@ async def test_send_text_dedup_different_content():
             assert mock_api.send_group_msg.await_count == 2
     finally:
         await server.close()
+
+
+# ── Adapter-side send concurrency limit (semaphore) ─────────────────────
+
+
+async def test_send_api_semaphore_limits_concurrent_calls():
+    """The adapter limits concurrent OneBot API send calls to
+    _MAX_CONCURRENT_SENDS (default 2) to prevent NapCat WS serialization
+    from inflating latency past the plugin's 30s _RESULT_TIMEOUT.
+    """
+    app, mock_api, relay = _make_relay_app()
+    # Track max concurrent calls
+    concurrent = [0]
+    max_concurrent = [0]
+
+    original_send = mock_api.send_group_msg
+
+    async def tracking_send(*args, **kwargs):
+        concurrent[0] += 1
+        max_concurrent[0] = max(max_concurrent[0], concurrent[0])
+        await asyncio.sleep(0.05)  # simulate slow NapCat
+        concurrent[0] -= 1
+        return await original_send(*args, **kwargs)
+
+    mock_api.send_group_msg = tracking_send
+
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                # Fire 4 concurrent sends with different content (no dedup)
+                for i in range(4):
+                    await ws.send_json(send_message(
+                        "send_text", f"r{i}", "group:42", content=f"msg{i}",
+                    ))
+                # Receive all 4 results
+                for _ in range(4):
+                    res = await ws.receive_json(timeout=5)
+                    assert res["success"] is True
+        # Max concurrent calls should not exceed _MAX_CONCURRENT_SENDS (2)
+        assert max_concurrent[0] <= relay._MAX_CONCURRENT_SENDS, (
+            f"max concurrent={max_concurrent[0]} exceeds limit {relay._MAX_CONCURRENT_SENDS}"
+        )
+    finally:
+        await server.close()
+
+
+async def test_send_api_semaphore_releases_on_success():
+    """After a send completes, the semaphore slot is released and available
+    for the next send (no leak)."""
+    app, mock_api, relay = _make_relay_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                # Send 3 sequential sends — all should succeed
+                for i in range(3):
+                    await ws.send_json(send_message(
+                        "send_text", f"r{i}", "group:42", content=f"msg{i}",
+                    ))
+                    res = await ws.receive_json(timeout=2)
+                    assert res["success"] is True
+            assert mock_api.send_group_msg.await_count == 3
+    finally:
+        await server.close()
