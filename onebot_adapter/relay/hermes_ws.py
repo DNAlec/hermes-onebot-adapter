@@ -734,6 +734,9 @@ class HermesRelayServer:
                 # 写入去重缓存(send_document 无 message_id,缓存空串;命中时回 None)。
                 if dedup_key is not None:
                     self._send_cache[dedup_key] = (time.monotonic(), "")
+                if is_group and str(num_id) in self._busy_groups:
+                    busy_user, _ = self._busy_groups[str(num_id)]
+                    self._busy_groups[str(num_id)] = (busy_user, time.monotonic())
                 await ws.send_json(result_message(req_id, True))
                 return
 
@@ -771,6 +774,12 @@ class HermesRelayServer:
             # 触发 plugin _RESULT_TIMEOUT(30s)→ Gateway _send_with_retry 重试 →
             # dedup TTL 过期 → 群里重复发送(刷屏)。
             await ws.send_json(result_message(req_id, True, message_id=msg_id))
+            # Hermes 发出的任意消息(send_text / 长任务心跳等)都说明 agent 仍在活跃,
+            # 顺便刷新该群 busy 槽的时间戳,防止看门狗误判超时。
+            gid_str = str(num_id)
+            if is_group and gid_str in self._busy_groups:
+                busy_user, _ = self._busy_groups[gid_str]
+                self._busy_groups[gid_str] = (busy_user, time.monotonic())
             if self._seq_map is not None and is_group and msg_id:
                 task = asyncio.create_task(
                     self._populate_seq_map(str(num_id), msg_id),
