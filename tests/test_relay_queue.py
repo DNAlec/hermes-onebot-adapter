@@ -326,6 +326,60 @@ async def test_idle_frame_without_group_id_or_chat_id_is_ignored():
     relay._broadcast_event.assert_not_awaited()
 
 
+# ── /stop idle 丢失补救 ──────────────────────────────────────────────────
+
+
+async def test_stop_command_triggers_delayed_cleanup():
+    """/stop 命令 broadcast 后 3s 内无 idle → delayed cleanup 清 busy 并 dequeue。"""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    # Broadcast /stop — should trigger delayed cleanup
+    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
+    assert relay._broadcast_event.await_count == 2  # msg1 + /stop
+    assert "42" in relay._busy_groups
+    # Wait for delayed cleanup
+    await asyncio.sleep(3.5)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 3  # msg2 dequeued
+    assert relay._busy_groups["42"][0] == "200"
+    assert "42" not in relay._queues
+
+
+async def test_stop_cleanup_noop_if_idle_arrives_first():
+    """idle 先到时 delayed cleanup 是 no-op。"""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
+    # Simulate idle arriving (gateway did fire post_delivery)
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
+    await asyncio.sleep(0)
+    # Delayed cleanup should be a no-op — the msg2 was already dequeued
+    assert relay._broadcast_event.await_count == 3  # msg1 + /stop + msg2(dequeued)
+    assert relay._busy_groups["42"][0] == "200"
+    assert "42" not in relay._queues
+    # Wait past the cleanup delay — should not double-dequeue
+    await asyncio.sleep(3.5)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 3  # still 3, no extra dequeue
+
+
+async def test_new_and_reset_commands_also_trigger_cleanup():
+    """/new 和 /reset 也触发 delayed cleanup。"""
+    for cmd in ("/new", "/reset"):
+        relay, _, _ = _make_relay(event_queue_idle_timeout=0.01)
+        relay._broadcast_event = AsyncMock()
+        await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+        await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+        await relay._enqueue_or_broadcast(_group_event(cmd, gid="42", uid="100", mid="3"))
+        await asyncio.sleep(3.5)
+        await asyncio.sleep(0)
+        assert relay._broadcast_event.await_count >= 3, f"{cmd} did not trigger dequeue"
+
+
 # ── 看门狗 ──────────────────────────────────────────────────────────────
 
 

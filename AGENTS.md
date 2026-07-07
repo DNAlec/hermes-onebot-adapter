@@ -102,6 +102,8 @@ Implemented across `config.py` (permission model), `parser.py` (`_check_command_
 
 **看门狗**（`_watchdog_loop`）：周期扫 `_busy_groups`，超过 `event_queue_idle_timeout`（默认 300s，可配置）未收到 idle 帧则强制清空 busy 并派发下一条。兜底 plugin 崩溃 / idle 帧丢失导致永久卡死。
 
+**`/stop` idle 丢失补救**（`_delayed_stop_cleanup`）：Hermes gateway 的 `/stop`、`/new`、`/reset` 通过 bump generation 中断当前 turn,导致 stale run 的 `post_delivery_callback` 被 pop 而不触发（`run.py:11099-11112`），adapter 收不到 idle 帧 → 队列卡死。适配器在 broadcast 这些命令后 schedule 一个 `_STOP_IDLE_DELAY`（3s）延迟任务：若 gateway 正常发 idle 则在 per-group lock 下先处理,延迟任务看到 busy 已清就 no-op；若没发 idle 则延迟任务 force-clear。看门狗（300s）是最终兜底。
+
 **清理时机**：最后一个 plugin client 断开时清空所有 busy/queue（无人发 idle，留着只会等看门狗超时）；`stop()` 取消 watchdog 并清空状态；ring buffer replay 开始时清空 queue/busy（重新建立状态）。
 
 **与 ring buffer 的关系**：push_event 始终写 ring buffer（用于 plugin 重连重放）；replay 时走 `_enqueue_or_broadcast` 重新评估排队状态，避免重连瞬间把多条 shared 群消息一次性推给 plugin。
