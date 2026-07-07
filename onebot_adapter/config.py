@@ -166,6 +166,7 @@ class AdapterConfig:
     seq_map_size: int = 4500
     reaction_emoji_enabled: bool = True
     reaction_emoji_id: str = "76"
+    reaction_emoji_id_queued: str = "⏳"      # 消息排队时贴的表情ID,空=不入队时不贴表情
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
     send_dedup_ttl_seconds: float = 10.0
@@ -456,6 +457,7 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
                               "是否对群消息排队串行处理",
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
+        "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认⏳),空=排队时不贴表情",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():

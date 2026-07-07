@@ -147,9 +147,10 @@ async def test_shared_group_busy_different_user_enqueues():
     """busy 时不同人入队。"""
     relay, _, _ = _make_relay()
     relay._broadcast_event = AsyncMock()
-    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
-    ev2 = _group_event("msg2", gid="42", uid="200", mid="2")
-    await relay._enqueue_or_broadcast(ev2)
+    result1 = await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    assert result1 is False  # 广播,不入队
+    result2 = await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    assert result2 is True   # 入队
     assert relay._broadcast_event.await_count == 1
     assert "42" in relay._queues
     assert len(relay._queues["42"]) == 1
@@ -179,6 +180,26 @@ async def test_queue_cap_rejects_incoming():
     q = relay._queues["42"]
     assert len(q) == 2
     assert [e.text for e in q] == ["m1", "m2"]
+
+
+# ── on_dispatch 回调 ────────────────────────────────────────────────────
+
+
+async def test_on_dispatch_callback_fires_on_dequeue():
+    """排队事件出队时触发 on_dispatch 回调。"""
+    callback = AsyncMock()
+    relay, _, _ = _make_relay()
+    relay._on_dispatch = callback
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    assert callback.call_count == 0
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
+    await asyncio.sleep(0)
+    assert callback.call_count == 1
+    dequed_event = callback.call_args[0][0]
+    assert dequed_event.text == "msg2"
+    assert dequed_event.user_id == "200"
 
 
 # ── idle 帧 ─────────────────────────────────────────────────────────────

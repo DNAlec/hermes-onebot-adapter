@@ -19,7 +19,7 @@ import re
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
@@ -107,6 +107,7 @@ class HermesRelayServer:
         on_connect: Callable[[], Any] | None = None,
         on_disconnect: Callable[[], Any] | None = None,
         on_filtered: Callable[[Any], Any] | None = None,
+        on_dispatch: Callable[[NormalizedEvent], Awaitable[None]] | None = None,
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
     ) -> None:
@@ -117,6 +118,7 @@ class HermesRelayServer:
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
         self._on_filtered = on_filtered
+        self._on_dispatch = on_dispatch
         self._seq_map = seq_map
         self._name_resolver = name_resolver
         self._clients: set[aiohttp.web.WebSocketResponse] = set()
@@ -380,7 +382,13 @@ class HermesRelayServer:
 
     # ── Inbound push (adapter -> plugin) ───────────────────────────────
 
-    async def push_event(self, event: NormalizedEvent) -> None:
+    async def push_event(self, event: NormalizedEvent) -> bool:
+        """Push a OneBot event toward the Hermes plugin.
+
+        Writes to the ring buffer (skipping /commands) then routes through
+        the queue policy.  Returns ``True`` if the event was enqueued (not
+        yet delivered to the plugin), ``False`` if broadcast immediately.
+        """
         logger.debug(
             "relay push: chat_id=%s clients=%d text_preview=%r",
             event.chat_id, len(self._clients),
@@ -391,9 +399,9 @@ class HermesRelayServer:
         # plugin, otherwise they create an infinite restart loop.
         if not event.text.startswith("/"):
             self._ring_buffer.append((time.monotonic(), event))
-        await self._enqueue_or_broadcast(event)
+        return await self._enqueue_or_broadcast(event)
 
-    async def _enqueue_or_broadcast(self, event: NormalizedEvent) -> None:
+    async def _enqueue_or_broadcast(self, event: NormalizedEvent) -> bool:
         """Apply the per-chat queue policy then broadcast.
 
         排队生效条件(全部满足):
@@ -404,32 +412,34 @@ class HermesRelayServer:
 
         排队规则:群未 busy → 标记 busy 并广播;群 busy 且新消息来自同人 → 放行
         (可补充当前任务);群 busy 且来自不同人 → 入队 FIFO。
+
+        Returns ``True`` when the event was enqueued, ``False`` when broadcast.
         """
         gid = self._group_id_of(event)
         if gid is None:
             # 私聊 — 不排队
             await self._broadcast_event(event)
-            return
+            return False
         # /命令绕过排队
         if event.text.startswith("/"):
             await self._broadcast_event(event)
-            return
+            return False
         # Hermes 隔离群成员 或 适配器总开关关 → 不排队
         if self._hermes_group_sessions_per_user or not self._config.event_queue_enabled:
             await self._broadcast_event(event)
-            return
+            return False
         busy = self._busy_groups.get(gid)
         if busy is None:
             # Idle — claim the group and broadcast immediately.
             self._busy_groups[gid] = (event.user_id, time.monotonic())
             self._ensure_watchdog()
             await self._broadcast_event(event)
-            return
+            return False
         busy_user_id, _since = busy
         if event.user_id == busy_user_id:
             # Same user as the in-flight turn — let it through.
             await self._broadcast_event(event)
-            return
+            return False
         # Different user while busy — enqueue.
         q = self._queues.setdefault(gid, deque())
         cap = self._config.event_queue_max_per_chat
@@ -438,13 +448,14 @@ class HermesRelayServer:
                 "relay queue full (gid=%s cap=%d), dropping incoming text_preview=%r",
                 gid, cap, (event.text or "")[:120],
             )
-            return
+            return False
         q.append(event)
         logger.info(
             "relay enqueue: gid=%s queued=%d busy_user=%s new_user=%s text_preview=%r",
             gid, len(q), busy_user_id, event.user_id,
             (event.text or "")[:120],
         )
+        return True
 
     @staticmethod
     def _group_id_of(event: NormalizedEvent) -> str | None:
@@ -504,6 +515,8 @@ class HermesRelayServer:
         self._busy_groups[gid] = (nxt.user_id, time.monotonic())
         self._ensure_watchdog()
         asyncio.create_task(self._broadcast_event(nxt))
+        if self._on_dispatch is not None:
+            asyncio.create_task(self._on_dispatch(nxt))
         logger.info(
             "relay dequeue: gid=%s remaining=%d new_busy_user=%s text_preview=%r",
             gid, len(self._queues.get(gid, ())), nxt.user_id,
