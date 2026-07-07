@@ -94,8 +94,8 @@ Implemented across `config.py` (permission model), `parser.py` (`_check_command_
 - 适配器总开关关闭(``event_queue_enabled=False``)：直接广播，不排队
 - 以上条件全部不满足(共享 + 开关开)：
   - 群未 busy → 标记 busy（记录 user_id + 时间戳），广播
-  - 群 busy 且新消息 user_id == busy_user_id → **直接放行**（同人可补充当前任务）
-  - 群 busy 且 user_id 不同 → 入队 `self._queues[gid]`（FIFO）
+  - 群 busy → **一律入队** `self._queues[gid]`（FIFO,包括 busy 用户自身）
+  - 出队时连续同用户消息自动合并为一条（`\n\n` 拼接 text）
 - `/` 开头的消息：**始终绕过排队直接广播**（与 ring buffer 跳过 /command 同思路）
 
 **插件侧判定**（`hermes_plugin/adapter.py::_maybe_register_idle_callback`）：读 `self.config.extra.get("group_sessions_per_user", True)`——与 `BasePlatformAdapter.handle_message`（base.py:4606）完全一致（Hermes 在 `_create_adapter` 时通过 `config.extra.setdefault("group_sessions_per_user", self.config.group_sessions_per_user)` 把顶层值注入 platform extra，run.py:8355-8363）。只有 `group_sessions_per_user=False` 且 chat_id 是群聊形式时才注册 post_delivery callback。callback 用 `generation` 关联当前 gateway run，防 stale run 错误触发 idle。

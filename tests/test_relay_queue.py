@@ -6,7 +6,8 @@
 
 测试覆盖:
 - DM 直接放行 / per_user=True 不排队 / event_queue_enabled=False 不排队
-- shared 群聊 busy + 同人放行 vs 不同人入队
+- shared 群聊 busy 时任何用户(含 busy 用户自身)都入队
+- 连续同用户消息出队时合并为一条
 - /命令绕过排队
 - idle 帧 dequeue + dispatch
 - 队列超限丢弃最旧
@@ -137,16 +138,18 @@ async def test_shared_group_first_message_marks_busy():
     assert since > 0
 
 
-async def test_shared_group_busy_same_user_passes_through():
-    """busy 时同人新消息直接放行。"""
+async def test_shared_group_busy_same_user_enqueues():
+    """busy 时同人新消息也入队,不再放行。"""
     relay, _, _ = _make_relay()
     relay._broadcast_event = AsyncMock()
     await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
     ev2 = _group_event("msg2", gid="42", uid="100", mid="2")
-    await relay._enqueue_or_broadcast(ev2)
-    assert relay._broadcast_event.await_count == 2
-    assert not relay._queues
-    assert relay._busy_groups["42"][0] == "100"
+    result = await relay._enqueue_or_broadcast(ev2)
+    assert result == "queued"
+    assert relay._broadcast_event.await_count == 1  # only msg1 broadcast
+    assert "42" in relay._queues
+    assert len(relay._queues["42"]) == 1
+    assert relay._queues["42"][0].user_id == "100"
 
 
 async def test_shared_group_busy_different_user_enqueues():
@@ -207,6 +210,66 @@ async def test_on_dispatch_callback_fires_on_dequeue():
     dequed_event = callback.call_args[0][0]
     assert dequed_event.text == "msg2"
     assert dequed_event.user_id == "200"
+
+
+# ── 出队合并 ─────────────────────────────────────────────────────────────
+
+
+async def test_dequeue_merges_consecutive_same_user():
+    """连续同用户消息出队时合并为一条。"""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("m0", gid="42", uid="100"))
+    # 同用户两条入队
+    await relay._enqueue_or_broadcast(_group_event("m1", gid="42", uid="200", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("m2", gid="42", uid="200", mid="2"))
+    assert len(relay._queues["42"]) == 2
+    # idle → 出队，应合并 m1+m2
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 2  # m0 + merged
+    merged = relay._broadcast_event.call_args_list[1][0][0]
+    assert merged.user_id == "200"
+    assert merged.text == "m1\n\nm2"
+    assert merged.message_id == "2"
+    assert "42" not in relay._queues
+
+
+async def test_dequeue_does_not_merge_different_users():
+    """不同用户的消息打断合并链。"""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("m0", gid="42", uid="100"))
+    await relay._enqueue_or_broadcast(_group_event("m1", gid="42", uid="200", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("m2", gid="42", uid="300", mid="2"))
+    # idle → m1 出队(m2 是不同用户,不合并)
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 2
+    broadcasted = relay._broadcast_event.call_args_list[1][0][0]
+    assert broadcasted.text == "m1"
+    assert len(relay._queues["42"]) == 1  # m2 还在队列
+
+
+async def test_dequeue_merges_multiple_same_user():
+    """3+ 条同用户消息全部合并。"""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("m0", gid="42", uid="100"))
+    await relay._enqueue_or_broadcast(_group_event("a", gid="42", uid="200", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("b", gid="42", uid="200", mid="2"))
+    await relay._enqueue_or_broadcast(_group_event("c", gid="42", uid="200", mid="3"))
+    assert len(relay._queues["42"]) == 3
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    merged = relay._broadcast_event.call_args_list[1][0][0]
+    assert merged.user_id == "200"
+    assert merged.text == "a\n\nb\n\nc"
+    assert merged.message_id == "3"
+    assert "42" not in relay._queues
 
 
 # ── idle 帧 ─────────────────────────────────────────────────────────────

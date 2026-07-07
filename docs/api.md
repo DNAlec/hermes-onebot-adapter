@@ -595,8 +595,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | Hermes 隔离群成员（per_user=True） | 直接转发，不排队 |
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
-| 群 busy，新消息同一发送者 | **直接转发**（同人可补充当前任务） |
-| 群 busy，新消息不同发送者 | 入队等待 |
+| 群 busy | 入队等待（含 busy 用户自身）；出队时连续同用户消息合并为一条 |
 | `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
 ### idle 信号

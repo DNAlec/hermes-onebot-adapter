@@ -350,7 +350,7 @@ function resetHint() {
       <h4>适配器群聊排队</h4>
       <p class="hint" style="margin-bottom:0.75rem;">
         当 Hermes 不隔离群成员时,适配器对群消息排队串行处理。
-        同一发送者的消息直接放行,不同发送者排队等待,所有/命令会绕过排队。
+        群 busy 时所有用户的消息（含 busy 用户自身）一律排队等待,出队时连续同用户消息会自动合并为一条。所有/命令会绕过排队。
       </p>
       <label class="checkbox-row">
         <input type="checkbox" v-model="cfg.event_queue_enabled" />
