@@ -2,7 +2,6 @@
 import { ref, computed, onMounted } from "vue";
 import {
   checkHermesDir, installPlugin, uninstallPlugin, type HermesDirStatus,
-  getHermesMode, putHermesMode, refreshHermesMode, type HermesMode,
 } from "../api";
 import { useConfig } from "../composables/useConfig";
 
@@ -18,14 +17,6 @@ const showToken = ref(false);
 const showOnebotToken = ref(false);
 const hermesDirStatus = ref<HermesDirStatus | null>(null);
 const checkingDir = ref(false);
-
-// ── Hermes 会话隔离(group_sessions_per_user)──
-const hermesMode = ref<HermesMode | null>(null);
-const editingPerUser = ref(false);       // 修改表单中的临时值
-const savingMode = ref(false);
-const refreshingMode = ref(false);
-const modeMsg = ref("");
-const modeMsgType = ref<"success" | "error" | "warning">("success");
 
 const baseline = ref({ port: 0, path: "", token: "" });
 
@@ -63,61 +54,11 @@ onMounted(async () => {
     await load();
     syncBaseline();
     checkDir();
-    fetchHermesMode();
   } catch (e: any) {
     msg.value = "加载配置失败: " + (e.response?.data?.error || e.message);
     msgType.value = "error";
   }
 });
-
-async function fetchHermesMode() {
-  try {
-    hermesMode.value = await getHermesMode();
-  } catch (e: any) {
-    modeMsg.value = "❌ 读取 Hermes 配置失败: " + (e.response?.data?.error || e.message);
-    modeMsgType.value = "error";
-  }
-}
-
-async function saveHermesMode(value: boolean) {
-  savingMode.value = true;
-  modeMsg.value = "";
-  try {
-    const res = await putHermesMode(value);
-    modeMsg.value = "✅ " + res.note;
-    modeMsgType.value = "warning";  // 因为需重启网关
-    editingPerUser.value = false;
-    // 重新读取(读文件回显,不一定是插件上报的最新值)
-    await fetchHermesMode();
-  } catch (e: any) {
-    modeMsg.value = "❌ " + (e.response?.data?.error || e.message);
-    modeMsgType.value = "error";
-  } finally {
-    savingMode.value = false;
-  }
-}
-
-async function refreshHermesModeReport() {
-  refreshingMode.value = true;
-  modeMsg.value = "";
-  try {
-    const res = await refreshHermesMode();
-    if (res.ok) {
-      modeMsg.value = "✅ " + (res.note || "已请求插件重新上报");
-      modeMsgType.value = "success";
-      // 等一下让插件上报后再拉取
-      setTimeout(() => fetchHermesMode(), 800);
-    } else {
-      modeMsg.value = "⚠ " + (res.error || "刷新失败");
-      modeMsgType.value = "warning";
-    }
-  } catch (e: any) {
-    modeMsg.value = "❌ " + (e.response?.data?.error || e.message);
-    modeMsgType.value = "error";
-  } finally {
-    refreshingMode.value = false;
-  }
-}
 
 async function save() {
   if (!cfg.value) return;
@@ -137,9 +78,6 @@ async function save() {
       hermes_ws_port: c.hermes_ws_port,
       hermes_ws_path: c.hermes_ws_path,
       hermes_ws_token: c.hermes_ws_token,
-      event_queue_enabled: c.event_queue_enabled,
-      event_queue_max_per_chat: c.event_queue_max_per_chat,
-      event_queue_idle_timeout: c.event_queue_idle_timeout,
     });
     syncBaseline();
     if (wasDirty) {
@@ -426,81 +364,6 @@ function copyAdapterUrl() {
             <div v-if="installResult.note" class="note">{{ installResult.note }}</div>
           </div>
         </div>
-      </div>
-
-      <button @click="save" :disabled="saving" class="save-btn">
-        {{ saving ? "保存中..." : "保存配置" }}
-      </button>
-
-      <!-- Hermes 会话隔离 + 群聊排队配置 -->
-      <div class="section">
-        <h3>Hermes 会话隔离配置</h3>
-        <p class="hint">
-          此值由 Hermes 决定,适配器只读取并据此判断是否需要群聊排队。<br>
-          <strong>true(默认)</strong>:每个群成员独立 session,无需排队。<br>
-          <strong>false</strong>:全群共享 session,适配器对群消息排队串行处理(防止不同成员互相打断)。
-        </p>
-        <div v-if="modeMsg" :class="['message', modeMsgType]">{{ modeMsg }}</div>
-
-        <!-- 当前值显示(来自插件上报 / Hermes config.yaml)-->
-        <div class="mode-display">
-          <span class="mode-label">当前值:</span>
-          <span :class="['mode-value', hermesMode?.group_sessions_per_user ? 'isolation-on' : 'isolation-off']">
-            {{ hermesMode?.group_sessions_per_user ? 'true(隔离)' : 'false(共享)' }}
-          </span>
-          <span class="mode-source" v-if="hermesMode">
-            来源:
-            <code v-if="hermesMode.source === 'plugin_report'">插件上报</code>
-            <code v-else-if="hermesMode.source === 'hermes_config_yaml'">Hermes config.yaml(插件未连接)</code>
-            <code v-else>默认值(插件未连接)</code>
-          </span>
-          <button @click="refreshHermesModeReport" :disabled="refreshingMode" class="mode-refresh-btn">
-            {{ refreshingMode ? "刷新中..." : "↻ 刷新上报值" }}
-          </button>
-        </div>
-
-        <!-- 修改表单 -->
-        <div class="mode-edit" v-if="!editingPerUser">
-          <button @click="editingPerUser = true" class="mode-edit-btn">✏ 修改 Hermes 配置</button>
-        </div>
-        <div class="mode-edit" v-else>
-          <label class="checkbox-row">
-            <input
-              type="checkbox"
-              :checked="!hermesMode?.group_sessions_per_user"
-              @change="(e) => { editingPerUser = false; saveHermesMode(!(e.target as HTMLInputElement).checked) }"
-            />
-            <span>开启群聊排队(写入 group_sessions_per_user: false 到 Hermes config.yaml)</span>
-          </label>
-          <button @click="editingPerUser = false" class="mode-cancel-btn">取消</button>
-        </div>
-        <p class="hint" v-if="editingPerUser">
-          ⚠️ 修改后会写入 Hermes <code>config.yaml</code>,需<strong>重启 Hermes 网关</strong>才生效。
-          重启后插件会重新上报新值,届时点击"刷新上报值"可看到更新。
-        </p>
-      </div>
-
-      <div class="section">
-        <h3>群聊消息排队</h3>
-        <p class="hint">
-          当 Hermes 不隔离群成员(group_sessions_per_user=false)时,适配器对群消息排队串行处理。
-          同一发送者的消息直接放行(可补充当前任务),不同发送者排队等待,/命令绕过排队。
-          若插件崩溃或 idle 信号丢失,看门狗在超时后强制清空 busy 状态。
-        </p>
-        <label class="checkbox-row">
-          <input type="checkbox" v-model="cfg.event_queue_enabled" />
-          <span>启用群聊排队</span>
-        </label>
-        <label>
-          单群队列上限
-          <input type="number" v-model.number="cfg.event_queue_max_per_chat" min="1" max="500" />
-          <span class="hint">每个群聊的排队消息上限(默认 50),超限丢弃最旧的一条。防止刷屏爆内存。</span>
-        </label>
-        <label>
-          busy 超时(秒)
-          <input type="number" v-model.number="cfg.event_queue_idle_timeout" min="10" step="10" />
-          <span class="hint">plugin 未发 idle 信号的超时阈值(默认 300 秒),超时后强制清空 busy 状态并派发下一条。设太小会误杀长任务,太大会延迟恢复。</span>
-        </label>
       </div>
 
       <button @click="save" :disabled="saving" class="save-btn">
@@ -896,42 +759,4 @@ input:focus {
   .plugin-actions { flex-direction: column; }
 }
 
-/* ── Hermes 会话隔离 + 排队 ── */
-.mode-display {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.75rem 0;
-  font-size: 0.9rem;
-}
-.mode-label { font-weight: 500; }
-.mode-value { font-weight: 700; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.85rem; }
-.mode-value.isolation-on { background: rgba(40, 167, 69, 0.15); color: var(--success); }
-.mode-value.isolation-off { background: rgba(255, 193, 7, 0.15); color: #856404; }
-.mode-source { color: var(--text-muted); font-size: 0.8rem; }
-.mode-source code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85em; }
-.mode-refresh-btn {
-  background: var(--card-bg); color: var(--primary); border: 1px solid var(--primary);
-  padding: 0.3rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
-}
-.mode-refresh-btn:hover { background: rgba(74, 144, 226, 0.08); }
-.mode-refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-.mode-edit { padding: 0.5rem 0; }
-.mode-edit-btn {
-  background: var(--primary); color: white; border: none;
-  padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
-}
-.mode-cancel-btn {
-  background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--border);
-  padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
-  margin-left: 0.5rem;
-}
-.checkbox-row { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; margin: 0.5rem 0; }
-.checkbox-row input[type="checkbox"] { width: auto; cursor: pointer; }
-.checkbox-row span { font-weight: 500; }
-.message { padding: 0.75rem 1rem; border-radius: 6px; margin: 0.75rem 0; font-size: 0.9rem; }
-.message.success { background: #d4edda; color: #155724; border-left: 4px solid var(--success); }
-.message.error { background: #f8d7da; color: #721c24; border-left: 4px solid var(--danger); }
-.message.warning { background: #fff9e6; color: #856404; border-left: 4px solid var(--warning); }
 </style>
