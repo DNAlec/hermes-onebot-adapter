@@ -13,6 +13,19 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def _log_listener_exception(task: asyncio.Task) -> None:
+    """Done-callback: log unhandled exceptions from async config-change
+    listener tasks instead of letting them surface as "Task exception was
+    never retrieved" warnings.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("config change listener task crashed: %r", exc, exc_info=exc)
+
+
 CONFIG_ENV = "ONEBOT_ADAPTER_CONFIG"
 DEFAULT_CONFIG_DIR = Path.home() / ".onebot_adapter"
 DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
@@ -89,9 +102,6 @@ class GroupConfig:
     # ── 群成员准入（黑名单/白名单）──
     group_user_filter_mode: str = USER_FILTER_BLACKLIST  # 默认黑名单
     group_user_list: list[str] = field(default_factory=list)  # 默认空：黑名单空=允许所有人
-    welcome_enabled: bool = False
-    welcome_message: str = ""
-    auto_join: bool = False
     message_show_group_id: bool | None = None
     reaction_emoji_enabled: bool | None = None  # None=跟随全局,True=在送达的消息上贴表情回应
     # ── /指令过滤（None=跟随全局）──
@@ -138,7 +148,6 @@ class AdapterConfig:
     group_keyword_first_only: bool = False       # True=关键词须出现在文本开头
     group_keep_mention: bool = False              # True=触发后保留@bot段（不 strip）
     global_admins: list[str] = field(default_factory=list)
-    group_auto_join: bool = False
 
     # ── 私聊设置 ──
     dm_user_filter_mode: str = USER_FILTER_WHITELIST  # 默认白名单
@@ -231,10 +240,6 @@ class AdapterConfig:
                 errors.append(f"group {gid} keyword_first_only must be bool or null")
             if gc.keep_mention is not None and not isinstance(gc.keep_mention, bool):
                 errors.append(f"group {gid} keep_mention must be bool or null")
-            if gc.welcome_enabled is not None and not isinstance(gc.welcome_enabled, bool):
-                errors.append(f"group {gid} welcome_enabled must be bool")
-            if gc.auto_join is not None and not isinstance(gc.auto_join, bool):
-                errors.append(f"group {gid} auto_join must be bool")
             if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
                 errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
             if gc.command_permissions is not None:
@@ -521,7 +526,8 @@ class ConfigStore:
                 if asyncio.iscoroutine(result):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(result)
+                        task = loop.create_task(result)
+                        task.add_done_callback(_log_listener_exception)
                     except RuntimeError:
                         result.close()
             except Exception:

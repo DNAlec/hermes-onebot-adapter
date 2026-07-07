@@ -16,6 +16,7 @@ PACKAGE_DIR=$(python3 -c "import onebot_adapter; print(onebot_adapter.__path__[0
 if [ -n "$PACKAGE_DIR" ] && [ "$PACKAGE_DIR" != "../onebot_adapter" ]; then
     TARGET="$PACKAGE_DIR/webui/static"
     mkdir -p "$TARGET"
+    rm -rf "$TARGET"/*
     cp -r dist/* "$TARGET/"
     echo "WebUI also copied -> $TARGET"
 fi

@@ -50,7 +50,7 @@ include = ["onebot_adapter*"]
 
 [tool.setuptools.package-data]
 "onebot_adapter.webui.static" = ["**/*"]
-"onebot_adapter.hermes_plugin" = ["*.yaml", "*.py"]
+"onebot_adapter.hermes_plugin" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
