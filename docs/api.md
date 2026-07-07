@@ -602,6 +602,8 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后，插件向适配器发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧，适配器清空 busy 并从队列取下一条转发。
 
+`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**（gateway `run.py:11099-11112` 直接 pop callback 不调用），适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。
+
 ### 看门狗兜底
 
 若插件崩溃或 idle 帧丢失导致 busy 状态永久卡死，看门狗会在 `event_queue_idle_timeout`（默认 300 秒）后强制清空 busy 并派发下一条。

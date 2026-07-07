@@ -108,6 +108,8 @@ class HermesRelayServer:
     _RING_BUFFER_SIZE = 50
     _RING_BUFFER_MAX_AGE = 30.0  # seconds; skip older events on replay
     _WATCHDOG_INTERVAL = 30.0    # seconds between busy-timeout sweeps
+    _STOP_IDLE_DELAY = 3.0      # seconds to wait after /stop before force-clearing busy
+    _INTERRUPT_COMMANDS = frozenset({"/stop", "/new", "/reset"})
     # Max concurrent OneBot API send calls (send_group_msg / upload_*_file).
     # NapCat serializes API requests on a single WS, so unbounded concurrency
     # queues up at NapCat and inflates latency past the plugin's 30s
@@ -500,7 +502,15 @@ class HermesRelayServer:
             return await self._broadcast_with_status(event)
         # /命令绕过排队
         if (event.text or "").startswith("/"):
-            return await self._broadcast_with_status(event)
+            cmd = (event.text or "").strip().split(maxsplit=1)[0]
+            result = await self._broadcast_with_status(event)
+            if (
+                result == "broadcast"
+                and gid is not None
+                and cmd in self._INTERRUPT_COMMANDS
+            ):
+                asyncio.create_task(self._delayed_stop_cleanup(gid))
+            return result
         # Hermes 隔离群成员 或 适配器总开关关 → 不排队
         if self._hermes_group_sessions_per_user or not self._config.event_queue_enabled:
             return await self._broadcast_with_status(event)
@@ -682,6 +692,34 @@ class HermesRelayServer:
             gid, len(self._queues.get(gid, ())), nxt.user_id, merged_count,
             (nxt.text or "")[:120],
         )
+
+    async def _delayed_stop_cleanup(self, gid: str) -> None:
+        """Force-clear a busy slot if the gateway does not fire an idle frame
+        within ``_STOP_IDLE_DELAY`` seconds after an interrupting command
+        (``/stop``, ``/new``, ``/reset``).
+
+        Hermes bumps the session generation when these commands interrupt an
+        in-flight turn, which causes the stale run's ``post_delivery_callback``
+        to be popped *without* firing (see gateway ``run.py:11099-11112``).
+        Without the idle frame the adapter's busy slot is never cleared and
+        the queue stalls permanently — the watchdog eventually handles it
+        after ``event_queue_idle_timeout`` (default 300 s), but that is far
+        too long for interactive use.
+
+        This method runs after a short delay.  If the gateway *does* fire
+        idle in the meantime, ``_handle_idle`` dequeues first and this is
+        a no-op (``gid not in self._busy_groups``).  The per-group lock
+        prevents the two from racing on ``_dequeue_and_dispatch``.
+        """
+        await asyncio.sleep(self._STOP_IDLE_DELAY)
+        async with self._get_group_lock(gid):
+            if gid not in self._busy_groups:
+                return
+            logger.info(
+                "relay stop cleanup: gid=%s — no idle after /stop, force-clearing",
+                gid,
+            )
+            self._dequeue_and_dispatch(gid)
 
     async def _handle_idle(self, data: dict[str, Any]) -> None:
         """Handle an ``idle`` frame from the Hermes plugin.
