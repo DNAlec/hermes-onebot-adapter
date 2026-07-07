@@ -122,6 +122,11 @@ class AdapterService:
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
         )
+        # Register config-change listener early so hot-reload via the WebUI
+        # (which starts first) notifies components immediately — previously
+        # this was in _on_hermes_startup, which left a window where a config
+        # change before the Hermes WS site started would be silently ignored.
+        self.store.on_change(self._on_config_change)
 
     def _setup_file_logging(self, cfg: AdapterConfig) -> None:
         """Create or replace the file logging handler for persistent logs.
@@ -242,11 +247,12 @@ class AdapterService:
             event.chat_id, (event.text or "")[:500],
         )
         if self._relay:
-            was_queued = await self._relay.push_event(event)
-            if was_queued:
+            outcome = await self._relay.push_event(event)
+            if outcome == "queued":
                 await self._maybe_react_queued(event)
-            else:
+            elif outcome == "broadcast":
                 await self._maybe_react_delivered(event)
+            # "dropped": neither queued nor delivered — do not react.
 
     async def _maybe_react_delivered(self, event) -> None:
         """消息送达 Hermes(广播或出队)后在原消息上贴表情回应(可配置)。
@@ -330,8 +336,6 @@ class AdapterService:
         if cfg.onebot_mode == "forward":
             assert self._onebot_forward is not None
             self._forward_task = self._onebot_forward.start()
-        # Register config change callback for hot-reload of transport mode
-        self.store.on_change(self._on_config_change)
 
     async def _on_hermes_cleanup(self, app: aiohttp.web.Application) -> None:
         if self._cleaning_up:
@@ -343,8 +347,6 @@ class AdapterService:
             await self._onebot_reverse.stop()
         if self._relay:
             await self._relay.stop()
-        if self._api:
-            await self._api.close()
         if self._session and not self._session.closed:
             await self._session.close()
         for runner in self._runners:

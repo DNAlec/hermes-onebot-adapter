@@ -549,7 +549,7 @@ async def _expand_forward(
     :func:`_expand_messages` for traversal (which reads nested forwards
     from their inline ``data.content`` — NapCat populates this and refuses
     per-id queries for inner forwards with retcode=1200). Depth is guarded
-    here too to cap malicious/huge forwards.
+    by ``_expand_messages``; we skip the API call when already over the limit.
     """
     if depth > _MAX_FORWARD_DEPTH:
         return "[合并转发(已跳过:超过最大深度)]"

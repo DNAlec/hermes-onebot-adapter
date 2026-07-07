@@ -80,6 +80,7 @@ class OneBotReverseServer:
                     task = asyncio.create_task(self._handle_text(msg.data))
                     self._text_tasks.add(task)
                     task.add_done_callback(self._text_tasks.discard)
+                    task.add_done_callback(_log_task_exc)
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
         finally:
@@ -166,3 +167,11 @@ def _bearer(header: str) -> str:
     if header.lower().startswith("bearer "):
         return header[7:].strip()
     return ""
+
+
+def _log_task_exc(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("OneBot reverse background task crashed: %r", exc, exc_info=exc)

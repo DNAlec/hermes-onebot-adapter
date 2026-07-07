@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -51,6 +52,11 @@ def _make_relay(**cfg_overrides):
     relay = HermesRelayServer(cfg, mock_api, adapter_version="0.1.0-test", onebot_connected_fn=lambda: True)
     # 模拟插件上报"Hermes 不隔离群成员"(排队生效的前置条件)
     relay._store_hermes_mode(False)
+    # Seed a fake connected client so _broadcast_with_status routes to the
+    # mocked _broadcast_event instead of returning "dropped" (zero clients).
+    # Tests that exercise the zero-client path override _clients explicitly.
+    fake_ws = MagicMock()
+    relay._clients.add(fake_ws)
     return relay, mock_api, cfg
 
 
@@ -148,9 +154,9 @@ async def test_shared_group_busy_different_user_enqueues():
     relay, _, _ = _make_relay()
     relay._broadcast_event = AsyncMock()
     result1 = await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
-    assert result1 is False  # 广播,不入队
+    assert result1 == "broadcast"  # 广播,不入队
     result2 = await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
-    assert result2 is True   # 入队
+    assert result2 == "queued"    # 入队
     assert relay._broadcast_event.await_count == 1
     assert "42" in relay._queues
     assert len(relay._queues["42"]) == 1
@@ -174,9 +180,10 @@ async def test_queue_cap_rejects_incoming():
     relay, _, _ = _make_relay(event_queue_max_per_chat=2)
     relay._broadcast_event = AsyncMock()
     await relay._enqueue_or_broadcast(_group_event("head", gid="42", uid="100", mid="0"))
-    await relay._enqueue_or_broadcast(_group_event("m1", gid="42", uid="200", mid="1"))
-    await relay._enqueue_or_broadcast(_group_event("m2", gid="42", uid="300", mid="2"))
-    await relay._enqueue_or_broadcast(_group_event("m3", gid="42", uid="400", mid="3"))
+    r1 = await relay._enqueue_or_broadcast(_group_event("m1", gid="42", uid="200", mid="1"))
+    r2 = await relay._enqueue_or_broadcast(_group_event("m2", gid="42", uid="300", mid="2"))
+    r3 = await relay._enqueue_or_broadcast(_group_event("m3", gid="42", uid="400", mid="3"))
+    assert (r1, r2, r3) == ("queued", "queued", "dropped")
     q = relay._queues["42"]
     assert len(q) == 2
     assert [e.text for e in q] == ["m1", "m2"]
@@ -291,6 +298,7 @@ async def test_watchdog_dispatches_queued_after_timeout():
 async def test_last_client_disconnect_clears_busy_and_queues():
     """最后一个 plugin client 断开时清空所有 busy/queue。"""
     relay, _, _ = _make_relay()
+    relay._clients.clear()  # drop the seeded fake client; this test uses a real WS
     app = aiohttp.web.Application()
     relay.add_routes(app)
     server = TestServer(app)
@@ -314,6 +322,7 @@ async def test_last_client_disconnect_clears_busy_and_queues():
 async def test_ring_buffer_replay_honors_queue():
     """ring buffer replay 走排队逻辑,重连不会一次性推送多条。"""
     relay, _, _ = _make_relay()
+    relay._clients.clear()  # drop seeded fake client; this test uses a real WS
     app = aiohttp.web.Application()
     relay.add_routes(app)
     server = TestServer(app)
@@ -371,9 +380,6 @@ async def test_hermes_mode_report_frame_updates_cache():
     """收到 hermes_mode_report 帧后缓存 per_user 值。"""
     relay, _, _ = _make_relay()
     assert relay.hermes_group_sessions_per_user is False  # _make_relay 默认设的
-    await relay._handle_text.__wrapped__ if hasattr(relay._handle_text, "__wrapped__") else None
-    # 直接调 _handle_text 模拟插件发送
-    # 用 _store_hermes_mode 间接验证(因为 _handle_text 需要 ws)
     relay._store_hermes_mode(True)
     assert relay.hermes_group_sessions_per_user is True
     relay._store_hermes_mode(False)
@@ -465,17 +471,29 @@ async def test_dequeue_broadcast_task_exception_does_not_crash_silently():
     assert relay._busy_groups["42"][0] == "200"
 
 
-async def test_broadcast_to_zero_clients_logs_warning():
+async def test_broadcast_to_zero_clients_logs_warning(caplog):
     """Broadcasting a dequeued event with 0 connected plugin clients should
     not silently drop it — previously the 'sending to 0 client(s)' log was
     DEBUG (invisible at default INFO level) and the event was lost forever.
     """
     relay, _, _ = _make_relay()
-    # No clients connected — _clients is empty by default
+    relay._clients.clear()  # explicitly simulate zero clients
     ev = _group_event("orphan", gid="42", uid="100", mid="1")
     # Should not raise; should log WARNING and return without sending
-    await relay._broadcast_event(ev)
-    # No exception, no crash — the event is dropped but visibly logged
+    with caplog.at_level(logging.WARNING):
+        await relay._broadcast_event(ev)
+    assert "0 plugin clients connected" in caplog.text
+
+
+async def test_push_event_returns_dropped_when_zero_clients():
+    """push_event on a group with no plugin clients returns ``"dropped"`` so
+    the caller (app._on_onebot_event) does NOT react as if delivered.
+    Regression guard for the queue-full / zero-client false-"delivered" bug.
+    """
+    relay, _, _ = _make_relay()
+    relay._clients.clear()
+    outcome = await relay.push_event(_group_event("hi", gid="42", uid="100"))
+    assert outcome == "dropped"
 
 
 async def test_watchdog_loop_survives_iteration_exception():

@@ -114,6 +114,11 @@ class HermesRelayServer:
     # _RESULT_TIMEOUT, triggering Gateway retries and a death spiral.
     # Aligned with the plugin-side _MAX_INFLIGHT_SENDS=2.
     _MAX_CONCURRENT_SENDS = 2
+    # Send-dedup cache hard cap.  The cache is also TTL-evicted lazily on
+    # lookup, but sends that are never retried (the common case) would
+    # otherwise accumulate forever.  Opportunistic eviction on insert keeps
+    # the dict bounded without a background sweep.
+    _SEND_CACHE_MAX = 4096
 
     def __init__(
         self,
@@ -147,7 +152,11 @@ class HermesRelayServer:
         # ``commands_snapshot`` frame is received.
         self._commands: dict[str, dict[str, Any]] = {}
         self._commands_aliases: dict[str, str] = {}  # alias → canonical name
+        # Tasks spawned to handle a single client's text frames / send
+        # dispatches.  Tracked per-WebSocket so a disconnect can cancel only
+        # that client's in-flight work without aborting other clients.
         self._text_tasks: set[asyncio.Task] = set()
+        self._client_tasks: dict[aiohttp.web.WebSocketResponse, set[asyncio.Task]] = {}
         # Send-dedup cache: (chat_id, action, fingerprint, reply_to) ->
         # (monotonic_ts, message_id).  Guards against Gateway send retries
         # (plugin reissues the same payload with a fresh req_id when the
@@ -170,10 +179,15 @@ class HermesRelayServer:
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the server (route stays bound)."""
-        # Clear the dedup cache when config changes: a toggled enable flag or
-        # shortened TTL could otherwise leave stale entries that no longer
-        # match the new policy.
-        self._send_cache.clear()
+        # Clear the dedup cache only when the dedup policy actually changes —
+        # an unrelated hot-reload (e.g. log_level) must not wipe the cache and
+        # turn a subsequent legit Gateway retry into a duplicate send.
+        old = self._config
+        if (
+            old.send_dedup_enabled != config.send_dedup_enabled
+            or old.send_dedup_ttl_seconds != config.send_dedup_ttl_seconds
+        ):
+            self._send_cache.clear()
         # Trim any per-chat queues that exceed a newly-lowered cap.
         new_cap = config.event_queue_max_per_chat
         for gid, q in list(self._queues.items()):
@@ -181,8 +195,7 @@ class HermesRelayServer:
                 q.popleft()
                 logger.warning("relay queue trimmed (config hot-reload): gid=%s", gid)
         # 排队总开关从 True→False:清空所有 busy/queue,立即放行。
-        old_enabled = self._config.event_queue_enabled if hasattr(self, "_config") else True
-        if old_enabled and not config.event_queue_enabled:
+        if old.event_queue_enabled and not config.event_queue_enabled:
             if self._busy_groups:
                 logger.info(
                     "relay: event_queue_enabled disabled, clearing %d busy group(s)",
@@ -191,6 +204,26 @@ class HermesRelayServer:
             self._busy_groups.clear()
             self._queues.clear()
         self._config = config
+
+    def _maybe_evict_send_cache(self) -> None:
+        """Opportunistic cap on the send-dedup cache.
+
+        The cache is normally TTL-evicted lazily on lookup, but a send that is
+        never retried (the common case) inserts a key that is never looked up
+        again.  To keep the dict from growing without bound we evict a small
+        batch of the oldest entries whenever the cache exceeds its cap.  We
+        pick the entries with the smallest monotonic timestamp, which is a
+        best-effort FIFO eviction without a separate deque.
+        """
+        if len(self._send_cache) <= self._SEND_CACHE_MAX:
+            return
+        # Evict ~10% of the cap (the oldest by timestamp) to amortise the
+        # O(n) scan over many inserts.
+        excess = len(self._send_cache) - self._SEND_CACHE_MAX + max(1, self._SEND_CACHE_MAX // 10)
+        # sorted() is O(n log n); n is capped (~4k) so this is cheap enough
+        # and only fires when over the cap, not on every insert.
+        for key, _ts in sorted(self._send_cache.items(), key=lambda kv: kv[1][0])[:excess]:
+            self._send_cache.pop(key, None)
 
     @property
     def commands(self) -> list[dict[str, Any]]:
@@ -291,12 +324,17 @@ class HermesRelayServer:
         for ws in list(self._clients):
             await ws.close()
         self._clients.clear()
-        # Cancel and await in-flight _handle_text tasks.
-        for task in list(self._text_tasks):
+        # Cancel and await in-flight _handle_text tasks.  Snapshot the set
+        # before cancelling: a task's done-callback (set.discard) runs while
+        # we await, so gathering the live set would miss the very tasks we
+        # just cancelled and leave their CancelledError unretrieved.
+        snap = list(self._text_tasks)
+        for task in snap:
             task.cancel()
-        if self._text_tasks:
-            await asyncio.gather(*self._text_tasks, return_exceptions=True)
+        if snap:
+            await asyncio.gather(*snap, return_exceptions=True)
         self._text_tasks.clear()
+        self._client_tasks.clear()
         # Stop the queue watchdog and clear all queue state.
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
@@ -356,6 +394,8 @@ class HermesRelayServer:
         ws = aiohttp.web.WebSocketResponse()
         await ws.prepare(request)
         self._clients.add(ws)
+        my_tasks: set[asyncio.Task] = set()
+        self._client_tasks[ws] = my_tasks
         if self._on_connect:
             self._on_connect()
         logger.info("Hermes plugin WS connected from %s", request.remote)
@@ -376,13 +416,26 @@ class HermesRelayServer:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     task = asyncio.create_task(self._handle_text(ws, msg.data))
                     self._text_tasks.add(task)
+                    my_tasks.add(task)
                     task.add_done_callback(self._text_tasks.discard)
+                    task.add_done_callback(my_tasks.discard)
+                    task.add_done_callback(_log_task_exception)
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
         finally:
             self._clients.discard(ws)
+            self._client_tasks.pop(ws, None)
             if self._on_disconnect:
                 self._on_disconnect()
+            # Cancel this client's in-flight tasks: they hold references to
+            # the now-closed ws and would otherwise log misleading "send
+            # failed" errors on every pending send, plus hold the send
+            # semaphore while waiting for a result that will never arrive.
+            for task in list(my_tasks):
+                task.cancel()
+            if my_tasks:
+                await asyncio.gather(*my_tasks, return_exceptions=True)
+            my_tasks.clear()
             # When the last plugin client disconnects, clear all queue state:
             # no one remains to fire idle frames, so busy slots would otherwise
             # hang until the watchdog times them out.  Clearing immediately
@@ -402,12 +455,17 @@ class HermesRelayServer:
 
     # ── Inbound push (adapter -> plugin) ───────────────────────────────
 
-    async def push_event(self, event: NormalizedEvent) -> bool:
+    async def push_event(self, event: NormalizedEvent) -> str:
         """Push a OneBot event toward the Hermes plugin.
 
         Writes to the ring buffer (skipping /commands) then routes through
-        the queue policy.  Returns ``True`` if the event was enqueued (not
-        yet delivered to the plugin), ``False`` if broadcast immediately.
+        the queue policy.  Returns one of:
+
+        - ``"broadcast"``  — the event was delivered to plugin client(s) now.
+        - ``"queued"``     — the event was enqueued for a later idle frame.
+        - ``"dropped"``    — the event could not be delivered (queue full or
+          zero clients) and was discarded; the caller should NOT react as if
+          it had been delivered.
         """
         logger.debug(
             "relay push: chat_id=%s clients=%d text_preview=%r",
@@ -417,11 +475,11 @@ class HermesRelayServer:
         # Skip slash commands from the ring buffer — control commands like
         # /restart, /stop, /update must not be replayed to a reconnecting
         # plugin, otherwise they create an infinite restart loop.
-        if not event.text.startswith("/"):
+        if not (event.text or "").startswith("/"):
             self._ring_buffer.append((time.monotonic(), event))
         return await self._enqueue_or_broadcast(event)
 
-    async def _enqueue_or_broadcast(self, event: NormalizedEvent) -> bool:
+    async def _enqueue_or_broadcast(self, event: NormalizedEvent) -> str:
         """Apply the per-chat queue policy then broadcast.
 
         排队生效条件(全部满足):
@@ -433,33 +491,28 @@ class HermesRelayServer:
         排队规则:群未 busy → 标记 busy 并广播;群 busy 且新消息来自同人 → 放行
         (可补充当前任务);群 busy 且来自不同人 → 入队 FIFO。
 
-        Returns ``True`` when the event was enqueued, ``False`` when broadcast.
+        Returns ``"broadcast"``, ``"queued"`` or ``"dropped"`` (see push_event).
         """
         gid = self._group_id_of(event)
         if gid is None:
             # 私聊 — 不排队
-            await self._broadcast_event(event)
-            return False
+            return await self._broadcast_with_status(event)
         # /命令绕过排队
-        if event.text.startswith("/"):
-            await self._broadcast_event(event)
-            return False
+        if (event.text or "").startswith("/"):
+            return await self._broadcast_with_status(event)
         # Hermes 隔离群成员 或 适配器总开关关 → 不排队
         if self._hermes_group_sessions_per_user or not self._config.event_queue_enabled:
-            await self._broadcast_event(event)
-            return False
+            return await self._broadcast_with_status(event)
         busy = self._busy_groups.get(gid)
         if busy is None:
             # Idle — claim the group and broadcast immediately.
             self._busy_groups[gid] = (event.user_id, time.monotonic())
             self._ensure_watchdog()
-            await self._broadcast_event(event)
-            return False
+            return await self._broadcast_with_status(event)
         busy_user_id, _since = busy
         if event.user_id == busy_user_id:
             # Same user as the in-flight turn — let it through.
-            await self._broadcast_event(event)
-            return False
+            return await self._broadcast_with_status(event)
         # Different user while busy — enqueue.
         q = self._queues.setdefault(gid, deque())
         cap = self._config.event_queue_max_per_chat
@@ -468,25 +521,59 @@ class HermesRelayServer:
                 "relay queue full (gid=%s cap=%d), dropping incoming text_preview=%r",
                 gid, cap, (event.text or "")[:120],
             )
-            return False
+            return "dropped"
         q.append(event)
         logger.info(
             "relay enqueue: gid=%s queued=%d busy_user=%s new_user=%s text_preview=%r",
             gid, len(q), busy_user_id, event.user_id,
             (event.text or "")[:120],
         )
-        return True
+        return "queued"
+
+    async def _broadcast_with_status(self, event: NormalizedEvent) -> str:
+        """Broadcast *event* and return ``"broadcast"`` when there is at
+        least one connected client, ``"dropped"`` when there are zero
+        clients (the event is logged but not delivered).  The ring buffer
+        still holds the event for a future reconnect replay.
+        """
+        if not self._clients:
+            logger.warning(
+                "relay broadcast: 0 plugin clients connected — event dropped (chat_id=%s text_preview=%r)",
+                event.chat_id, (event.text or "")[:120],
+            )
+            return "dropped"
+        await self._broadcast_event(event)
+        return "broadcast"
 
     @staticmethod
     def _group_id_of(event: NormalizedEvent) -> str | None:
         """Return the bare numeric group id when *event* belongs to a group
         chat (``chat_id`` == ``group:<gid>``).  Returns ``None`` for DMs.
+
+        The returned string preserves leading zeros (e.g. ``"042"``) so that
+        busy-slot keys are consistent across ``push_event`` / ``_handle_idle``
+        / ``_handle_send`` — never use ``str(int(...))`` for busy-slot keys.
         """
         cid = event.chat_id
         if not cid.startswith("group:"):
             return None
         gid = cid[len("group:"):]
         return gid or None
+
+    @staticmethod
+    def _gid_key(num_id: Any) -> str:
+        """Canonical busy-slot key for a numeric group id.
+
+        ``parse_chat_id`` returns ``num_id`` as ``int``, which strips leading
+        zeros (``"042"`` → ``42``).  Busy slots are keyed by the raw string
+        from ``chat_id`` (see ``_group_id_of``); to look them up from a
+        ``num_id`` we must reconstruct the same string.  ``str(num_id)`` is
+        correct for QQ groups because QQ group ids are stored without
+        leading zeros in OneBot events — but we use this helper to keep the
+        convention in one place and avoid the ``str(num_id)`` vs raw-string
+        drift bug recurring.
+        """
+        return str(num_id)
 
     def _ensure_watchdog(self) -> None:
         """Start the busy-timeout watchdog if it isn't already running."""
@@ -529,8 +616,17 @@ class HermesRelayServer:
         Synchronous by design — called from idle handler, watchdog, and
         plugin-disconnect cleanup.  Broadcast is scheduled as a task so the
         caller doesn't have to await it.
+
+        If no plugin client is currently connected, the busy slot is cleared
+        but the queue is left intact so a future reconnect replay can pick up
+        the message — broadcasting into zero clients would silently drop it.
+        The watchdog will retry on its next sweep once a plugin reconnects.
         """
         self._busy_groups.pop(gid, None)
+        if not self._clients:
+            # No plugin connected — leave the queue in place; the ring buffer
+            # replay on the next reconnect (or the next idle) will dispatch.
+            return
         q = self._queues.get(gid)
         if not q:
             if q is not None:
@@ -541,14 +637,13 @@ class HermesRelayServer:
             self._queues.pop(gid, None)
         self._busy_groups[gid] = (nxt.user_id, time.monotonic())
         self._ensure_watchdog()
-        # Track the broadcast + on_dispatch tasks so stop() can cancel them
-        # and exceptions surface via the done-callback instead of being
-        # silently swallowed ("Task exception was never retrieved").
-        for coro in (self._broadcast_event(nxt),):
-            task = asyncio.create_task(coro)
-            self._text_tasks.add(task)
-            task.add_done_callback(self._text_tasks.discard)
-            task.add_done_callback(_log_task_exception)
+        # Schedule the broadcast + on_dispatch as tracked tasks so stop() can
+        # cancel them and exceptions surface via the done-callback instead of
+        # being silently swallowed ("Task exception was never retrieved").
+        task = asyncio.create_task(self._broadcast_event(nxt))
+        self._text_tasks.add(task)
+        task.add_done_callback(self._text_tasks.discard)
+        task.add_done_callback(_log_task_exception)
         if self._on_dispatch is not None:
             task = asyncio.create_task(self._on_dispatch(nxt))
             self._text_tasks.add(task)
@@ -570,13 +665,17 @@ class HermesRelayServer:
         gid = str(data.get("group_id", ""))
         if not gid:
             # Fall back to parsing chat_id if group_id absent (defensive).
+            # Use the raw substring (preserving leading zeros) so the busy-slot
+            # key matches what _group_id_of / _handle_send used when claiming.
             cid = str(data.get("chat_id", ""))
-            try:
-                _, num_id = parse_chat_id(cid)
-                gid = str(num_id)
-            except (ValueError, TypeError):
+            if cid.startswith("group:"):
+                gid = cid[len("group:"):]
+            else:
                 logger.warning("relay idle frame without group_id, ignoring: %s", data)
                 return
+        if not gid:
+            logger.warning("relay idle frame without group_id, ignoring: %s", data)
+            return
         if gid not in self._busy_groups:
             logger.info("relay idle for non-busy gid=%s (already cleared by watchdog/replay/disconnect)", gid)
             return
@@ -793,9 +892,11 @@ class HermesRelayServer:
                 # 写入去重缓存(send_document 无 message_id,缓存空串;命中时回 None)。
                 if dedup_key is not None:
                     self._send_cache[dedup_key] = (time.monotonic(), "")
-                if is_group and str(num_id) in self._busy_groups:
-                    busy_user, _ = self._busy_groups[str(num_id)]
-                    self._busy_groups[str(num_id)] = (busy_user, time.monotonic())
+                    self._maybe_evict_send_cache()
+                if is_group and self._gid_key(num_id) in self._busy_groups:
+                    gk = self._gid_key(num_id)
+                    busy_user, _ = self._busy_groups[gk]
+                    self._busy_groups[gk] = (busy_user, time.monotonic())
                 await ws.send_json(result_message(req_id, True))
                 return
 
@@ -813,6 +914,7 @@ class HermesRelayServer:
             # 写入去重缓存:在 SeqMap/log 之前,确保后续步骤异常时重试仍能命中。
             if dedup_key is not None:
                 self._send_cache[dedup_key] = (time.monotonic(), msg_id)
+                self._maybe_evict_send_cache()
             logger.debug(
                 "relay send response: action=%s chat_id=%s msg_id=%s resp=%s",
                 action, chat_id, msg_id, json.dumps(resp, ensure_ascii=False)[:1000],
@@ -836,18 +938,21 @@ class HermesRelayServer:
             # dedup TTL 过期 → 群里重复发送(刷屏)。
             await ws.send_json(result_message(req_id, True, message_id=msg_id))
             # Hermes 发出的任意消息(send_text / 长任务心跳等)都说明 agent 仍在活跃,
-            # 顺便刷新该群 busy 槽的时间戳,防止看门狗误判超时。
-            gid_str = str(num_id)
-            if is_group and gid_str in self._busy_groups:
-                busy_user, _ = self._busy_groups[gid_str]
-                self._busy_groups[gid_str] = (busy_user, time.monotonic())
+            # 顺便刷新该群 busy 槽的时间戳,防止看门狗误判超时。busy 槽用原始群号
+            # 字符串作 key(保留前导零),与 _group_id_of / _handle_idle 保持一致。
+            if is_group:
+                gk = self._gid_key(num_id)
+                if gk in self._busy_groups:
+                    busy_user, _ = self._busy_groups[gk]
+                    self._busy_groups[gk] = (busy_user, time.monotonic())
             if self._seq_map is not None and is_group and msg_id:
                 task = asyncio.create_task(
-                    self._populate_seq_map(str(num_id), msg_id),
+                    self._populate_seq_map(self._gid_key(num_id), msg_id),
                     name=f"seq_map_populate:{num_id}:{msg_id}",
                 )
                 self._text_tasks.add(task)
                 task.add_done_callback(self._text_tasks.discard)
+                task.add_done_callback(_log_task_exception)
         except Exception as exc:
             logger.exception("send failed")
             await ws.send_json(result_message(req_id, False, error=str(exc)))

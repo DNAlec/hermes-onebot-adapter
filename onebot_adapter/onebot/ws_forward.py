@@ -1,8 +1,7 @@
 """Forward WebSocket client: adapter dials out to OneBot's WS server.
 
 Uses exponential backoff with jitter for reconnection.  The shared
-``aiohttp.ClientSession`` from the service is reused for all connections
-and media downloads.
+``aiohttp.ClientSession`` from the service is reused for all connections.
 """
 from __future__ import annotations
 
@@ -169,6 +168,7 @@ class OneBotForwardClient:
                     task = asyncio.create_task(self._handle_text(msg.data))
                     self._text_tasks.add(task)
                     task.add_done_callback(self._text_tasks.discard)
+                    task.add_done_callback(_log_task_exc)
                 elif msg.type in (
                     aiohttp.WSMsgType.ERROR,
                     aiohttp.WSMsgType.CLOSE,
@@ -237,3 +237,11 @@ class OneBotForwardClient:
                 await self._on_event(event)
             except Exception:
                 logger.exception("OneBot forward: on_event callback failed")
+
+
+def _log_task_exc(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("OneBot forward background task crashed: %r", exc, exc_info=exc)

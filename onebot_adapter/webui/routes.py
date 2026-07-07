@@ -120,7 +120,14 @@ def _login(store: ConfigStore, state: dict[str, Any]):
         except Exception:
             return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
         token = data.get("token", "")
+        if not token:
+            return aiohttp.web.json_response({"error": "token required"}, status=401)
         cfg = store.config
+        if not cfg.webui_token:
+            return aiohttp.web.json_response(
+                {"error": "webui_token not configured — restart the adapter service to regenerate it"},
+                status=401,
+            )
         if token != cfg.webui_token:
             fails, first_ts = failures.get(ip, (0, now))
             failures[ip] = (fails + 1, first_ts)
@@ -279,6 +286,25 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
+def _is_safe_install_path(target: Path) -> bool:
+    """Return True if *target* is safe to use as an install target.
+
+    Only allow writes under the user's home directory, /home, or /tmp.
+    Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
+    writes via the WebUI (which is auth-gated but behind a proxy the
+    same IP may be shared by multiple users).
+    """
+    allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
+    resolved = target.resolve(strict=False)
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            pass
+    return False
+
+
 def _install_plugin(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
@@ -287,13 +313,24 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
             data = {}
         install_dir = data.get("hermes_install_dir")
         cfg = store.config
+        from onebot_adapter.installer import _resolve_hermes_dir
+
+        # Validate the install dir is under the user's home directory or an
+        # explicitly allowed path, to prevent accidental writes to system
+        # paths (e.g. /, /etc) when the WebUI is exposed behind a proxy.
+        target = _resolve_hermes_dir(install_dir)
+        if not _is_safe_install_path(target):
+            return aiohttp.web.json_response(
+                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
+                status=400,
+            )
         adapter_url = f"ws://127.0.0.1:{cfg.hermes_ws_port}{cfg.hermes_ws_path}"
         adapter_token = cfg.hermes_ws_token
         from onebot_adapter import installer
 
         try:
             result = installer.install(
-                install_dir,
+                str(target),
                 adapter_url=adapter_url,
                 adapter_token=adapter_token,
             )
@@ -312,10 +349,18 @@ def _uninstall_plugin(state: dict[str, Any]):
         except Exception:
             data = {}
         install_dir = data.get("hermes_install_dir")
+        from onebot_adapter.installer import _resolve_hermes_dir
+
+        target = _resolve_hermes_dir(install_dir)
+        if not _is_safe_install_path(target):
+            return aiohttp.web.json_response(
+                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
+                status=400,
+            )
         from onebot_adapter import installer
 
         try:
-            result = installer.uninstall(install_dir)
+            result = installer.uninstall(str(target))
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin uninstall failed")

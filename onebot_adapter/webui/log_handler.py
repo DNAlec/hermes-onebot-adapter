@@ -34,8 +34,3 @@ def attach_log_handler(state: dict[str, Any], level: str = "INFO") -> WebUILogHa
     handler = WebUILogHandler(buffer, level=getattr(logging, level.upper(), logging.INFO))
     logging.getLogger().addHandler(handler)
     return handler
-
-
-def _level_from_str(level_str: str) -> int:
-    """Convert a level name string to its numeric logging level (INFO fallback)."""
-    return getattr(logging, level_str.upper(), logging.INFO)

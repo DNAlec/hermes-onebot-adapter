@@ -451,10 +451,11 @@ async def test_parser_command_filter_per_group_override():
     assert isinstance(result, FilteredEvent)
 
 
-async def test_parser_command_filter_runs_before_media_download():
-    """Filtered commands should not trigger media downloads.
+async def test_parser_command_filter_works_with_non_text_segments():
+    """Filtered commands should return FilteredEvent regardless of segment types.
 
-    Use a command with an image segment that would download if not filtered.
+    The filter gating runs before message expansion (forward/reply) and should
+    short-circuit for any segment, including rich-media / at segments.
     """
     cfg = AdapterConfig(
         command_filter_enabled=True,

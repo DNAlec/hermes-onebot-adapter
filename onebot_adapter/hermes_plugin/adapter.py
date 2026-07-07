@@ -270,6 +270,14 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 # Clean up the old WS before opening a new one.
                 if self._ws and not self._ws.closed:
                     await self._ws.close()
+                # Cancel any event dispatch tasks still running from the dead
+                # session so they don't try to send() / _request() on the new
+                # WS, interleaving stale-turn results with the current session.
+                for task in list(self._event_tasks):
+                    task.cancel()
+                if self._event_tasks:
+                    await asyncio.gather(*self._event_tasks, return_exceptions=True)
+                self._event_tasks.clear()
                 # Recreate the session if it was closed.
                 if not self._session or self._session.closed:
                     self._session = aiohttp.ClientSession()
@@ -809,27 +817,28 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             return SendResult(success=False, error=str(exc))
 
     async def _api_call(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        if not self._ws or self._ws.closed:
-            return {"success": False, "error": "adapter WS not connected"}
-        logger.debug("OneBot plugin api_call: action=%s", action)
-        logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
-        req_id = str(uuid.uuid4())
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
-        self._futures[req_id] = fut
-        await self._ws.send_json({
-            "type": "api_call",
-            "action": action,
-            "req_id": req_id,
-            "params": params,
-        })
-        try:
-            result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
-            logger.debug("OneBot plugin api_call result: action=%s success=%s data=%s",
-                         action, result.get("success"), json.dumps(result.get("data"), ensure_ascii=False)[:2000])
-            return result
-        except TimeoutError:
-            self._futures.pop(req_id, None)
-            return {"success": False, "error": f"timeout waiting for {action}"}
+        async with self._send_semaphore:
+            if not self._ws or self._ws.closed:
+                return {"success": False, "error": "adapter WS not connected"}
+            logger.debug("OneBot plugin api_call: action=%s", action)
+            logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
+            req_id = str(uuid.uuid4())
+            fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+            self._futures[req_id] = fut
+            await self._ws.send_json({
+                "type": "api_call",
+                "action": action,
+                "req_id": req_id,
+                "params": params,
+            })
+            try:
+                result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
+                logger.debug("OneBot plugin api_call result: action=%s success=%s data=%s",
+                             action, result.get("success"), json.dumps(result.get("data"), ensure_ascii=False)[:2000])
+                return result
+            except TimeoutError:
+                self._futures.pop(req_id, None)
+                return {"success": False, "error": f"timeout waiting for {action}"}
 
     # ── Typing (no-op, OneBot has no typing indicator) ───────────────────
 
@@ -876,6 +885,14 @@ def validate_config(config) -> bool:
 
 
 def is_connected(config) -> bool:
+    """Check whether the adapter URL and token are configured.
+
+    Note: this validates the *configuration* (is the adapter reachable in
+    principle), not the live WS connection status.  A configured-but-not-
+    running adapter will still return True.  The actual liveness is tracked
+    by ``_is_connected`` on the adapter instance and surfaced via the
+    ``ready`` frame's ``onebot_connected`` field.
+    """
     return validate_config(config)
 
 
@@ -954,7 +971,7 @@ def register(ctx) -> None:
     """Plugin entry point: called by the Hermes plugin system."""
     ctx.register_platform(
         name="onebot",
-        label="OneBot (OneBot)",
+        label="OneBot (NapCat)",
         adapter_factory=lambda cfg: OneBotAdapter(cfg),
         check_fn=check_requirements,
         validate_config=validate_config,
