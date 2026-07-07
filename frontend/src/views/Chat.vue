@@ -289,13 +289,13 @@ function resetHint() {
         </label>
         <label>
           消息送达后贴表情回应 ID
-          <input type="text" v-model="cfg.reaction_emoji_id" placeholder="76" />
-          <span class="hint">QQ 表情编号（默认 76=👍）</span>
+          <input type="text" v-model="cfg.reaction_emoji_id" placeholder="124" />
+          <span class="hint">QQ 表情编号（默认 124）</span>
         </label>
         <label>
           消息排队时贴表情回应 ID
-          <input type="text" v-model="cfg.reaction_emoji_id_queued" placeholder="⏳" />
-          <span class="hint">消息进入排队队列时贴的表情，空=不贴（默认 ⏳）</span>
+          <input type="text" v-model="cfg.reaction_emoji_id_queued" placeholder="123" />
+          <span class="hint">消息进入排队队列时贴的表情，空=不贴（默认 123）</span>
         </label>
       </div>
     </div>
