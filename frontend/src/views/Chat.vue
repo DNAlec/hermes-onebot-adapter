@@ -100,6 +100,7 @@ async function saveGlobal() {
       message_show_group_id: c.message_show_group_id,
       reaction_emoji_enabled: c.reaction_emoji_enabled,
       reaction_emoji_id: c.reaction_emoji_id,
+      reaction_emoji_id_queued: c.reaction_emoji_id_queued,
       event_queue_enabled: c.event_queue_enabled,
       event_queue_max_per_chat: c.event_queue_max_per_chat,
       event_queue_idle_timeout: c.event_queue_idle_timeout,
@@ -287,9 +288,14 @@ function resetHint() {
           <span>消息送达后贴表情回应（仅 Hermes 插件在线时触发）</span>
         </label>
         <label>
-          贴表情回应使用的表情 ID
+          消息送达后贴表情回应 ID
           <input type="text" v-model="cfg.reaction_emoji_id" placeholder="76" />
           <span class="hint">QQ 表情编号（默认 76=👍）</span>
+        </label>
+        <label>
+          消息排队时贴表情回应 ID
+          <input type="text" v-model="cfg.reaction_emoji_id_queued" placeholder="⏳" />
+          <span class="hint">消息进入排队队列时贴的表情，空=不贴（默认 ⏳）</span>
         </label>
       </div>
     </div>

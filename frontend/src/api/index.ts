@@ -132,6 +132,7 @@ export interface Config {
   seq_map_size: number;
   reaction_emoji_enabled: boolean;
   reaction_emoji_id: string;
+  reaction_emoji_id_queued: string;
   // ── 发送去重 ──
   send_dedup_enabled: boolean;
   send_dedup_ttl_seconds: number;

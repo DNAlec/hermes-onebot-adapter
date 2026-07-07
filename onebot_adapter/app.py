@@ -76,6 +76,7 @@ class AdapterService:
             on_connect=self._update_status,
             on_disconnect=self._update_status,
             on_filtered=self._on_filtered_command,
+            on_dispatch=self._maybe_react_delivered,
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
         )
@@ -214,19 +215,35 @@ class AdapterService:
             event.chat_id, (event.text or "")[:500],
         )
         if self._relay:
-            await self._relay.push_event(event)
-            await self._maybe_react(event)
+            was_queued = await self._relay.push_event(event)
+            if was_queued:
+                await self._maybe_react_queued(event)
+            else:
+                await self._maybe_react_delivered(event)
 
-    async def _maybe_react(self, event) -> None:
-        """消息通过过滤并送达 Hermes 后,在原消息上贴表情回应(可配置)。
+    async def _maybe_react_delivered(self, event) -> None:
+        """消息送达 Hermes(广播或出队)后在原消息上贴表情回应(可配置)。
 
         触发条件:功能全局开启且当前会话未单独关闭;Hermes 插件有连接(否则
         消息只进了 ring buffer 等重连重放,不算"送达");event.message_id 可转 int。
         调用 OneBot ``set_msg_emoji_like`` API,失败仅记 debug 日志,不影响主流程。
         """
-        cfg = self.store.config
-        if not cfg.reaction_emoji_id:
+        await self._do_react(event, self.store.config.reaction_emoji_id)
+
+    async def _maybe_react_queued(self, event) -> None:
+        """消息进入排队队列时在原消息上贴表情回应(可配置)。
+
+        与 _maybe_react_delivered 结构相同,但使用 reaction_emoji_id_queued
+        配置项。当该配置为空字符串时,排队时不贴表情。
+        """
+        emoji_id = self.store.config.reaction_emoji_id_queued
+        if not emoji_id:
             return
+        await self._do_react(event, emoji_id)
+
+    async def _do_react(self, event, emoji_id: str) -> None:
+        """统一的贴表情回应实现。"""
+        cfg = self.store.config
         try:
             is_group, num_id = parse_chat_id(event.chat_id)
         except (ValueError, TypeError):
@@ -241,7 +258,7 @@ class AdapterService:
         except (ValueError, TypeError):
             return
         assert self._api is not None
-        params: dict[str, Any] = {"message_id": msg_id, "emoji_id": cfg.reaction_emoji_id}
+        params: dict[str, Any] = {"message_id": msg_id, "emoji_id": emoji_id}
         if is_group:
             params["group_id"] = num_id
         else:
@@ -250,7 +267,7 @@ class AdapterService:
             await self._api.call("set_msg_emoji_like", params)
             logger.debug(
                 "reaction emoji set: msg=%s emoji=%s chat=%s",
-                event.message_id, cfg.reaction_emoji_id, event.chat_id,
+                event.message_id, emoji_id, event.chat_id,
             )
         except Exception:
             logger.debug(
