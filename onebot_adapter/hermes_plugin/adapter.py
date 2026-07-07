@@ -58,6 +58,13 @@ _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
 _RECONNECT_INITIAL_DELAY = 1.0
 _RECONNECT_MAX_DELAY = 30.0
+# Maximum concurrent in-flight send requests (send_text/send_image/...).
+# Each send awaits a ``result`` frame from the adapter with a 30s timeout.
+# Without a limit, Gateway ``_send_with_retry`` retries pile up as parallel
+# ``_request`` coroutines, all hitting the serial OneBot WS and amplifying
+# congestion (death spiral).  Limiting to 2 keeps retries orderly: one
+# in-flight + one retry max, matching the adapter-side semaphore.
+_MAX_INFLIGHT_SENDS = 2
 
 _PLUGIN_YAML_PATH = Path(__file__).parent / "plugin.yaml"
 _VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
@@ -106,6 +113,9 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._watchdog_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Limit concurrent in-flight send requests to prevent retry storms
+        # from overwhelming the serial OneBot WS API.  See _MAX_INFLIGHT_SENDS.
+        self._send_semaphore = asyncio.Semaphore(_MAX_INFLIGHT_SENDS)
         self._onebot_connected = False
         self._self_id = ""
         self._current_is_admin = False
@@ -175,7 +185,13 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             url += f"&token={self._adapter_token}"
         else:
             url += f"?token={self._adapter_token}"
-        self._ws = await self._session.ws_connect(url)
+        # heartbeat=30 enables aiohttp-level PING/PONG keepalive so that a
+        # silent network drop (NAT idle reaping, suspend/resume, Wi-Fi roam)
+        # is detected within ~30s rather than waiting minutes for OS TCP
+        # keepalive.  Without this, an idle plugin↔relay WS can sit dead and
+        # undetected until the next send attempt, at which point the watchdog
+        # kicks off a 1→30s exponential backoff reconnect (~2-3 min total).
+        self._ws = await self._session.ws_connect(url, heartbeat=30)
 
     async def disconnect(self) -> None:
         self._is_connected = False
@@ -444,21 +460,30 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if active is not None:
             generation = getattr(active, "_hermes_run_generation", None)
         gid = chat_id[len("group:"):]
-        ws = self._ws
-        if ws is None or ws.closed:
+        if self._ws is None or self._ws.closed:
             return
 
         async def _fire_idle() -> None:
+            # Re-fetch self._ws at fire time instead of closing over the value
+            # captured at registration.  If the plugin reconnected between
+            # register_post_delivery_callback and the post-delivery callback
+            # firing, the stale ws would be closed and the idle frame would
+            # be lost silently — leaving the adapter's busy slot stuck until
+            # the watchdog reaps it (default 300s).
+            ws = self._ws
+            if ws is None or ws.closed:
+                logger.warning("OneBot: idle frame dropped — ws closed at fire time (gid=%s)", gid)
+                return
             try:
                 await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
-                logger.debug("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
+                logger.info("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
             except Exception:
-                logger.debug("OneBot: idle frame send failed (ws closed?)", exc_info=True)
+                logger.warning("OneBot: idle frame send failed (ws closed?) gid=%s", gid, exc_info=True)
 
         try:
             self.register_post_delivery_callback(session_key, _fire_idle, generation=generation)
         except Exception:
-            logger.debug("OneBot: register_post_delivery_callback failed", exc_info=True)
+            logger.warning("OneBot: register_post_delivery_callback failed gid=%s", gid, exc_info=True)
 
     # ── Slash-command registry push ─────────────────────────────────────
 
@@ -576,34 +601,41 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     # ── Outbound send helpers ────────────────────────────────────────────
 
     async def _request(self, action: str, **payload: Any) -> dict[str, Any]:
-        """Send a ``send`` frame and await the matching ``result``."""
-        if not self._ws or self._ws.closed:
-            return {"success": False, "error": "adapter WS not connected"}
-        req_id = str(uuid.uuid4())
-        msg: dict[str, Any] = {
-            "type": "send",
-            "action": action,
-            "req_id": req_id,
-        }
-        msg.update(payload)
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
-        self._futures[req_id] = fut
-        logger.debug(
-            "OneBot plugin _request: action=%s req_id=%s payload_keys=%s frame=%s",
-            action, req_id, list(payload.keys()),
-            json.dumps(msg, ensure_ascii=False)[:2000],
-        )
-        await self._ws.send_json(msg)
-        try:
-            result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
+        """Send a ``send`` frame and await the matching ``result``.
+
+        Concurrency is bounded by ``_MAX_INFLIGHT_SENDS`` so that Gateway
+        ``_send_with_retry`` retry storms cannot pile up unlimited parallel
+        sends on the serial OneBot WS (which would amplify congestion and
+        cause more timeouts → more retries, a death spiral).
+        """
+        async with self._send_semaphore:
+            if not self._ws or self._ws.closed:
+                return {"success": False, "error": "adapter WS not connected"}
+            req_id = str(uuid.uuid4())
+            msg: dict[str, Any] = {
+                "type": "send",
+                "action": action,
+                "req_id": req_id,
+            }
+            msg.update(payload)
+            fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+            self._futures[req_id] = fut
             logger.debug(
-                "OneBot plugin _request result: action=%s req_id=%s success=%s message_id=%s",
-                action, req_id, result.get("success"), result.get("message_id"),
+                "OneBot plugin _request: action=%s req_id=%s payload_keys=%s frame=%s",
+                action, req_id, list(payload.keys()),
+                json.dumps(msg, ensure_ascii=False)[:2000],
             )
-            return result
-        except TimeoutError:
-            self._futures.pop(req_id, None)
-            return {"success": False, "error": f"timeout waiting for {action} result"}
+            await self._ws.send_json(msg)
+            try:
+                result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
+                logger.debug(
+                    "OneBot plugin _request result: action=%s req_id=%s success=%s message_id=%s",
+                    action, req_id, result.get("success"), result.get("message_id"),
+                )
+                return result
+            except TimeoutError:
+                self._futures.pop(req_id, None)
+                return {"success": False, "error": f"timeout waiting for {action} result"}
 
     # ── Required abstract methods ────────────────────────────────────────
 

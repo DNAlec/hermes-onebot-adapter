@@ -169,7 +169,7 @@ class AdapterConfig:
     reaction_emoji_id_queued: str = "⏳"      # 消息排队时贴的表情ID,空=不入队时不贴表情
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
-    send_dedup_ttl_seconds: float = 10.0
+    send_dedup_ttl_seconds: float = 90.0
 
     # ── 群聊消息排队(仅在 Hermes group_sessions_per_user=false 全群共享 session 时生效)──
     event_queue_enabled: bool = True            # 总开关:Hermes 不隔离群成员时是否排队

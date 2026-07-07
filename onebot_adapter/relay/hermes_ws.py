@@ -44,6 +44,17 @@ logger = logging.getLogger(__name__)
 
 _AT_MARKER_PATTERN = re.compile(r"\{@(\d{5,11})\}")
 
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done-callback: log exceptions on fire-and-forget tasks instead of
+    letting them surface as "Task exception was never retrieved".
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("relay background task crashed: %r", exc, exc_info=exc)
+
 # Send actions eligible for deduplication.  When the Hermes gateway's
 # ``send_text`` (or any send) times out waiting for the adapter's ``result``
 # frame, it retries with a fresh ``req_id`` but identical payload — we hash the
@@ -97,6 +108,12 @@ class HermesRelayServer:
     _RING_BUFFER_SIZE = 50
     _RING_BUFFER_MAX_AGE = 30.0  # seconds; skip older events on replay
     _WATCHDOG_INTERVAL = 30.0    # seconds between busy-timeout sweeps
+    # Max concurrent OneBot API send calls (send_group_msg / upload_*_file).
+    # NapCat serializes API requests on a single WS, so unbounded concurrency
+    # queues up at NapCat and inflates latency past the plugin's 30s
+    # _RESULT_TIMEOUT, triggering Gateway retries and a death spiral.
+    # Aligned with the plugin-side _MAX_INFLIGHT_SENDS=2.
+    _MAX_CONCURRENT_SENDS = 2
 
     def __init__(
         self,
@@ -145,6 +162,9 @@ class HermesRelayServer:
         self._busy_groups: dict[str, tuple[str, float]] = {}
         self._queues: dict[str, deque[NormalizedEvent]] = {}
         self._watchdog_task: asyncio.Task[None] | None = None
+        # Limit concurrent OneBot API send calls to prevent NapCat WS
+        # serialization from inflating latency past _RESULT_TIMEOUT.
+        self._send_api_semaphore = asyncio.Semaphore(self._MAX_CONCURRENT_SENDS)
         self._plugin_version: str | None = None
         self._version_mismatch: bool = True
 
@@ -483,17 +503,24 @@ class HermesRelayServer:
         """
         while True:
             await asyncio.sleep(self._WATCHDOG_INTERVAL)
-            now = time.monotonic()
-            timeout = self._config.event_queue_idle_timeout
-            for gid in list(self._busy_groups.keys()):
-                busy_user, since = self._busy_groups.get(gid, ("", now))
-                if now - since < timeout:
-                    continue
-                logger.warning(
-                    "relay busy watchdog: gid=%s busy_user=%s timeout=%.0fs — force-clearing",
-                    gid, busy_user, now - since,
-                )
-                self._dequeue_and_dispatch(gid)
+            try:
+                now = time.monotonic()
+                timeout = self._config.event_queue_idle_timeout
+                for gid in list(self._busy_groups.keys()):
+                    busy_user, since = self._busy_groups.get(gid, ("", now))
+                    if now - since < timeout:
+                        continue
+                    logger.warning(
+                        "relay busy watchdog: gid=%s busy_user=%s timeout=%.0fs — force-clearing",
+                        gid, busy_user, now - since,
+                    )
+                    self._dequeue_and_dispatch(gid)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Never let the watchdog die — a stuck busy slot is worse
+                # than a skipped sweep.  Log and continue.
+                logger.exception("relay watchdog loop iteration crashed; continuing")
 
     def _dequeue_and_dispatch(self, gid: str) -> None:
         """Clear the busy slot for *gid* and, if a queued message exists,
@@ -514,9 +541,19 @@ class HermesRelayServer:
             self._queues.pop(gid, None)
         self._busy_groups[gid] = (nxt.user_id, time.monotonic())
         self._ensure_watchdog()
-        asyncio.create_task(self._broadcast_event(nxt))
+        # Track the broadcast + on_dispatch tasks so stop() can cancel them
+        # and exceptions surface via the done-callback instead of being
+        # silently swallowed ("Task exception was never retrieved").
+        for coro in (self._broadcast_event(nxt),):
+            task = asyncio.create_task(coro)
+            self._text_tasks.add(task)
+            task.add_done_callback(self._text_tasks.discard)
+            task.add_done_callback(_log_task_exception)
         if self._on_dispatch is not None:
-            asyncio.create_task(self._on_dispatch(nxt))
+            task = asyncio.create_task(self._on_dispatch(nxt))
+            self._text_tasks.add(task)
+            task.add_done_callback(self._text_tasks.discard)
+            task.add_done_callback(_log_task_exception)
         logger.info(
             "relay dequeue: gid=%s remaining=%d new_busy_user=%s text_preview=%r",
             gid, len(self._queues.get(gid, ())), nxt.user_id,
@@ -541,13 +578,20 @@ class HermesRelayServer:
                 logger.warning("relay idle frame without group_id, ignoring: %s", data)
                 return
         if gid not in self._busy_groups:
-            logger.debug("relay idle for non-busy gid=%s (already cleared)", gid)
+            logger.info("relay idle for non-busy gid=%s (already cleared by watchdog/replay/disconnect)", gid)
             return
-        logger.debug("relay idle: gid=%s — dispatching next queued", gid)
+        logger.info("relay idle: gid=%s — dispatching next queued", gid)
         self._dequeue_and_dispatch(gid)
 
     async def _broadcast_event(self, event: NormalizedEvent) -> None:
-        logger.debug("relay broadcast: sending to %d client(s)", len(self._clients))
+        n_clients = len(self._clients)
+        if n_clients == 0:
+            logger.warning(
+                "relay broadcast: 0 plugin clients connected — event dropped (chat_id=%s text_preview=%r)",
+                event.chat_id, (event.text or "")[:120],
+            )
+            return
+        logger.debug("relay broadcast: sending to %d client(s)", n_clients)
         frame = event_message(event)
         logger.debug("relay broadcast event frame: %s", json.dumps(frame, ensure_ascii=False)[:2000])
         for ws in list(self._clients):
@@ -741,9 +785,11 @@ class HermesRelayServer:
                     name_resolver=self._name_resolver,
                 )
                 if is_group:
-                    await self._api.upload_group_file(num_id, file_ref, filename)
+                    async with self._send_api_semaphore:
+                        await self._api.upload_group_file(num_id, file_ref, filename)
                 else:
-                    await self._api.upload_private_file(num_id, file_ref, filename)
+                    async with self._send_api_semaphore:
+                        await self._api.upload_private_file(num_id, file_ref, filename)
                 # 写入去重缓存(send_document 无 message_id,缓存空串;命中时回 None)。
                 if dedup_key is not None:
                     self._send_cache[dedup_key] = (time.monotonic(), "")
@@ -758,9 +804,11 @@ class HermesRelayServer:
                 return
 
             if is_group:
-                resp = await self._api.send_group_msg(num_id, segs)
+                async with self._send_api_semaphore:
+                    resp = await self._api.send_group_msg(num_id, segs)
             else:
-                resp = await self._api.send_private_msg(num_id, segs)
+                async with self._send_api_semaphore:
+                    resp = await self._api.send_private_msg(num_id, segs)
             msg_id = str(resp.get("message_id", ""))
             # 写入去重缓存:在 SeqMap/log 之前,确保后续步骤异常时重试仍能命中。
             if dedup_key is not None:
@@ -900,9 +948,11 @@ class HermesRelayServer:
                     pass
             segs.extend(_parse_at_markers(message))
             if is_group:
-                resp = await self._api.send_group_msg(num_id, segs)
+                async with self._send_api_semaphore:
+                    resp = await self._api.send_group_msg(num_id, segs)
             else:
-                resp = await self._api.send_private_msg(num_id, segs)
+                async with self._send_api_semaphore:
+                    resp = await self._api.send_private_msg(num_id, segs)
             logger.debug(
                 "relay send_reject_message: chat_id=%s ok=True msg_id=%s",
                 chat_id, resp.get("message_id", ""),

@@ -33,6 +33,19 @@ from onebot_adapter.webui import routes as webui_routes
 logger = logging.getLogger(__name__)
 
 
+class _ExcludeLogFormatPreview(logging.Filter):
+    """Filter that rejects log records emitted by the ``log_format`` module
+    logger (truncated recv/send preview lines).  Those events are also
+    emitted in full (untruncated) form by the dedicated ``onebot_adapter.file``
+    logger, which propagates to the parent ``onebot_adapter`` logger and
+    reaches the file handler.  Without this filter the file would contain
+    both the truncated preview and the full line for every recv/send event.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.name.endswith(".onebot.log_format")
+
+
 
 
 class AdapterService:
@@ -111,8 +124,18 @@ class AdapterService:
         )
 
     def _setup_file_logging(self, cfg: AdapterConfig) -> None:
-        """Create or replace the file logging handler for persistent logs."""
+        """Create or replace the file logging handler for persistent logs.
+
+        The handler is attached to the ``onebot_adapter`` parent logger so
+        that ALL modules under the package (relay, onebot.*, webui, etc.)
+        propagate their log records into ``adapter.log``.  A filter excludes
+        the truncated preview lines emitted by ``onebot_adapter.onebot.log_format``'s
+        module logger — those events are already written to the file in full
+        (untruncated) form by the dedicated ``onebot_adapter.file`` logger,
+        so accepting the truncated copies here would duplicate recv/send lines.
+        """
         if self._file_handler is not None:
+            logging.getLogger("onebot_adapter").removeHandler(self._file_handler)
             logging.getLogger("onebot_adapter.file").removeHandler(self._file_handler)
             self._file_handler.close()
             self._file_handler = None
@@ -133,7 +156,11 @@ class AdapterService:
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s: %(message)s"
         ))
-        logging.getLogger("onebot_adapter.file").addHandler(handler)
+        # Skip the truncated preview lines from the log_format module logger;
+        # the full untruncated versions are emitted by the "onebot_adapter.file"
+        # logger and will reach this handler via propagation.
+        handler.addFilter(_ExcludeLogFormatPreview())
+        logging.getLogger("onebot_adapter").addHandler(handler)
         self._file_handler = handler
 
     def _update_file_logging(self, old: AdapterConfig, new: AdapterConfig) -> None:
