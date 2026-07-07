@@ -221,7 +221,7 @@ ws://127.0.0.1:3001
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `event_queue_enabled` | `true` | 排队总开关：Hermes 不隔离群成员时是否排队 |
-| `event_queue_max_per_chat` | `50` | 单群队列上限，超限丢弃最旧 |
+| `event_queue_max_per_chat` | `50` | 单群队列上限，超限拒绝入队 |
 | `event_queue_idle_timeout` | `300.0` | plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy |
 
 ## 开发

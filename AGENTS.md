@@ -108,7 +108,7 @@ Implemented across `config.py` (permission model), `parser.py` (`_check_command_
 
 **配置**（`config.py`，WebUI「连接管理」页可调）：
 - `event_queue_enabled`（默认 True）：排队总开关，Hermes 不隔离群成员时是否排队
-- `event_queue_max_per_chat`（默认 50）：单群队列上限，超限丢弃最旧
+- `event_queue_max_per_chat`（默认 50）：单群队列上限，超限拒绝入队
 - `event_queue_idle_timeout`（默认 300.0 秒）：看门狗超时阈值
 
 ## Config file

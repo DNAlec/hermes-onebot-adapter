@@ -434,11 +434,11 @@ class HermesRelayServer:
         q = self._queues.setdefault(gid, deque())
         cap = self._config.event_queue_max_per_chat
         if len(q) >= cap:
-            dropped = q.popleft()
             logger.warning(
-                "relay queue full (gid=%s cap=%d), dropping oldest text_preview=%r",
-                gid, cap, (dropped.text or "")[:120],
+                "relay queue full (gid=%s cap=%d), dropping incoming text_preview=%r",
+                gid, cap, (event.text or "")[:120],
             )
+            return
         q.append(event)
         logger.info(
             "relay enqueue: gid=%s queued=%d busy_user=%s new_user=%s text_preview=%r",

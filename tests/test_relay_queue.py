@@ -168,8 +168,8 @@ async def test_slash_command_bypasses_queue():
     assert "42" not in relay._queues
 
 
-async def test_queue_cap_drops_oldest():
-    """队列超限丢弃最旧。"""
+async def test_queue_cap_rejects_incoming():
+    """队列超限拒绝新消息入队。"""
     relay, _, _ = _make_relay(event_queue_max_per_chat=2)
     relay._broadcast_event = AsyncMock()
     await relay._enqueue_or_broadcast(_group_event("head", gid="42", uid="100", mid="0"))
@@ -178,7 +178,7 @@ async def test_queue_cap_drops_oldest():
     await relay._enqueue_or_broadcast(_group_event("m3", gid="42", uid="400", mid="3"))
     q = relay._queues["42"]
     assert len(q) == 2
-    assert [e.text for e in q] == ["m2", "m3"]
+    assert [e.text for e in q] == ["m1", "m2"]
 
 
 # ── idle 帧 ─────────────────────────────────────────────────────────────
