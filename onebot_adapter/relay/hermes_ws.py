@@ -170,6 +170,7 @@ class HermesRelayServer:
         self._hermes_group_sessions_per_user: bool = True
         self._busy_groups: dict[str, tuple[str, float]] = {}
         self._queues: dict[str, deque[NormalizedEvent]] = {}
+        self._group_locks: dict[str, asyncio.Lock] = {}
         self._watchdog_task: asyncio.Task[None] | None = None
         # Limit concurrent OneBot API send calls to prevent NapCat WS
         # serialization from inflating latency past _RESULT_TIMEOUT.
@@ -488,8 +489,8 @@ class HermesRelayServer:
         - 适配器排队总开关打开(``event_queue_enabled=True``)
         - 非 /命令(/命令绕过排队,与 ring buffer 同思路)
 
-        排队规则:群未 busy → 标记 busy 并广播;群 busy 且新消息来自同人 → 放行
-        (可补充当前任务);群 busy 且来自不同人 → 入队 FIFO。
+        排队规则:群未 busy → 标记 busy 并广播;群 busy → 一律入队 FIFO
+        (包括 busy 用户自身,不再放行同用户消息)。
 
         Returns ``"broadcast"``, ``"queued"`` or ``"dropped"`` (see push_event).
         """
@@ -503,32 +504,31 @@ class HermesRelayServer:
         # Hermes 隔离群成员 或 适配器总开关关 → 不排队
         if self._hermes_group_sessions_per_user or not self._config.event_queue_enabled:
             return await self._broadcast_with_status(event)
-        busy = self._busy_groups.get(gid)
-        if busy is None:
-            # Idle — claim the group and broadcast immediately.
-            self._busy_groups[gid] = (event.user_id, time.monotonic())
-            self._ensure_watchdog()
-            return await self._broadcast_with_status(event)
-        busy_user_id, _since = busy
-        if event.user_id == busy_user_id:
-            # Same user as the in-flight turn — let it through.
-            return await self._broadcast_with_status(event)
-        # Different user while busy — enqueue.
-        q = self._queues.setdefault(gid, deque())
-        cap = self._config.event_queue_max_per_chat
-        if len(q) >= cap:
-            logger.warning(
-                "relay queue full (gid=%s cap=%d), dropping incoming text_preview=%r",
-                gid, cap, (event.text or "")[:120],
+        lock = self._get_group_lock(gid)
+        async with lock:
+            busy = self._busy_groups.get(gid)
+            if busy is None:
+                # Idle — claim the group and broadcast immediately.
+                self._busy_groups[gid] = (event.user_id, time.monotonic())
+                self._ensure_watchdog()
+                return await self._broadcast_with_status(event)
+            # Group busy — enqueue (all users, including the busy user).
+            busy_user_id, _ = busy
+            q = self._queues.setdefault(gid, deque())
+            cap = self._config.event_queue_max_per_chat
+            if len(q) >= cap:
+                logger.warning(
+                    "relay queue full (gid=%s cap=%d), dropping incoming text_preview=%r",
+                    gid, cap, (event.text or "")[:120],
+                )
+                return "dropped"
+            q.append(event)
+            logger.info(
+                "relay enqueue: gid=%s queued=%d busy_user=%s new_user=%s text_preview=%r",
+                gid, len(q), busy_user_id, event.user_id,
+                (event.text or "")[:120],
             )
-            return "dropped"
-        q.append(event)
-        logger.info(
-            "relay enqueue: gid=%s queued=%d busy_user=%s new_user=%s text_preview=%r",
-            gid, len(q), busy_user_id, event.user_id,
-            (event.text or "")[:120],
-        )
-        return "queued"
+            return "queued"
 
     async def _broadcast_with_status(self, event: NormalizedEvent) -> str:
         """Broadcast *event* and return ``"broadcast"`` when there is at
@@ -544,6 +544,19 @@ class HermesRelayServer:
             return "dropped"
         await self._broadcast_event(event)
         return "broadcast"
+
+    def _get_group_lock(self, gid: str) -> asyncio.Lock:
+        """Get or create a per-group lock for queue state protection.
+
+        Serialises access to ``_busy_groups`` and ``_queues`` for a single
+        group so that ``_enqueue_or_broadcast``, ``_handle_idle``, and the
+        watchdog cannot interleave on the same group.
+        """
+        lock = self._group_locks.get(gid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._group_locks[gid] = lock
+        return lock
 
     @staticmethod
     def _group_id_of(event: NormalizedEvent) -> str | None:
@@ -601,7 +614,8 @@ class HermesRelayServer:
                         "relay busy watchdog: gid=%s busy_user=%s timeout=%.0fs — force-clearing",
                         gid, busy_user, now - since,
                     )
-                    self._dequeue_and_dispatch(gid)
+                    async with self._get_group_lock(gid):
+                        self._dequeue_and_dispatch(gid)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -633,6 +647,20 @@ class HermesRelayServer:
                 self._queues.pop(gid, None)
             return
         nxt = q.popleft()
+        # Merge consecutive messages from the same user
+        merged_count = 1
+        while q and q[0].user_id == nxt.user_id:
+            next_msg = q.popleft()
+            if next_msg.text:
+                nxt.text = (nxt.text or "") + "\n\n" + next_msg.text
+            nxt.timestamp = next_msg.timestamp
+            nxt.message_id = next_msg.message_id
+            merged_count += 1
+        if merged_count > 1:
+            logger.info(
+                "relay dequeue merge: gid=%s user=%s merged=%d text_preview=%r",
+                gid, nxt.user_id, merged_count, (nxt.text or "")[:120],
+            )
         if not q:
             self._queues.pop(gid, None)
         self._busy_groups[gid] = (nxt.user_id, time.monotonic())
@@ -650,8 +678,8 @@ class HermesRelayServer:
             task.add_done_callback(self._text_tasks.discard)
             task.add_done_callback(_log_task_exception)
         logger.info(
-            "relay dequeue: gid=%s remaining=%d new_busy_user=%s text_preview=%r",
-            gid, len(self._queues.get(gid, ())), nxt.user_id,
+            "relay dequeue: gid=%s remaining=%d new_busy_user=%s merged=%d text_preview=%r",
+            gid, len(self._queues.get(gid, ())), nxt.user_id, merged_count,
             (nxt.text or "")[:120],
         )
 
@@ -676,11 +704,13 @@ class HermesRelayServer:
         if not gid:
             logger.warning("relay idle frame without group_id, ignoring: %s", data)
             return
-        if gid not in self._busy_groups:
-            logger.info("relay idle for non-busy gid=%s (already cleared by watchdog/replay/disconnect)", gid)
-            return
-        logger.info("relay idle: gid=%s — dispatching next queued", gid)
-        self._dequeue_and_dispatch(gid)
+        lock = self._get_group_lock(gid)
+        async with lock:
+            if gid not in self._busy_groups:
+                logger.info("relay idle for non-busy gid=%s (already cleared by watchdog/replay/disconnect)", gid)
+                return
+            logger.info("relay idle: gid=%s — dispatching next queued", gid)
+            self._dequeue_and_dispatch(gid)
 
     async def _broadcast_event(self, event: NormalizedEvent) -> None:
         n_clients = len(self._clients)
