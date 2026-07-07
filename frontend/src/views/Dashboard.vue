@@ -40,38 +40,7 @@ const groupCount = () => cfg.value ? Object.keys(cfg.value.groups || {}).length 
           请<a href="/connections">重新安装插件</a>以匹配当前适配器版本。
         </p>
       </div>
-      <div class="card">
-        <h3>连接状态</h3>
-        <div class="status-grid">
-          <div class="status-item">
-            <span class="label">OneBot</span>
-            <span :class="status.onebot_connected ? 'connected' : 'disconnected'">
-              {{ status.onebot_connected ? '✅ 已连接' : '❌ 未连接' }}
-            </span>
-          </div>
-          <div class="status-item">
-            <span class="label">Hermes 插件</span>
-            <span :class="status.hermes_plugin_connected ? 'connected' : 'disconnected'">
-              {{ status.hermes_plugin_connected ? '✅ 已连接' : '❌ 未连接' }}
-            </span>
-          </div>
-        </div>
-      </div>
-      <div class="card">
-        <h3>适配器信息</h3>
-        <dl>
-          <dt>适配器版本</dt><dd>v{{ status.adapter_version }}</dd>
-          <dt>插件版本</dt>
-          <dd>
-            <span v-if="status.plugin_version" :class="{ 'mismatch': status.version_mismatch }">
-              v{{ status.plugin_version }}
-            </span>
-            <span v-else class="muted">未连接</span>
-          </dd>
-          <dt>连接模式</dt><dd>{{ status.onebot_mode === 'reverse' ? '反向 WS' : '正向 WS' }}</dd>
-          <dt>Bot QQ</dt><dd>{{ status.self_id || '未探测' }}</dd>
-        </dl>
-      </div>
+
       <div class="card">
         <h3>端口</h3>
         <dl>
@@ -96,11 +65,6 @@ const groupCount = () => cfg.value ? Object.keys(cfg.value.groups || {}).length 
 .dashboard { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
 .card h3 { margin: 0 0 1rem; font-size: 1rem; border-bottom: 2px solid var(--primary); padding-bottom: 0.5rem; }
-.status-grid { display: flex; flex-direction: column; gap: 0.75rem; }
-.status-item { display: flex; justify-content: space-between; }
-.label { font-weight: 500; color: var(--text-muted); }
-.connected { color: var(--success); font-weight: 600; }
-.disconnected { color: var(--danger); font-weight: 600; }
 dl { display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 1rem; margin: 0; }
 dt { font-weight: 500; color: var(--text-muted); }
 dd { margin: 0; }
@@ -113,6 +77,4 @@ dd { margin: 0; }
 }
 .card-warn h3 { border-bottom-color: var(--warning); color: #856404; }
 .card-warn p { margin: 0.5rem 0 0; font-size: 0.9rem; line-height: 1.5; }
-.mismatch { color: var(--danger); font-weight: 600; }
-.muted { color: var(--text-muted); }
 </style>

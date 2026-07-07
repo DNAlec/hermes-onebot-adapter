@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import {
   getGroups, putGroup, deleteGroup, syncGroups,
   type GroupConfig,
+  getHermesMode, putHermesMode, refreshHermesMode, type HermesMode,
 } from "../api";
 import { useConfig } from "../composables/useConfig";
 
@@ -15,15 +16,70 @@ const msgType = ref<"success" | "error">("success");
 const editingGroup = ref<GroupConfig | null>(null);
 const showEditor = ref(false);
 
+const hermesMode = ref<HermesMode | null>(null);
+const editingPerUser = ref(false);
+const savingMode = ref(false);
+const refreshingMode = ref(false);
+const modeMsg = ref("");
+const modeMsgType = ref<"success" | "error" | "warning">("success");
+
 onMounted(async () => {
   try {
     await load();
     groups.value = await getGroups();
+    fetchHermesMode();
   } catch (e: any) {
     msg.value = "加载失败: " + (e.response?.data?.error || e.message);
     msgType.value = "error";
   }
 });
+
+async function fetchHermesMode() {
+  try {
+    hermesMode.value = await getHermesMode();
+  } catch (e: any) {
+    modeMsg.value = "读取 Hermes 配置失败: " + (e.response?.data?.error || e.message);
+    modeMsgType.value = "error";
+  }
+}
+
+async function saveHermesMode(value: boolean) {
+  savingMode.value = true;
+  modeMsg.value = "";
+  try {
+    const res = await putHermesMode(value);
+    modeMsg.value = res.note;
+    modeMsgType.value = "warning";
+    editingPerUser.value = false;
+    await fetchHermesMode();
+  } catch (e: any) {
+    modeMsg.value = (e.response?.data?.error || e.message);
+    modeMsgType.value = "error";
+  } finally {
+    savingMode.value = false;
+  }
+}
+
+async function refreshHermesModeReport() {
+  refreshingMode.value = true;
+  modeMsg.value = "";
+  try {
+    const res = await refreshHermesMode();
+    if (res.ok) {
+      modeMsg.value = res.note || "已请求插件重新上报";
+      modeMsgType.value = "success";
+      setTimeout(() => fetchHermesMode(), 800);
+    } else {
+      modeMsg.value = res.error || "刷新失败";
+      modeMsgType.value = "warning";
+    }
+  } catch (e: any) {
+    modeMsg.value = (e.response?.data?.error || e.message);
+    modeMsgType.value = "error";
+  } finally {
+    refreshingMode.value = false;
+  }
+}
 
 async function saveGlobal() {
   if (!cfg.value) return;
@@ -44,6 +100,9 @@ async function saveGlobal() {
       message_show_group_id: c.message_show_group_id,
       reaction_emoji_enabled: c.reaction_emoji_enabled,
       reaction_emoji_id: c.reaction_emoji_id,
+      event_queue_enabled: c.event_queue_enabled,
+      event_queue_max_per_chat: c.event_queue_max_per_chat,
+      event_queue_idle_timeout: c.event_queue_idle_timeout,
       platform_hint: c.platform_hint,
     });
     msg.value = "全局设置已保存";
@@ -233,6 +292,75 @@ function resetHint() {
           <span class="hint">QQ 表情编号（默认 76=👍）</span>
         </label>
       </div>
+    </div>
+
+    <!-- 会话隔离与消息排队 -->
+    <div v-if="cfg" class="section">
+      <h3>会话隔离与消息排队</h3>
+
+      <h4>Hermes 会话隔离</h4>
+      <p class="hint" style="margin-bottom:0.75rem;">
+        <strong>隔离(true)</strong>:每个群成员独立 session。<br>
+        <strong>共享(false)</strong>:全群共享 session。
+      </p>
+      <div v-if="modeMsg" :class="['message', modeMsgType]">{{ modeMsg }}</div>
+
+      <div class="mode-display">
+        <span class="mode-label">当前值:</span>
+        <span :class="['mode-value', hermesMode?.group_sessions_per_user ? 'isolation-on' : 'isolation-off']">
+          {{ hermesMode?.group_sessions_per_user ? '隔离' : '共享' }}
+        </span>
+        <span class="mode-source" v-if="hermesMode">
+          来源:
+          <code v-if="hermesMode.source === 'plugin_report'">插件上报</code>
+          <code v-else-if="hermesMode.source === 'hermes_config_yaml'">Hermes config.yaml(插件未连接)</code>
+          <code v-else>默认值(插件未连接)</code>
+        </span>
+        <button @click="refreshHermesModeReport" :disabled="refreshingMode" class="mode-refresh-btn">
+          {{ refreshingMode ? "刷新中..." : "↻ 刷新上报值" }}
+        </button>
+      </div>
+
+      <div class="mode-edit" v-if="!editingPerUser">
+        <button @click="editingPerUser = true" class="mode-edit-btn">✏ 修改 Hermes 配置</button>
+      </div>
+      <div class="mode-edit" v-else>
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            :checked="!hermesMode?.group_sessions_per_user"
+            @change="(e) => { editingPerUser = false; saveHermesMode(!(e.target as HTMLInputElement).checked) }"
+          />
+          <span>开启群聊共享 session(写入 group_sessions_per_user: false 到 Hermes config.yaml)</span>
+        </label>
+        <button @click="editingPerUser = false" class="mode-cancel-btn">取消</button>
+      </div>
+      <p class="hint" v-if="editingPerUser">
+        修改后会写入 Hermes <code>config.yaml</code>,需<strong>重启 Hermes 网关</strong>才生效。
+      </p>
+
+      <hr style="margin: 1.25rem 0; border: none; border-top: 1px solid var(--border);" />
+
+      <h4>适配器群聊排队</h4>
+      <p class="hint" style="margin-bottom:0.75rem;">
+        当 Hermes 不隔离群成员时,适配器对群消息排队串行处理。
+        同一发送者的消息直接放行,不同发送者排队等待,所有/命令会绕过排队。
+        若插件崩溃或看门狗超时则强制清空 busy 状态,hermes产生回复时(包括心跳消息)会刷新计时。
+      </p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.event_queue_enabled" />
+        <span>启用群聊排队</span>
+      </label>
+      <label>
+        单群队列上限
+        <input type="number" v-model.number="cfg.event_queue_max_per_chat" min="1" max="500" />
+        <span class="hint">每个群聊的排队消息上限(默认 50),超限丢弃最旧的一条。</span>
+      </label>
+      <label>
+        busy 超时(秒)
+        <input type="number" v-model.number="cfg.event_queue_idle_timeout" min="10" step="10" />
+        <span class="hint">plugin 未发 idle 信号的超时阈值(默认 300 秒),超时后强制清空 busy 并派发下一条。</span>
+      </label>
     </div>
 
     <!-- 私聊设置 -->
@@ -552,8 +680,42 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--p
 .message { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-weight: 500; }
 .message.success { background: #d4edda; color: #155724; border-left: 4px solid var(--success); }
 .message.error { background: #f8d7da; color: #721c24; border-left: 4px solid var(--danger); }
+.message.warning { background: #fff9e6; color: #856404; border-left: 4px solid var(--warning); }
 .loading { text-align: center; padding: 2rem; color: var(--text-muted, #666); }
 
 .hint { display: block; font-size: 0.8rem; color: var(--text-muted); margin: 0.25rem 0 0; line-height: 1.5; }
 .hint code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+
+h4 { margin: 0 0 0.75rem 0; font-size: 0.95rem; color: #555; }
+
+.mode-display {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0;
+  font-size: 0.9rem;
+}
+.mode-label { font-weight: 500; }
+.mode-value { font-weight: 700; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.85rem; }
+.mode-value.isolation-on { background: rgba(40, 167, 69, 0.15); color: var(--success); }
+.mode-value.isolation-off { background: rgba(255, 193, 7, 0.15); color: #856404; }
+.mode-source { color: var(--text-muted); font-size: 0.8rem; }
+.mode-source code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85em; }
+.mode-refresh-btn {
+  background: var(--card-bg); color: var(--primary); border: 1px solid var(--primary);
+  padding: 0.3rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+}
+.mode-refresh-btn:hover { background: rgba(74, 144, 226, 0.08); }
+.mode-refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.mode-edit { padding: 0.5rem 0; }
+.mode-edit-btn {
+  background: var(--primary); color: white; border: none;
+  padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+}
+.mode-cancel-btn {
+  background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--border);
+  padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+  margin-left: 0.5rem;
+}
 </style>
