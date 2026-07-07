@@ -172,7 +172,7 @@ class AdapterConfig:
 
     # ── 群聊消息排队(仅在 Hermes group_sessions_per_user=false 全群共享 session 时生效)──
     event_queue_enabled: bool = True            # 总开关:Hermes 不隔离群成员时是否排队
-    event_queue_max_per_chat: int = 50          # 单群排队上限,超限丢弃最旧
+    event_queue_max_per_chat: int = 50          # 单群排队上限,超限拒绝入队
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
 
     # ── /指令过滤 ──
@@ -454,7 +454,7 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "reaction_emoji_id": "贴表情回应使用的表情ID(默认 76=👍),QQ 表情编号",
         "event_queue_enabled": "群聊排队总开关:Hermes 不隔离群成员(group_sessions_per_user=false)时,"
                               "是否对群消息排队串行处理",
-        "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限丢弃最旧",
+        "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
     }
     result: dict[str, Any] = {}

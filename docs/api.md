@@ -545,7 +545,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `message_show_group_id` | bool | `false` | 消息是否显示群号标识 |
 | `seq_map_size` | int | `4500` | seq map 环形缓冲区大小 |
 | `event_queue_enabled` | bool | `true` | 群聊排队总开关：Hermes 不隔离群成员时是否排队 |
-| `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限丢弃最旧（详见[群聊消息排队](#群聊消息排队)） |
+| `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限拒绝入队（详见[群聊消息排队](#群聊消息排队)） |
 | `event_queue_idle_timeout` | float | `300.0` | 群聊排队：plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy 状态 |
 | `command_filter_enabled` | bool | `false` | 指令过滤总开关 |
 | `command_filter_unknown` | bool | `false` | 未知指令是否过滤 |

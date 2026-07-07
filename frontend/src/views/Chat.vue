@@ -345,7 +345,6 @@ function resetHint() {
       <p class="hint" style="margin-bottom:0.75rem;">
         当 Hermes 不隔离群成员时,适配器对群消息排队串行处理。
         同一发送者的消息直接放行,不同发送者排队等待,所有/命令会绕过排队。
-        若插件崩溃或看门狗超时则强制清空 busy 状态,hermes产生回复时(包括心跳消息)会刷新计时。
       </p>
       <label class="checkbox-row">
         <input type="checkbox" v-model="cfg.event_queue_enabled" />
@@ -359,7 +358,7 @@ function resetHint() {
       <label>
         busy 超时(秒)
         <input type="number" v-model.number="cfg.event_queue_idle_timeout" min="10" step="10" />
-        <span class="hint">plugin 未发 idle 信号的超时阈值(默认 300 秒),超时后强制清空 busy 并派发下一条。</span>
+        <span class="hint">Hermes 无响应的超时阈值,超时后强制清空 busy 并派发下一条。</span>
       </label>
     </div>
 
