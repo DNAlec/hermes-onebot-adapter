@@ -15,6 +15,7 @@ frontend/dist/
 
 onebot_adapter/webui/static/*
 !onebot_adapter/webui/static/.gitkeep
+onebot_adapter/_version_scm.py
 
 .pytest_cache/
 .ruff_cache/
