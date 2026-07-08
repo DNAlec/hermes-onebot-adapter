@@ -44,7 +44,19 @@ After frontend changes you must rebuild + copy to `onebot_adapter/webui/static/`
 
 ## Verification order
 
-`ruff check .` then `pytest -q`. Both must pass before committing. The repo has no CI configured (no `.github/`), so this is the gate.
+`ruff check .` then `pytest -q`. Both must pass before committing. This is the local gate — there is no CI for PR checks yet (the only workflow is `publish.yml` for PyPI releases).
+
+## Releasing
+
+Tag a version and push — CI handles the rest:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`v*` tags trigger `.github/workflows/publish.yml`: check-out full history → build frontend via `scripts/build_frontend.sh` → `python -m build` → `pypa/gh-action-pypi-publish`. Uses PyPI Trusted Publishing (OIDC) — no token to manage. Update `CHANGELOG.md` before tagging.
+
+After PyPI publishes, a maintainer running `pipx upgrade hermes-onebot-adapter` will receive the new version. A local source install must rebuild the frontend first (`./scripts/build_frontend.sh`).
 
 ## Architecture map
 
