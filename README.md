@@ -1,3 +1,4 @@
+![:name](https://count.getloli.com/@hermes-onebot-adapter?name=hermes-onebot-adapter&theme=original-new&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 # Hermes OneBot Adapter
 
 OneBot 11 适配器服务 + Hermes 插件，经独立服务对接 NapCat / go-cqhttp 等 OneBot 11 实现(目前仅在NapCat下测试过)。
