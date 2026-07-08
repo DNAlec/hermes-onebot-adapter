@@ -74,6 +74,11 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_get("/api/hermes_tools", _get_hermes_tools(store))
     app.router.add_put("/api/hermes_tools", _put_hermes_tools(store))
     app.router.add_post("/api/hermes_tools/reset", _reset_hermes_tools(store))
+    # Hermes session-isolation mode (group_sessions_per_user)
+    app.router.add_get("/api/hermes_mode", _get_hermes_mode(store, state))
+    app.router.add_put("/api/hermes_mode", _put_hermes_mode(store))
+    app.router.add_post("/api/hermes_mode/refresh", _refresh_hermes_mode(state))
+    app.router.add_get("/api/update_check", _update_check)
     app.router.add_get("/", _index)
     app.router.add_get("/{tail:.*}", _spa_handler)
 
@@ -115,7 +120,14 @@ def _login(store: ConfigStore, state: dict[str, Any]):
         except Exception:
             return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
         token = data.get("token", "")
+        if not token:
+            return aiohttp.web.json_response({"error": "token required"}, status=401)
         cfg = store.config
+        if not cfg.webui_token:
+            return aiohttp.web.json_response(
+                {"error": "webui_token not configured — restart the adapter service to regenerate it"},
+                status=401,
+            )
         if token != cfg.webui_token:
             fails, first_ts = failures.get(ip, (0, now))
             failures[ip] = (fails + 1, first_ts)
@@ -190,9 +202,15 @@ def _make_auth_middleware(store: ConfigStore):
 def _status(store: ConfigStore, state: dict[str, Any]):
     async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
         cfg = store.config
+        relay = state.get("relay")
+        per_user = getattr(relay, "hermes_group_sessions_per_user", True) if relay else True
+        plugin_ver = getattr(relay, "plugin_version", None) if relay else None
+        mismatch = getattr(relay, "version_mismatch", True) if relay else True
         return aiohttp.web.json_response(
             {
                 "adapter_version": __version__,
+                "plugin_version": plugin_ver,
+                "version_mismatch": mismatch,
                 "onebot_connected": bool(state.get("onebot_connected")),
                 "hermes_plugin_connected": bool(state.get("hermes_plugin_connected")),
                 "onebot_mode": cfg.onebot_mode,
@@ -200,6 +218,7 @@ def _status(store: ConfigStore, state: dict[str, Any]):
                 "onebot_ws_port": cfg.onebot_reverse_ws_port,
                 "hermes_ws_port": cfg.hermes_ws_port,
                 "webui_port": cfg.webui_port,
+                "hermes_group_sessions_per_user": per_user,
             }
         )
 
@@ -267,6 +286,25 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
+def _is_safe_install_path(target: Path) -> bool:
+    """Return True if *target* is safe to use as an install target.
+
+    Only allow writes under the user's home directory, /home, or /tmp.
+    Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
+    writes via the WebUI (which is auth-gated but behind a proxy the
+    same IP may be shared by multiple users).
+    """
+    allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
+    resolved = target.resolve(strict=False)
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            pass
+    return False
+
+
 def _install_plugin(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
@@ -275,13 +313,24 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
             data = {}
         install_dir = data.get("hermes_install_dir")
         cfg = store.config
+        from onebot_adapter.installer import _resolve_hermes_dir
+
+        # Validate the install dir is under the user's home directory or an
+        # explicitly allowed path, to prevent accidental writes to system
+        # paths (e.g. /, /etc) when the WebUI is exposed behind a proxy.
+        target = _resolve_hermes_dir(install_dir)
+        if not _is_safe_install_path(target):
+            return aiohttp.web.json_response(
+                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
+                status=400,
+            )
         adapter_url = f"ws://127.0.0.1:{cfg.hermes_ws_port}{cfg.hermes_ws_path}"
         adapter_token = cfg.hermes_ws_token
         from onebot_adapter import installer
 
         try:
             result = installer.install(
-                install_dir,
+                str(target),
                 adapter_url=adapter_url,
                 adapter_token=adapter_token,
             )
@@ -300,10 +349,18 @@ def _uninstall_plugin(state: dict[str, Any]):
         except Exception:
             data = {}
         install_dir = data.get("hermes_install_dir")
+        from onebot_adapter.installer import _resolve_hermes_dir
+
+        target = _resolve_hermes_dir(install_dir)
+        if not _is_safe_install_path(target):
+            return aiohttp.web.json_response(
+                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
+                status=400,
+            )
         from onebot_adapter import installer
 
         try:
-            result = installer.uninstall(install_dir)
+            result = installer.uninstall(str(target))
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin uninstall failed")
@@ -567,6 +624,101 @@ def _reset_hermes_tools(store: ConfigStore):
         return aiohttp.web.json_response({"ok": True})
 
     return handler
+
+
+# ── Hermes session-isolation mode (group_sessions_per_user) ──────────────
+
+
+def _get_hermes_mode(store: ConfigStore, state: dict[str, Any]):
+    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+        cfg = store.config
+        # 当前生效值:来自插件上报(relay 缓存);未连接时回退读 Hermes config.yaml
+        relay = state.get("relay")
+        reported = getattr(relay, "hermes_group_sessions_per_user", None) if relay else None
+        if reported is not None:
+            return aiohttp.web.json_response({
+                "group_sessions_per_user": reported,
+                "source": "plugin_report",
+                "plugin_connected": bool(relay and relay.has_clients),
+            })
+        # 插件未上报:回退读 Hermes config.yaml 顶层值
+        from onebot_adapter.hermes_config import read_group_sessions_per_user
+
+        try:
+            file_value = read_group_sessions_per_user(cfg.hermes_install_dir or None)
+        except Exception as exc:
+            return aiohttp.web.json_response(
+                {"error": f"读取 Hermes config.yaml 失败: {exc}"}, status=500,
+            )
+        # 文件不存在该字段时按 Hermes 默认 True 处理
+        return aiohttp.web.json_response({
+            "group_sessions_per_user": True if file_value is None else file_value,
+            "source": "hermes_config_yaml" if file_value is not None else "default",
+            "plugin_connected": False,
+        })
+
+    return handler
+
+
+def _put_hermes_mode(store: ConfigStore):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        value = data.get("group_sessions_per_user")
+        if not isinstance(value, bool):
+            return aiohttp.web.json_response(
+                {"error": "group_sessions_per_user 必须是布尔值"}, status=400,
+            )
+        cfg = store.config
+        from onebot_adapter.hermes_config import write_group_sessions_per_user
+
+        try:
+            write_group_sessions_per_user(cfg.hermes_install_dir or None, value)
+        except FileNotFoundError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.exception("write group_sessions_per_user failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        return aiohttp.web.json_response({
+            "ok": True,
+            "written": value,
+            "restart_required": True,
+            "note": "已写入 Hermes config.yaml,需重启 Hermes 网关生效。重启后请点击'刷新上报值'更新显示。",
+        })
+
+    return handler
+
+
+def _refresh_hermes_mode(state: dict[str, Any]):
+    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+        relay = state.get("relay")
+        if not relay:
+            return aiohttp.web.json_response({"error": "relay 未就绪"}, status=503)
+        if not relay.has_clients:
+            return aiohttp.web.json_response({
+                "ok": False,
+                "error": "Hermes 插件未连接,无法刷新。请先确保插件已连接。",
+            })
+        try:
+            await relay.broadcast_mode_refresh()
+        except Exception as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        return aiohttp.web.json_response({"ok": True, "note": "已请求插件重新上报,稍后刷新页面查看"})
+
+    return handler
+
+
+async def _update_check(_: aiohttp.web.Request) -> aiohttp.web.Response:
+    from onebot_adapter.update_check import check_for_updates
+
+    try:
+        result = await check_for_updates()
+    except Exception as exc:
+        logger.exception("update check failed")
+        return aiohttp.web.json_response({"error": str(exc)}, status=500)
+    return aiohttp.web.json_response(result)
 
 
 async def _index(_: aiohttp.web.Request) -> aiohttp.web.Response:

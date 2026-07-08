@@ -13,6 +13,19 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def _log_listener_exception(task: asyncio.Task) -> None:
+    """Done-callback: log unhandled exceptions from async config-change
+    listener tasks instead of letting them surface as "Task exception was
+    never retrieved" warnings.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("config change listener task crashed: %r", exc, exc_info=exc)
+
+
 CONFIG_ENV = "ONEBOT_ADAPTER_CONFIG"
 DEFAULT_CONFIG_DIR = Path.home() / ".onebot_adapter"
 DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
@@ -20,10 +33,6 @@ DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
 NAPCAT_MODE_REVERSE = "reverse"
 NAPCAT_MODE_FORWARD = "forward"
 _VALID_MODES = {NAPCAT_MODE_REVERSE, NAPCAT_MODE_FORWARD}
-
-SESSION_SHARED = "shared"
-SESSION_PER_USER = "per_user"
-_VALID_SESSION_MODES = {SESSION_SHARED, SESSION_PER_USER}
 
 USER_FILTER_WHITELIST = "whitelist"
 USER_FILTER_BLACKLIST = "blacklist"
@@ -42,8 +51,7 @@ DEFAULT_PLATFORM_HINT = (
     "群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n"
     "# chat_id 格式\n"
     "- 私聊: <QQ号>(如 100)\n"
-    "- 群聊(默认 shared 模式): group:<群号>(如 group:42)\n"
-    "- 群聊 per_user 会话模式: group:<群号>:user:<QQ号>(如 group:42:user:100)\n\n"
+    "- 群聊: group:<群号>(如 group:42)\n\n"
     "# 入站消息格式(你看到的样子)\n"
     "- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n"
     "  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n"
@@ -89,18 +97,11 @@ class GroupConfig:
     trigger_keywords: list[str] | None = None  # None=跟随全局，[] = 强制禁用关键词
     keyword_first_only: bool | None = None   # None=跟随全局，True=关键词须在开头
     keep_mention: bool | None = None         # None=跟随全局，True=保留@bot段
-    session_mode: str = "default"             # "default" | "shared" | "per_user"
     custom_prompt: str = ""                   # 空=用全局 platform_hint
     admins: list[str] = field(default_factory=list)
     # ── 群成员准入（黑名单/白名单）──
     group_user_filter_mode: str = USER_FILTER_BLACKLIST  # 默认黑名单
     group_user_list: list[str] = field(default_factory=list)  # 默认空：黑名单空=允许所有人
-    welcome_enabled: bool = False
-    welcome_message: str = ""
-    media_max_mb: int | None = None           # None=跟随全局
-    media_max_count: int | None = None       # None=跟随全局
-    media_limit_reject_enabled: bool | None = None  # None=跟随全局,True=超出限制时回发提示
-    auto_join: bool = False
     message_show_group_id: bool | None = None
     reaction_emoji_enabled: bool | None = None  # None=跟随全局,True=在送达的消息上贴表情回应
     # ── /指令过滤（None=跟随全局）──
@@ -146,9 +147,7 @@ class AdapterConfig:
     group_trigger_keywords: list[str] = field(default_factory=list)  # 关键词触发，空=不启用
     group_keyword_first_only: bool = False       # True=关键词须出现在文本开头
     group_keep_mention: bool = False              # True=触发后保留@bot段（不 strip）
-    group_session_mode: str = SESSION_SHARED
     global_admins: list[str] = field(default_factory=list)
-    group_auto_join: bool = False
 
     # ── 私聊设置 ──
     dm_user_filter_mode: str = USER_FILTER_WHITELIST  # 默认白名单
@@ -158,12 +157,6 @@ class AdapterConfig:
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # ── 其他 ──
-    media_max_mb: int = 5
-    media_max_count: int = 10
-    media_limit_reject_enabled: bool = True  # 媒体超出数量/大小限制或下载失败时,回发一条融合提示
-    media_limit_reject_message: str = (
-        "⚠️ 本条消息有 {skipped_count} 个媒体未处理:\n{details}"
-    )
     platform_hint: str = DEFAULT_PLATFORM_HINT
     hermes_ws_port: int = 18810
     hermes_ws_path: str = "/hermes"
@@ -181,10 +174,16 @@ class AdapterConfig:
     message_show_group_id: bool = True
     seq_map_size: int = 4500
     reaction_emoji_enabled: bool = True
-    reaction_emoji_id: str = "76"
+    reaction_emoji_id: str = "124"
+    reaction_emoji_id_queued: str = "123"      # 消息排队时贴的表情ID,空=不贴表情
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
     send_dedup_ttl_seconds: float = 10.0
+
+    # ── 群聊消息排队(仅在 Hermes group_sessions_per_user=false 全群共享 session 时生效)──
+    event_queue_enabled: bool = True            # 总开关:Hermes 不隔离群成员时是否排队
+    event_queue_max_per_chat: int = 50          # 单群排队上限,超限拒绝入队
+    event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
 
     # ── /指令过滤 ──
     command_filter_enabled: bool = False                # 总开关：是否对 /指令 做权限过滤
@@ -198,16 +197,6 @@ class AdapterConfig:
             errors.append(f"onebot_mode must be one of {sorted(_VALID_MODES)}")
         if self.onebot_mode == NAPCAT_MODE_FORWARD and not self.onebot_forward_ws_url:
             errors.append("onebot_forward_ws_url required when onebot_mode=forward")
-        if self.media_max_mb <= 0:
-            errors.append("media_max_mb must be positive")
-        if self.media_max_count <= 0:
-            errors.append("media_max_count must be positive")
-        if not isinstance(self.media_limit_reject_enabled, bool):
-            errors.append("media_limit_reject_enabled must be bool")
-        if not isinstance(self.media_limit_reject_message, str) or not self.media_limit_reject_message.strip():
-            errors.append("media_limit_reject_message must be a non-empty string")
-        if self.group_session_mode not in _VALID_SESSION_MODES:
-            errors.append(f"group_session_mode must be one of {sorted(_VALID_SESSION_MODES)}")
         if self.log_message_preview < 0:
             errors.append("log_message_preview must be non-negative")
         if self.log_retention_days < 1:
@@ -220,6 +209,10 @@ class AdapterConfig:
             errors.append("seq_map_size must be positive")
         if self.send_dedup_ttl_seconds <= 0:
             errors.append("send_dedup_ttl_seconds must be positive")
+        if self.event_queue_max_per_chat < 1:
+            errors.append("event_queue_max_per_chat must be at least 1")
+        if self.event_queue_idle_timeout <= 0:
+            errors.append("event_queue_idle_timeout must be positive")
         if self.webui_token_lifetime_hours < 1:
             errors.append("webui_token_lifetime_hours must be at least 1")
         if not self.reaction_emoji_id:
@@ -247,20 +240,8 @@ class AdapterConfig:
                 errors.append(f"group {gid} keyword_first_only must be bool or null")
             if gc.keep_mention is not None and not isinstance(gc.keep_mention, bool):
                 errors.append(f"group {gid} keep_mention must be bool or null")
-            if gc.welcome_enabled is not None and not isinstance(gc.welcome_enabled, bool):
-                errors.append(f"group {gid} welcome_enabled must be bool")
-            if gc.auto_join is not None and not isinstance(gc.auto_join, bool):
-                errors.append(f"group {gid} auto_join must be bool")
             if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
                 errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
-            if gc.media_max_mb is not None and (not isinstance(gc.media_max_mb, int) or gc.media_max_mb <= 0):
-                errors.append(f"group {gid} media_max_mb must be a positive int or null")
-            if gc.media_max_count is not None and (not isinstance(gc.media_max_count, int) or gc.media_max_count <= 0):
-                errors.append(f"group {gid} media_max_count must be a positive int or null")
-            if gc.media_limit_reject_enabled is not None and not isinstance(gc.media_limit_reject_enabled, bool):
-                errors.append(f"group {gid} media_limit_reject_enabled must be bool or null")
-            if gc.session_mode not in _VALID_SESSION_MODES and gc.session_mode != "default":
-                errors.append(f"group {gid} session_mode must be one of {sorted(_VALID_SESSION_MODES | {'default'})}")
             if gc.command_permissions is not None:
                 for cmd, perm in gc.command_permissions.items():
                     if perm not in _VALID_COMMAND_PERM_LEVELS:
@@ -334,41 +315,9 @@ class AdapterConfig:
             return gc.keep_mention
         return self.group_keep_mention
 
-    def resolve_session_mode(self, group_id: str) -> str:
-        gc = self.get_group_config(group_id)
-        if gc.session_mode == "default":
-            return self.group_session_mode
-        return gc.session_mode
-
     def resolve_custom_prompt(self, group_id: str) -> str | None:
         gc = self.get_group_config(group_id)
         return gc.custom_prompt if gc.custom_prompt else None
-
-    def resolve_media_max_bytes(self, group_id: str | None = None) -> int:
-        if group_id:
-            gc = self.get_group_config(group_id)
-            if gc.media_max_mb is not None:
-                return gc.media_max_mb * 1024 * 1024
-        return self.media_max_mb * 1024 * 1024
-
-    def resolve_media_max_count(self, group_id: str | None = None) -> int:
-        if group_id:
-            gc = self.get_group_config(group_id)
-            if gc.media_max_count is not None:
-                return gc.media_max_count
-        return self.media_max_count
-
-    def resolve_media_limit_reject_enabled(self, group_id: str | None = None) -> bool:
-        """媒体超出限制回发提示开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
-        if group_id:
-            gc = self.get_group_config(group_id)
-            if gc.media_limit_reject_enabled is not None:
-                return gc.media_limit_reject_enabled
-        return self.media_limit_reject_enabled
-
-    def resolve_media_limit_reject_message(self, group_id: str | None = None) -> str:
-        """媒体超出限制回发提示文案模板。无 per-group 覆盖字段(文案仅全局可配)。"""
-        return self.media_limit_reject_message
 
     def resolve_message_show_group_id(self, group_id: str) -> bool:
         gc = self.get_group_config(group_id)
@@ -504,12 +453,16 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "webui_token": "WebUI 登录鉴权 token,自动生成,请勿清空",
         "webui_token_lifetime_hours": "WebUI 登录有效期(小时),最小 1,默认 168(7天);改后已登录会话立即失效",
         "webui_token_epoch": "token 纪元(内部状态,勿手动修改);改 lifetime 时自动递增使旧 session token 失效",
-        "group_session_mode": "可选值: shared(共享会话,默认) | per_user(独立会话)",
         "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
         "reaction_emoji_enabled": "消息送达 Hermes 后在原消息贴表情回应;群配置可单独覆盖",
-        "reaction_emoji_id": "贴表情回应使用的表情ID(默认 76=👍),QQ 表情编号",
+        "reaction_emoji_id": "贴表情回应使用的表情ID(默认 124),QQ 表情编号",
+        "event_queue_enabled": "群聊排队总开关:Hermes 不隔离群成员(group_sessions_per_user=false)时,"
+                              "是否对群消息排队串行处理",
+        "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
+        "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
+        "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():
@@ -573,7 +526,8 @@ class ConfigStore:
                 if asyncio.iscoroutine(result):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(result)
+                        task = loop.create_task(result)
+                        task.add_done_callback(_log_listener_exception)
                     except RuntimeError:
                         result.close()
             except Exception:

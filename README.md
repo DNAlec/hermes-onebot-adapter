@@ -8,7 +8,7 @@ OneBot 11 适配器服务 + Hermes 插件，经独立服务对接 NapCat / go-cq
 OneBot ──WS──  适配器服务  ──WS── Hermes 插件 ── Hermes Agent
 ```
 
-适配器服务承担全部 OneBot 交互；插件只与适配器服务通信，不直接接触 OneBot 。
+适配器服务承担全部 OneBot 交互；插件只与适配器服务通信，不直接接触 OneBot ；不修改 Hermes 本身的代码。
 
 ## 环境要求
 
@@ -88,7 +88,7 @@ hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
 |------|------|
 | 18800 | OneBot WS 服务端 `/onebot`（反向 WS 模式，OneBot 连接此端口；正向 WS 模式不使用） |
 | 18810 | Hermes 插件 WS 服务端 `/hermes?token=`（插件连接适配器的端口） |
-| 18820 | WebUI + REST API + 健康检查 (`/api/health`) |
+| 18820 | WebUI + REST API + 健康检查 (`/api/health`)（详见 [API 文档](docs/api.md)） |
 
 ## 环境变量
 
@@ -191,6 +191,39 @@ ws://127.0.0.1:3001
 **每群覆盖**：群配置中可覆盖 `command_filter_enabled`、`command_filter_unknown`、`command_permissions`，与现有群配置模式一致（`None`=跟随全局）。
 
 被过滤的指令会通过 OneBot HTTP API 向原聊天发送拒绝消息，不会送入 Hermes 处理。指令过滤在媒体下载之前执行，避免浪费带宽。
+
+## 群聊消息排队
+
+适配器内置 shared 群聊消息排队机制，防止群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes 配置 `group_sessions_per_user: false`（全群共享 session）且适配器 `event_queue_enabled: true` 时生效**；per_user 模式每人独立 session，无需排队。
+
+### 排队规则
+
+| 场景 | 行为 |
+|------|------|
+| 私聊 | 直接转发，不排队 |
+| Hermes 隔离群成员（per_user=True） | 直接转发，不排队 |
+| 适配器排队总开关关闭 | 直接转发，不排队 |
+| 群未 busy | 标记 busy，转发 |
+| 群 busy | 入队等待（含 busy 用户自身）；出队时连续同用户消息合并为一条 |
+| `/` 开头的消息 | **始终直接转发**（绕过排队） |
+
+### Hermes 会话隔离配置
+
+`group_sessions_per_user` 是 Hermes 顶层的唯一真相源。适配器 WebUI（连接管理页）可直接修改 Hermes `config.yaml` 的此字段，修改后需重启 Hermes 网关生效。插件连接后会上报当前值给适配器，适配器据此决定是否排队。
+
+### idle 信号
+
+处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后插件向适配器发 `idle` 帧，适配器清空 busy 并从队列取下一条转发。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
+
+`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。
+
+### 配置项（WebUI「连接管理」页面）
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `event_queue_enabled` | `true` | 排队总开关：Hermes 不隔离群成员时是否排队 |
+| `event_queue_max_per_chat` | `50` | 单群队列上限，超限拒绝入队 |
+| `event_queue_idle_timeout` | `300.0` | plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy |
 
 ## 开发
 

@@ -146,6 +146,51 @@ def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
         _atomic_write(config_path, buf.getvalue())
 
 
+# ── 顶层 group_sessions_per_user 读写(供 WebUI 管理)────────────────────
+
+
+def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
+    """读取 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
+
+    返回 ``True`` / ``False``;字段不存在时返回 ``None``(调用方按 Hermes
+    默认值 ``True`` 处理,即每用户独立 session)。
+    """
+    config_path = resolve_hermes_config_path(hermes_install_dir)
+    if config_path is None or not config_path.exists():
+        return None
+    data = read_config(hermes_install_dir)
+    if "group_sessions_per_user" not in data:
+        return None
+    value = data.get("group_sessions_per_user")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return bool(value) if value is not None else None
+
+
+def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -> None:
+    """写入 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
+
+    保留其它顶层 key、注释和顺序。原子写。修改后需重启 Hermes 网关生效。
+    """
+    config_path = resolve_hermes_config_path(hermes_install_dir)
+    if config_path is None:
+        raise FileNotFoundError(
+            f"Hermes 安装目录未配置或不存在: {hermes_install_dir!r}; "
+            "请先在 WebUI 设置 hermes_install_dir"
+        )
+
+    data = read_config(hermes_install_dir)
+    data["group_sessions_per_user"] = bool(value)
+
+    import io
+
+    buf = io.StringIO()
+    _yaml().dump(data, buf)
+    _atomic_write(config_path, buf.getvalue())
+
+
 # ── 工具集列表(从 Hermes 安装目录 import)──────────────────────────────
 
 

@@ -1,9 +1,7 @@
 from onebot_adapter.config import AdapterConfig, ConfigStore, ensure_tokens
 from onebot_adapter.relay.protocol import (
-    MediaDescriptor,
     NormalizedEvent,
     event_message,
-    media_message,
     ready_message,
     result_message,
     send_message,
@@ -36,11 +34,11 @@ def test_config_roundtrip(tmp_path):
     from onebot_adapter.config import load_config, save_config
 
     p = tmp_path / "cfg.json"
-    cfg = AdapterConfig(self_id="123456", media_max_mb=10)
+    cfg = AdapterConfig(self_id="123456", seq_map_size=100)
     save_config(cfg, p)
     loaded = load_config(p)
     assert loaded.self_id == "123456"
-    assert loaded.media_max_mb == 10
+    assert loaded.seq_map_size == 100
 
 
 def test_config_store_patch_and_notify():
@@ -59,7 +57,6 @@ def test_protocol_envelopes():
     )
     assert event_message(ev)["type"] == "event"
     assert ready_message(True, "0.1.0")["onebot_connected"] is True
-    assert media_message(MediaDescriptor(id="m1", mime="image/jpeg"))["type"] == "media"
     assert send_message("send_text", "r1", "group:42", content="x")["action"] == "send_text"
     assert result_message("r1", True, message_id="9")["success"] is True
 
@@ -127,7 +124,7 @@ def test_save_config_includes_comments(tmp_path):
     assert "_comment_onebot_mode" in data
     assert "_comment_onebot_ws_token" in data
     assert "_comment_hermes_ws_token" in data
-    assert "_comment_group_session_mode" in data
+    assert "_comment_webui_token_lifetime_hours" in data
     assert "_comment_dm_user_filter_mode" in data
     assert "_comment_log_level" in data
     assert "_comment_groups" in data

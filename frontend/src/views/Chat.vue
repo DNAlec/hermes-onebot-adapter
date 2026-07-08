@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import {
   getGroups, putGroup, deleteGroup, syncGroups,
   type GroupConfig,
+  getHermesMode, putHermesMode, refreshHermesMode, type HermesMode,
 } from "../api";
 import { useConfig } from "../composables/useConfig";
 
@@ -15,15 +16,70 @@ const msgType = ref<"success" | "error">("success");
 const editingGroup = ref<GroupConfig | null>(null);
 const showEditor = ref(false);
 
+const hermesMode = ref<HermesMode | null>(null);
+const editingPerUser = ref(false);
+const savingMode = ref(false);
+const refreshingMode = ref(false);
+const modeMsg = ref("");
+const modeMsgType = ref<"success" | "error" | "warning">("success");
+
 onMounted(async () => {
   try {
     await load();
     groups.value = await getGroups();
+    fetchHermesMode();
   } catch (e: any) {
     msg.value = "加载失败: " + (e.response?.data?.error || e.message);
     msgType.value = "error";
   }
 });
+
+async function fetchHermesMode() {
+  try {
+    hermesMode.value = await getHermesMode();
+  } catch (e: any) {
+    modeMsg.value = "读取 Hermes 配置失败: " + (e.response?.data?.error || e.message);
+    modeMsgType.value = "error";
+  }
+}
+
+async function saveHermesMode(value: boolean) {
+  savingMode.value = true;
+  modeMsg.value = "";
+  try {
+    const res = await putHermesMode(value);
+    modeMsg.value = res.note;
+    modeMsgType.value = "warning";
+    editingPerUser.value = false;
+    await fetchHermesMode();
+  } catch (e: any) {
+    modeMsg.value = (e.response?.data?.error || e.message);
+    modeMsgType.value = "error";
+  } finally {
+    savingMode.value = false;
+  }
+}
+
+async function refreshHermesModeReport() {
+  refreshingMode.value = true;
+  modeMsg.value = "";
+  try {
+    const res = await refreshHermesMode();
+    if (res.ok) {
+      modeMsg.value = res.note || "已请求插件重新上报";
+      modeMsgType.value = "success";
+      setTimeout(() => fetchHermesMode(), 800);
+    } else {
+      modeMsg.value = res.error || "刷新失败";
+      modeMsgType.value = "warning";
+    }
+  } catch (e: any) {
+    modeMsg.value = (e.response?.data?.error || e.message);
+    modeMsgType.value = "error";
+  } finally {
+    refreshingMode.value = false;
+  }
+}
 
 async function saveGlobal() {
   if (!cfg.value) return;
@@ -32,7 +88,6 @@ async function saveGlobal() {
   const c = cfg.value;
     try {
     await saveConfig({
-      group_session_mode: c.group_session_mode,
       group_require_mention: c.group_require_mention,
       group_mention_first_only: c.group_mention_first_only,
       group_trigger_keywords: c.group_trigger_keywords,
@@ -40,15 +95,15 @@ async function saveGlobal() {
       group_keep_mention: c.group_keep_mention,
       group_auto_join: c.group_auto_join,
       global_admins: c.global_admins,
-      media_max_mb: c.media_max_mb,
-      media_max_count: c.media_max_count,
-      media_limit_reject_enabled: c.media_limit_reject_enabled,
-      media_limit_reject_message: c.media_limit_reject_message,
       dm_user_filter_mode: c.dm_user_filter_mode,
       dm_user_list: c.dm_user_list,
       message_show_group_id: c.message_show_group_id,
       reaction_emoji_enabled: c.reaction_emoji_enabled,
       reaction_emoji_id: c.reaction_emoji_id,
+      reaction_emoji_id_queued: c.reaction_emoji_id_queued,
+      event_queue_enabled: c.event_queue_enabled,
+      event_queue_max_per_chat: c.event_queue_max_per_chat,
+      event_queue_idle_timeout: c.event_queue_idle_timeout,
       platform_hint: c.platform_hint,
     });
     msg.value = "全局设置已保存";
@@ -78,9 +133,9 @@ function addGroup() {
   editingGroup.value = {
     group_id: "", name: "", enabled: true, require_mention: null,
     mention_first_only: null, trigger_keywords: null, keyword_first_only: null, keep_mention: null,
-    session_mode: "default", custom_prompt: "", admins: [],
+    custom_prompt: "", admins: [],
     group_user_filter_mode: "blacklist", group_user_list: [],
-    welcome_enabled: false, welcome_message: "", media_max_mb: null, media_max_count: null, media_limit_reject_enabled: null, auto_join: false,
+    welcome_enabled: false, welcome_message: "", auto_join: false,
     message_show_group_id: null,
     reaction_emoji_enabled: null,
     command_filter_enabled: null, command_filter_unknown: null, command_permissions: null,
@@ -140,12 +195,6 @@ function removeTag(list: string[], idx: number) {
   list.splice(idx, 1);
 }
 
-function sessionModeLabel(mode: string): string {
-  if (mode === "shared") return "共享会话";
-  if (mode === "per_user") return "独立会话";
-  return "跟随全局";
-}
-
 const cmdPermsError = ref("");
 function tryParseCmdPerms(text: string) {
   if (!editingGroup.value) return;
@@ -170,7 +219,7 @@ function tryParseCmdPerms(text: string) {
 
 function resetHint() {
   if (!cfg.value) return;
-  cfg.value.platform_hint = "# 平台特性\n你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n回复当前对话通常直接输出文本即可(系统会自动送达);当你需要主动发送消息(分多条发、推送其他会话、跨会话通知等)时,使用 onebot_send_message 工具。\n群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n# chat_id 格式\n- 私聊: <QQ号>(如 100)\n- 群聊(默认 shared 模式): group:<群号>(如 group:42)\n- 群聊 per_user 会话模式: group:<群号>:user:<QQ号>(如 group:42:user:100)\n\n# 入站消息格式(你看到的样子)\n- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [语音1](语音转换失败,保留原始格式)\n- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n- 合并转发:\n  [合并转发开始:1]\n  [Alice]: msg one\n  [Bob]: msg two\n  [合并转发结束:1]\n  嵌套时层级号递增;超过 4 层显示 [合并转发(已跳过:超过最大深度)]\n  合并转发中仅含昵称,无 QQ 号和群内序号,请勿尝试获取转发中发言者的详细信息\n- 斜杠命令(/reset 等)不加发送者前缀,原样传递\n- 启用群号标识时,消息头部会有 [群:42(测试群)] 行(仅主消息,斜杠命令不加)\n\n# 消息序号与工具调用\n- 群聊前缀 # 后的数字是群内序号(real_seq),不是全局消息 ID(message_id)\n- onebot_get_msg / onebot_recall_message / onebot_set_msg_emoji_like 等工具的 real_seq 参数填此群内序号\n- onebot_get_group_msg_history 的 message_seq 参数例外:填消息 ID(message_id),不是群内序号\n- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,需用 onebot_get_group_msg_history 重新获取\n\n# 出站消息格式(你输出时)\n- 要 @ 某人,使用 {@QQ号} 格式,如 {@123456} 你好(QQ 号 5-11 位数字,大括号包裹)\n- 不要用 Markdown 语法(**粗体**、## 标题、- 列表 等),会被自动剥离;如需结构化展示可用纯文本约定(• 列表、【标题】、「引用」、───── 分隔线)\n- 回复时无需重复发送者前缀,直接输出正文\n\n# 不支持的元素\n- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n- 不支持打字状态提示(send_typing 为 no-op)";
+  cfg.value.platform_hint = "# 平台特性\n你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n回复当前对话通常直接输出文本即可(系统会自动送达);当你需要主动发送消息(分多条发、推送其他会话、跨会话通知等)时,使用 onebot_send_message 工具。\n群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n# chat_id 格式\n- 私聊: <QQ号>(如 100)\n- 群聊: group:<群号>(如 group:42)\n\n# 入站消息格式(你看到的样子)\n- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [语音1](语音转换失败,保留原始格式)\n- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n- 合并转发:\n  [合并转发开始:1]\n  [Alice]: msg one\n  [Bob]: msg two\n  [合并转发结束:1]\n  嵌套时层级号递增;超过 4 层显示 [合并转发(已跳过:超过最大深度)]\n  合并转发中仅含昵称,无 QQ 号和群内序号,请勿尝试获取转发中发言者的详细信息\n- 斜杠命令(/reset 等)不加发送者前缀,原样传递\n- 启用群号标识时,消息头部会有 [群:42(测试群)] 行(仅主消息,斜杠命令不加)\n\n# 消息序号与工具调用\n- 群聊前缀 # 后的数字是群内序号(real_seq),不是全局消息 ID(message_id)\n- onebot_get_msg / onebot_recall_message / onebot_set_msg_emoji_like 等工具的 real_seq 参数填此群内序号\n- onebot_get_group_msg_history 的 message_seq 参数例外:填消息 ID(message_id),不是群内序号\n- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,需用 onebot_get_group_msg_history 重新获取\n\n# 出站消息格式(你输出时)\n- 要 @ 某人,使用 {@QQ号} 格式,如 {@123456} 你好(QQ 号 5-11 位数字,大括号包裹)\n- 不要用 Markdown 语法(**粗体**、## 标题、- 列表 等),会被自动剥离;如需结构化展示可用纯文本约定(• 列表、【标题】、「引用」、───── 分隔线)\n- 回复时无需重复发送者前缀,直接输出正文\n\n# 不支持的元素\n- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n- 不支持打字状态提示(send_typing 为 no-op)";
 }
 </script>
 
@@ -185,13 +234,6 @@ function resetHint() {
     <div v-if="cfg" class="section">
       <h3>全局群聊设置</h3>
       <div class="grid2">
-        <label>
-          默认 Session 模式
-          <select v-model="cfg.group_session_mode">
-            <option value="shared">共享会话（群内所有人共用）</option>
-            <option value="per_user">独立会话（每用户独立）</option>
-          </select>
-        </label>
         <label>
           <input type="checkbox" v-model="cfg.group_require_mention" />
           <span>群聊需 @bot</span>
@@ -221,32 +263,6 @@ function resetHint() {
           <input type="checkbox" v-model="cfg.group_auto_join" />
           <span>自动接受加群请求</span>
         </label>
-        <label>
-          媒体大小限制 (MB)
-          <input type="number" v-model.number="cfg.media_max_mb" min="1" max="100" />
-        </label>
-        <label>
-          媒体数量上限
-          <input type="number" v-model.number="cfg.media_max_count" min="1" max="100" />
-        </label>
-        <label class="full">
-          <input type="checkbox" v-model="cfg.media_limit_reject_enabled" />
-          <span>媒体超出限制时回发提示（数量/大小超限或下载失败时,回复一条融合提示给用户）</span>
-        </label>
-        <label class="full">
-          回发提示文案模板
-          <textarea
-            v-model="cfg.media_limit_reject_message"
-            rows="3"
-            placeholder="输入提示文案模板"
-          ></textarea>
-          <span class="hint">
-            可用变量：<code>{skipped_count}</code> — 被跳过的媒体总数 ·
-            <code>{max_count}</code> — 数量上限 ·
-            <code>{max_mb}</code> — 单文件大小上限(MB) ·
-            <code>{details}</code> — 自动渲染的多行明细（每行 [图N]: 原因）
-          </span>
-        </label>
       </div>
 
       <label class="full">
@@ -272,11 +288,84 @@ function resetHint() {
           <span>消息送达后贴表情回应（仅 Hermes 插件在线时触发）</span>
         </label>
         <label>
-          贴表情回应使用的表情 ID
-          <input type="text" v-model="cfg.reaction_emoji_id" placeholder="76" />
-          <span class="hint">QQ 表情编号（默认 76=👍）</span>
+          消息送达后贴表情回应 ID
+          <input type="text" v-model="cfg.reaction_emoji_id" placeholder="124" />
+          <span class="hint">QQ 表情编号（默认 124）</span>
+        </label>
+        <label>
+          消息排队时贴表情回应 ID
+          <input type="text" v-model="cfg.reaction_emoji_id_queued" placeholder="123" />
+          <span class="hint">消息进入排队队列时贴的表情，空=不贴（默认 123）</span>
         </label>
       </div>
+    </div>
+
+    <!-- 会话隔离与消息排队 -->
+    <div v-if="cfg" class="section">
+      <h3>会话隔离与消息排队</h3>
+
+      <h4>Hermes 会话隔离</h4>
+      <p class="hint" style="margin-bottom:0.75rem;">
+        <strong>隔离(true)</strong>:每个群成员独立 session。<br>
+        <strong>共享(false)</strong>:全群共享 session。
+      </p>
+      <div v-if="modeMsg" :class="['message', modeMsgType]">{{ modeMsg }}</div>
+
+      <div class="mode-display">
+        <span class="mode-label">当前值:</span>
+        <span :class="['mode-value', hermesMode?.group_sessions_per_user ? 'isolation-on' : 'isolation-off']">
+          {{ hermesMode?.group_sessions_per_user ? '隔离' : '共享' }}
+        </span>
+        <span class="mode-source" v-if="hermesMode">
+          来源:
+          <code v-if="hermesMode.source === 'plugin_report'">插件上报</code>
+          <code v-else-if="hermesMode.source === 'hermes_config_yaml'">Hermes config.yaml(插件未连接)</code>
+          <code v-else>默认值(插件未连接)</code>
+        </span>
+        <button @click="refreshHermesModeReport" :disabled="refreshingMode" class="mode-refresh-btn">
+          {{ refreshingMode ? "刷新中..." : "↻ 刷新上报值" }}
+        </button>
+      </div>
+
+      <div class="mode-edit" v-if="!editingPerUser">
+        <button @click="editingPerUser = true" class="mode-edit-btn">✏ 修改 Hermes 配置</button>
+      </div>
+      <div class="mode-edit" v-else>
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            :checked="!hermesMode?.group_sessions_per_user"
+            @change="(e) => { editingPerUser = false; saveHermesMode(!(e.target as HTMLInputElement).checked) }"
+          />
+          <span>开启群聊共享 session(写入 group_sessions_per_user: false 到 Hermes config.yaml)</span>
+        </label>
+        <button @click="editingPerUser = false" class="mode-cancel-btn">取消</button>
+      </div>
+      <p class="hint" v-if="editingPerUser">
+        修改后会写入 Hermes <code>config.yaml</code>,需<strong>重启 Hermes 网关</strong>才生效。
+      </p>
+
+      <hr style="margin: 1.25rem 0; border: none; border-top: 1px solid var(--border);" />
+
+      <h4>适配器群聊排队</h4>
+      <p class="hint" style="margin-bottom:0.75rem;">
+        当 Hermes 不隔离群成员时,适配器对群消息排队串行处理。
+        群 busy 时所有用户的消息（含 busy 用户自身）一律排队等待,出队时连续同用户消息会自动合并为一条。所有/命令会绕过排队。
+      </p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.event_queue_enabled" />
+        <span>启用群聊排队</span>
+      </label>
+      <label>
+        单群队列上限
+        <input type="number" v-model.number="cfg.event_queue_max_per_chat" min="1" max="500" />
+        <span class="hint">每个群聊的排队消息上限(默认 50),超限丢弃最旧的一条。</span>
+      </label>
+      <label>
+        busy 超时(秒)
+        <input type="number" v-model.number="cfg.event_queue_idle_timeout" min="10" step="10" />
+        <span class="hint">Hermes 无响应的超时阈值,超时后强制清空 busy 并派发下一条。</span>
+      </label>
     </div>
 
     <!-- 私聊设置 -->
@@ -327,7 +416,7 @@ function resetHint() {
       <table v-if="groups.length" class="group-table">
         <thead>
           <tr>
-            <th>群号</th><th>群名</th><th>状态</th><th>Session</th><th>@bot</th><th>首@</th><th>关键词</th><th>操作</th>
+            <th>群号</th><th>群名</th><th>状态</th><th>@bot</th><th>首@</th><th>关键词</th><th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -339,7 +428,6 @@ function resetHint() {
                 {{ g.enabled ? '✅ 启用' : '❌ 禁用' }}
               </span>
             </td>
-            <td>{{ sessionModeLabel(g.session_mode) }}</td>
             <td>{{ g.require_mention === null ? '跟随全局' : (g.require_mention ? '是' : '否') }}</td>
             <td>{{ g.mention_first_only === null ? '跟随全局' : (g.mention_first_only ? '是' : '否') }}</td>
             <td>{{ g.trigger_keywords === null ? '跟随全局' : (g.trigger_keywords.length ? g.trigger_keywords.join(', ') : '禁用') }}</td>
@@ -432,34 +520,6 @@ function resetHint() {
         <span class="hint" v-if="editingGroup.keep_mention === true">
           ⚠️ 开启后保留 @bot 段, 但 @bot /指令 将无法被识别
         </span>
-
-        <label>
-          Session 模式
-          <select v-model="editingGroup.session_mode">
-            <option value="default">跟随全局</option>
-            <option value="shared">共享会话</option>
-            <option value="per_user">独立会话</option>
-          </select>
-        </label>
-
-        <label>
-          媒体限制 (MB，空=跟随全局)
-          <input type="number" v-model.number="editingGroup.media_max_mb" min="1" max="100" placeholder="留空跟随全局" />
-        </label>
-
-        <label>
-          媒体数量上限（空=跟随全局）
-          <input type="number" v-model.number="editingGroup.media_max_count" min="1" max="100" placeholder="留空跟随全局" />
-        </label>
-
-        <label>
-          超出媒体限制时回发提示
-          <select v-model="editingGroup.media_limit_reject_enabled">
-            <option :value="null">跟随全局</option>
-            <option :value="true">启用</option>
-            <option :value="false">禁用</option>
-          </select>
-        </label>
 
         <label>
           群专属提示词（空=用全局 platform_hint）
@@ -625,8 +685,42 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--p
 .message { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-weight: 500; }
 .message.success { background: #d4edda; color: #155724; border-left: 4px solid var(--success); }
 .message.error { background: #f8d7da; color: #721c24; border-left: 4px solid var(--danger); }
+.message.warning { background: #fff9e6; color: #856404; border-left: 4px solid var(--warning); }
 .loading { text-align: center; padding: 2rem; color: var(--text-muted, #666); }
 
 .hint { display: block; font-size: 0.8rem; color: var(--text-muted); margin: 0.25rem 0 0; line-height: 1.5; }
 .hint code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+
+h4 { margin: 0 0 0.75rem 0; font-size: 0.95rem; color: #555; }
+
+.mode-display {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0;
+  font-size: 0.9rem;
+}
+.mode-label { font-weight: 500; }
+.mode-value { font-weight: 700; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.85rem; }
+.mode-value.isolation-on { background: rgba(40, 167, 69, 0.15); color: var(--success); }
+.mode-value.isolation-off { background: rgba(255, 193, 7, 0.15); color: #856404; }
+.mode-source { color: var(--text-muted); font-size: 0.8rem; }
+.mode-source code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85em; }
+.mode-refresh-btn {
+  background: var(--card-bg); color: var(--primary); border: 1px solid var(--primary);
+  padding: 0.3rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+}
+.mode-refresh-btn:hover { background: rgba(74, 144, 226, 0.08); }
+.mode-refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.mode-edit { padding: 0.5rem 0; }
+.mode-edit-btn {
+  background: var(--primary); color: white; border: none;
+  padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+}
+.mode-cancel-btn {
+  background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--border);
+  padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+  margin-left: 0.5rem;
+}
 </style>

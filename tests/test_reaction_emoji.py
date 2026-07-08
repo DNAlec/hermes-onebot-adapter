@@ -1,4 +1,4 @@
-"""Tests for message delivery reaction emoji (_maybe_react in app.py)."""
+"""Tests for message delivery reaction emoji (_maybe_react_delivered_* in app.py)."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -60,7 +60,7 @@ def _dm_event(msg_id: str = "100", chat_id: str = "100") -> NormalizedEvent:
 
 async def test_disabled_no_call(service):
     service._api.call = AsyncMock()
-    await service._maybe_react(_group_event())
+    await service._maybe_react_delivered(_group_event())
     service._api.call.assert_not_called()
 
 
@@ -68,14 +68,14 @@ async def test_no_clients_no_call(service):
     service.store.patch(reaction_emoji_enabled=True)
     service._relay._clients = {}  # no plugin connected
     service._api.call = AsyncMock()
-    await service._maybe_react(_group_event())
+    await service._maybe_react_delivered(_group_event())
     service._api.call.assert_not_called()
 
 
 async def test_bad_message_id_no_call(service):
     service.store.patch(reaction_emoji_enabled=True)
     service._api.call = AsyncMock()
-    await service._maybe_react(_group_event(msg_id="not-a-number"))
+    await service._maybe_react_delivered(_group_event(msg_id="not-a-number"))
     service._api.call.assert_not_called()
 
 
@@ -84,7 +84,7 @@ async def test_api_failure_swallows_exception(service):
     service._relay._clients = {MagicMock(): MagicMock()}  # has_clients → True
     service._api.call = AsyncMock(side_effect=RuntimeError("boom"))
     # Should not raise
-    await service._maybe_react(_group_event())
+    await service._maybe_react_delivered(_group_event())
     service._api.call.assert_called_once()
 
 
@@ -95,7 +95,7 @@ async def test_enabled_group_calls_api(service):
     service.store.patch(reaction_emoji_enabled=True, reaction_emoji_id="76")
     service._relay._clients = {MagicMock(): MagicMock()}  # has_clients → True
     service._api.call = AsyncMock(return_value={"retcode": 0, "data": {}})
-    await service._maybe_react(_group_event(msg_id="100", chat_id="group:42"))
+    await service._maybe_react_delivered(_group_event(msg_id="100", chat_id="group:42"))
     service._api.call.assert_called_once()
     action, params = service._api.call.call_args.args
     assert action == "set_msg_emoji_like"
@@ -106,7 +106,7 @@ async def test_enabled_dm_calls_api(service):
     service.store.patch(reaction_emoji_enabled=True, reaction_emoji_id="76")
     service._relay._clients = {MagicMock(): MagicMock()}  # has_clients → True
     service._api.call = AsyncMock(return_value={"retcode": 0, "data": {}})
-    await service._maybe_react(_dm_event(msg_id="100", chat_id="100"))
+    await service._maybe_react_delivered(_dm_event(msg_id="100", chat_id="100"))
     service._api.call.assert_called_once()
     action, params = service._api.call.call_args.args
     assert action == "set_msg_emoji_like"
@@ -124,7 +124,7 @@ async def test_group_override_false_blocks(service):
     )
     service._relay._clients = {MagicMock(): MagicMock()}
     service._api.call = AsyncMock()
-    await service._maybe_react(_group_event(chat_id="group:42"))
+    await service._maybe_react_delivered(_group_event(chat_id="group:42"))
     service._api.call.assert_not_called()
 
 
@@ -136,7 +136,7 @@ async def test_group_override_true_enables_when_global_off(service):
     )
     service._relay._clients = {MagicMock(): MagicMock()}
     service._api.call = AsyncMock(return_value={"retcode": 0, "data": {}})
-    await service._maybe_react(_group_event(chat_id="group:42"))
+    await service._maybe_react_delivered(_group_event(chat_id="group:42"))
     service._api.call.assert_called_once()
 
 
@@ -148,5 +148,76 @@ async def test_group_none_follows_global(service):
     )
     service._relay._clients = {MagicMock(): MagicMock()}
     service._api.call = AsyncMock(return_value={"retcode": 0, "data": {}})
-    await service._maybe_react(_group_event(chat_id="group:42"))
+    await service._maybe_react_delivered(_group_event(chat_id="group:42"))
     service._api.call.assert_called_once()
+
+
+# ── queued reaction (_maybe_react_queued) ───────────────────────────────
+
+
+async def test_queued_empty_id_no_call(service):
+    """reaction_emoji_id_queued 为空时不贴表情。"""
+    service.store.patch(reaction_emoji_enabled=True, reaction_emoji_id_queued="")
+    service._relay._clients = {MagicMock(): MagicMock()}
+    service._api.call = AsyncMock()
+    await service._maybe_react_queued(_group_event())
+    service._api.call.assert_not_called()
+
+
+async def test_queued_disabled_no_call(service):
+    """reaction_emoji_enabled=False 时不贴排队表情。"""
+    service.store.patch(reaction_emoji_enabled=False, reaction_emoji_id_queued="⏳")
+    service._relay._clients = {MagicMock(): MagicMock()}
+    service._api.call = AsyncMock()
+    await service._maybe_react_queued(_group_event())
+    service._api.call.assert_not_called()
+
+
+async def test_queued_no_clients_no_call(service):
+    service.store.patch(reaction_emoji_enabled=True, reaction_emoji_id_queued="⏳")
+    service._relay._clients = {}
+    service._api.call = AsyncMock()
+    await service._maybe_react_queued(_group_event())
+    service._api.call.assert_not_called()
+
+
+async def test_queued_enabled_group_calls_api(service):
+    service.store.patch(reaction_emoji_enabled=True, reaction_emoji_id_queued="⏳")
+    service._relay._clients = {MagicMock(): MagicMock()}
+    service._api.call = AsyncMock(return_value={"retcode": 0, "data": {}})
+    await service._maybe_react_queued(_group_event(msg_id="100", chat_id="group:42"))
+    service._api.call.assert_called_once()
+    action, params = service._api.call.call_args.args
+    assert action == "set_msg_emoji_like"
+    assert params == {"message_id": 100, "emoji_id": "⏳", "group_id": 42}
+
+
+async def test_queued_enabled_dm_calls_api(service):
+    service.store.patch(reaction_emoji_enabled=True, reaction_emoji_id_queued="⏳")
+    service._relay._clients = {MagicMock(): MagicMock()}
+    service._api.call = AsyncMock(return_value={"retcode": 0, "data": {}})
+    await service._maybe_react_queued(_dm_event(msg_id="100", chat_id="100"))
+    service._api.call.assert_called_once()
+    action, params = service._api.call.call_args.args
+    assert action == "set_msg_emoji_like"
+    assert params == {"message_id": 100, "emoji_id": "⏳", "user_id": 100}
+
+
+async def test_queued_api_failure_swallows_exception(service):
+    service.store.patch(reaction_emoji_enabled=True, reaction_emoji_id_queued="⏳")
+    service._relay._clients = {MagicMock(): MagicMock()}
+    service._api.call = AsyncMock(side_effect=RuntimeError("boom"))
+    await service._maybe_react_queued(_group_event())
+    service._api.call.assert_called_once()
+
+
+async def test_queued_group_override_false_blocks(service):
+    service.store.patch(
+        reaction_emoji_enabled=True,
+        reaction_emoji_id_queued="⏳",
+        groups={"42": GroupConfig(group_id="42", reaction_emoji_enabled=False).to_dict()},
+    )
+    service._relay._clients = {MagicMock(): MagicMock()}
+    service._api.call = AsyncMock()
+    await service._maybe_react_queued(_group_event(chat_id="group:42"))
+    service._api.call.assert_not_called()

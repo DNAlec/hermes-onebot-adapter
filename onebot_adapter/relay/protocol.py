@@ -1,8 +1,9 @@
 """Normalized wire protocol between the adapter service and the Hermes plugin.
 
-All text frames are JSON objects with a ``type`` field. Media payloads are
-carried as WebSocket binary frames, preceded by a ``media`` control message
-that announces the binary frame's id and metadata.
+All frames are JSON text frames — no binary frames. Media (images, videos,
+voice, files) is passed as file paths or URLs in the JSON payload (path
+passthrough). The adapter forwards these directly to OneBot/NapCat, which
+reads the local file or downloads the URL itself.
 
 Direction notation:
   A->P : adapter service -> Hermes plugin (inbound events, responses)
@@ -19,19 +20,20 @@ TypeKind = Literal[
     "ready",
     "ping",
     "pong",
-    "media",
     "event",
     "send",
-    "send_media",
     "api_call",
     "result",
     "error",
     "commands_snapshot",
     "commands_refresh",
     "filtered",
+    "idle",
+    "hermes_mode_report",
+    "mode_refresh",
+    "plugin_info",
 ]
 
-MessageType = Literal["text", "photo", "voice", "video", "document", "mixed"]
 ChatType = Literal["dm", "group"]
 SendAction = Literal["send_text", "send_image", "send_voice", "send_video", "send_document"]
 
@@ -43,31 +45,13 @@ def envelope(type_: TypeKind, **fields: Any) -> dict[str, Any]:
 
 
 @dataclass
-class MediaDescriptor:
-    id: str
-    mime: str
-    name: str = ""
-    size: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "mime": self.mime, "name": self.name, "size": self.size}
-
-
-@dataclass
-class MediaPayload:
-    """A media descriptor plus its raw bytes, ready to ship over WS."""
-
-    descriptor: MediaDescriptor
-    data: bytes
-
-    @property
-    def id(self) -> str:
-        return self.descriptor.id
-
-
-@dataclass
 class NormalizedEvent:
-    """OneBot 11 event reduced to a Hermes-neutral shape."""
+    """OneBot 11 event reduced to a Hermes-neutral shape.
+
+    Media is NOT included as binary payloads — all images/videos/voice/files
+    are rendered as URL placeholders in ``text`` (e.g. ``[图1](https://...)``)
+    so the LLM can fetch them on demand.
+    """
 
     message_id: str
     chat_id: str
@@ -75,13 +59,6 @@ class NormalizedEvent:
     user_id: str
     user_name: str
     text: str
-    message_type: MessageType = "text"
-    media_ids: list[str] = field(default_factory=list)
-    media_types: list[str] = field(default_factory=list)
-    # Adapter-internal: media markers skipped during parse (count/size/download-failure).
-    # NOT serialized to the plugin (plugin doesn't need it); the adapter service
-    # reads it from the in-memory object to decide whether to send a reject reply.
-    skipped_media: list[dict[str, Any]] = field(default_factory=list)
     reply_to_message_id: str | None = None
     reply_to_text: str | None = None
     timestamp: float = 0.0
@@ -99,9 +76,6 @@ class NormalizedEvent:
             "user_id": self.user_id,
             "user_name": self.user_name,
             "text": self.text,
-            "message_type": self.message_type,
-            "media_ids": self.media_ids,
-            "media_types": self.media_types,
             "reply_to_message_id": self.reply_to_message_id,
             "reply_to_text": self.reply_to_text,
             "timestamp": self.timestamp,
@@ -174,10 +148,6 @@ def ready_message(onebot_connected: bool, adapter_version: str, self_id: str = "
     )
 
 
-def media_message(media: MediaDescriptor) -> dict[str, Any]:
-    return envelope("media", **media.to_dict())
-
-
 def event_message(event: NormalizedEvent) -> dict[str, Any]:
     return envelope("event", event="message", **event.to_dict())
 
@@ -186,10 +156,6 @@ def send_message(action: SendAction, req_id: str, chat_id: str, **payload: Any) 
     msg = envelope("send", action=action, req_id=req_id, chat_id=chat_id)
     msg.update(payload)
     return msg
-
-
-def send_media_message(media: MediaDescriptor) -> dict[str, Any]:
-    return envelope("send_media", **media.to_dict())
 
 
 def api_call_message(action: str, req_id: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -241,21 +207,52 @@ def filtered_message(event: FilteredEvent) -> dict[str, Any]:
     return envelope("filtered", **event.to_dict())
 
 
+def idle_message(chat_id: str, group_id: str) -> dict[str, Any]:
+    """P->A: Hermes plugin -> adapter service.  Plugin fires this after a
+    shared-group session finishes processing a turn (via the host's
+    ``register_post_delivery_callback`` hook).  The adapter uses it as the
+    "busy -> idle" signal to dequeue the next queued message for that group.
+
+    ``chat_id`` is the original event chat_id (``group:<gid>`` form, no
+    ``:user:`` suffix — only shared groups send idle).  ``group_id`` is the
+    bare numeric group id used as the queue key.
+    """
+    return envelope("idle", chat_id=chat_id, group_id=group_id)
+
+
+def hermes_mode_report_message(group_sessions_per_user: bool) -> dict[str, Any]:
+    """P->A: Hermes plugin -> adapter service.  Plugin pushes Hermes' current
+    ``group_sessions_per_user`` config value so the adapter can decide whether
+    shared-group queueing is needed (False ⇒全群共享 session ⇒ 排队有意义;
+    True ⇒ 每人独立 session ⇒ 无需排队).  Sent on connect/reconnect and on
+    ``mode_refresh`` request.
+    """
+    return envelope("hermes_mode_report", group_sessions_per_user=bool(group_sessions_per_user))
+
+
+def mode_refresh_message() -> dict[str, Any]:
+    """A->P: adapter service → Hermes plugin.  Ask the plugin to re-read
+    Hermes config and push a fresh ``hermes_mode_report`` frame."""
+    return envelope("mode_refresh")
+
+
+def plugin_info_message(plugin_version: str) -> dict[str, Any]:
+    """P->A: Hermes plugin → adapter service.  Plugin reports its own version
+    (read from ``plugin.yaml`` at startup) so the adapter can detect version
+    mismatches and warn the user in the WebUI."""
+    return envelope("plugin_info", plugin_version=plugin_version)
+
+
 def parse_chat_id(chat_id: str) -> tuple[bool, int]:
     """Parse a normalized chat_id into ``(is_group, numeric_id)``.
 
     Supported formats:
-      - ``"group:<gid>"``           → (True, <gid>)            shared session
-      - ``"group:<gid>:user:<uid>"`` → (True, <gid>)            per_user session
-      - ``"<uid>"``                 → (False, <uid>)           DM
+      - ``"group:<gid>"``  → (True, <gid>)   群聊(全群共享 session,Hermes 隔离由其自己配置决定)
+      - ``"<uid>"``        → (False, <uid>)  私聊
 
-    For per_user group sessions the user id is dropped (the message is still
-    sent to the group, not to the individual user).  Raises ``ValueError`` on
-    malformed input.
+    Raises ``ValueError`` on malformed input.
     """
     if chat_id.startswith("group:"):
-        rest = chat_id[len("group:"):]
-        # rest is "<gid>" or "<gid>:user:<uid>"
-        gid_str = rest.split(":", 1)[0]
+        gid_str = chat_id[len("group:"):]
         return True, int(gid_str)
     return False, int(chat_id)

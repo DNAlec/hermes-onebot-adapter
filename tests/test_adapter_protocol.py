@@ -65,9 +65,6 @@ class FakeWS:
             loop = asyncio.get_event_loop()
             loop.call_soon(_resolve)
 
-    async def send_bytes(self, data: bytes):
-        self.sent.append(data)
-
     async def close(self):
         self.closed = True
 
@@ -82,9 +79,8 @@ def _make_adapter():
     adapter._session = None
     adapter._ws = None
     adapter._recv_task = None
-    adapter._media_buffer = {}
-    adapter._pending_media = asyncio.Queue()
     adapter._futures = {}
+    adapter._send_semaphore = asyncio.Semaphore(2)  # match _MAX_INFLIGHT_SENDS
     adapter._onebot_connected = False
     adapter._self_id = ""
     adapter._is_connected = True
@@ -113,24 +109,18 @@ async def test_send_text_constructs_frame():
     assert sent["content"] == "hello"
 
 
-async def test_send_media_bytes_sends_two_frames():
+async def test_send_image_via_path():
+    """send_image with a local path sends a single JSON send frame."""
     adapter = _make_adapter()
     fake_ws = FakeWS()
     fake_ws._adapter = adapter
     adapter._ws = fake_ws
-    result = await adapter._send_media_bytes(
-        "send_image", "group:42", b"\x89PNGdata", "image/jpeg", "test.jpg",
-    )
-    assert result["success"] is True
-    # Should have sent: send_media (json), binary, send (json)
-    assert isinstance(fake_ws.sent[0], dict)
-    assert fake_ws.sent[0]["type"] == "send_media"
-    assert isinstance(fake_ws.sent[1], bytes)
-    assert fake_ws.sent[1] == b"\x89PNGdata"
-    assert isinstance(fake_ws.sent[2], dict)
-    assert fake_ws.sent[2]["type"] == "send"
-    assert fake_ws.sent[2]["action"] == "send_image"
-    assert fake_ws.sent[2]["media_id"] == fake_ws.sent[0]["id"]
+    result = await adapter.send_image("group:42", "/tmp/img.jpg")
+    assert result.success is True
+    sent = fake_ws.sent[0]
+    assert sent["type"] == "send"
+    assert sent["action"] == "send_image"
+    assert sent["image_url"] == "/tmp/img.jpg"
 
 
 async def test_api_call_constructs_frame():
@@ -156,13 +146,6 @@ async def test_handle_text_ready_frame():
     }))
     assert adapter._onebot_connected is True
     assert adapter._self_id == "123456"
-
-
-async def test_handle_text_media_then_binary():
-    adapter = _make_adapter()
-    await adapter._handle_text(json.dumps({"type": "media", "id": "m1", "mime": "image/jpeg"}))
-    await adapter._handle_binary(b"\x89PNGdata")
-    assert adapter._media_buffer.get("m1") == b"\x89PNGdata"
 
 
 async def test_handle_text_result_resolves_future():

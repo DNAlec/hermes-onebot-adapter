@@ -33,33 +33,19 @@ from onebot_adapter.webui import routes as webui_routes
 logger = logging.getLogger(__name__)
 
 
-_MEDIA_KIND_LABELS = {"image": "图", "video": "视频", "record": "语音", "file": "文件"}
-
-
-def _render_media_reject_details(skipped: list[dict]) -> str:
-    """Render ``skipped_media`` records into a multi-line detail block.
-
-    Each line: ``[图3]: 文件大小8MB超过限制5MB`` — label mirrors the parser's
-    placeholder numbering so the user can correlate with the [图N] tokens in
-    the relayed text. Returns the joined string for ``{details}`` substitution.
+class _ExcludeLogFormatPreview(logging.Filter):
+    """Filter that rejects log records emitted by the ``log_format`` module
+    logger (truncated recv/send preview lines).  Those events are also
+    emitted in full (untruncated) form by the dedicated ``onebot_adapter.file``
+    logger, which propagates to the parent ``onebot_adapter`` logger and
+    reaches the file handler.  Without this filter the file would contain
+    both the truncated preview and the full line for every recv/send event.
     """
-    lines: list[str] = []
-    for rec in skipped:
-        kind = rec.get("kind", "media")
-        idx = rec.get("idx", 0)
-        name = rec.get("name", "")
-        tag = _MEDIA_KIND_LABELS.get(kind, "媒体")
-        if kind == "file" and name:
-            label = f"[文件{idx}:{name}]"
-        else:
-            label = f"[{tag}{idx}]"
-        reason = rec.get("reason", "")
-        detail = rec.get("detail", "")
-        if detail:
-            lines.append(f"{label}: {reason}:{detail}")
-        else:
-            lines.append(f"{label}: {reason}")
-    return "\n".join(lines)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.name.endswith(".onebot.log_format")
+
+
 
 
 class AdapterService:
@@ -103,6 +89,7 @@ class AdapterService:
             on_connect=self._update_status,
             on_disconnect=self._update_status,
             on_filtered=self._on_filtered_command,
+            on_dispatch=self._maybe_react_delivered,
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
         )
@@ -135,10 +122,25 @@ class AdapterService:
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
         )
+        # Register config-change listener early so hot-reload via the WebUI
+        # (which starts first) notifies components immediately — previously
+        # this was in _on_hermes_startup, which left a window where a config
+        # change before the Hermes WS site started would be silently ignored.
+        self.store.on_change(self._on_config_change)
 
     def _setup_file_logging(self, cfg: AdapterConfig) -> None:
-        """Create or replace the file logging handler for persistent logs."""
+        """Create or replace the file logging handler for persistent logs.
+
+        The handler is attached to the ``onebot_adapter`` parent logger so
+        that ALL modules under the package (relay, onebot.*, webui, etc.)
+        propagate their log records into ``adapter.log``.  A filter excludes
+        the truncated preview lines emitted by ``onebot_adapter.onebot.log_format``'s
+        module logger — those events are already written to the file in full
+        (untruncated) form by the dedicated ``onebot_adapter.file`` logger,
+        so accepting the truncated copies here would duplicate recv/send lines.
+        """
         if self._file_handler is not None:
+            logging.getLogger("onebot_adapter").removeHandler(self._file_handler)
             logging.getLogger("onebot_adapter.file").removeHandler(self._file_handler)
             self._file_handler.close()
             self._file_handler = None
@@ -159,7 +161,11 @@ class AdapterService:
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s: %(message)s"
         ))
-        logging.getLogger("onebot_adapter.file").addHandler(handler)
+        # Skip the truncated preview lines from the log_format module logger;
+        # the full untruncated versions are emitted by the "onebot_adapter.file"
+        # logger and will reach this handler via propagation.
+        handler.addFilter(_ExcludeLogFormatPreview())
+        logging.getLogger("onebot_adapter").addHandler(handler)
         self._file_handler = handler
 
     def _update_file_logging(self, old: AdapterConfig, new: AdapterConfig) -> None:
@@ -234,27 +240,43 @@ class AdapterService:
         self._state["onebot_connected"] = self._onebot_connected()
         self._state["hermes_plugin_connected"] = bool(self._relay and self._relay.has_clients)
 
-    async def _on_onebot_event(self, event, media) -> None:
+    async def _on_onebot_event(self, event) -> None:
         self._update_status()
         logger.debug(
-            "app _on_onebot_event: relaying to Hermes chat_id=%s msg_type=%s media=%d text_preview=%r",
-            event.chat_id, event.message_type, len(media), (event.text or "")[:500],
+            "app _on_onebot_event: relaying to Hermes chat_id=%s text_preview=%r",
+            event.chat_id, (event.text or "")[:500],
         )
         if self._relay:
-            await self._relay.push_event(event, media)
-            await self._maybe_react(event)
-        await self._maybe_media_reject(event)
+            outcome = await self._relay.push_event(event)
+            if outcome == "queued":
+                await self._maybe_react_queued(event)
+            elif outcome == "broadcast":
+                await self._maybe_react_delivered(event)
+            # "dropped": neither queued nor delivered — do not react.
 
-    async def _maybe_react(self, event) -> None:
-        """消息通过过滤并送达 Hermes 后,在原消息上贴表情回应(可配置)。
+    async def _maybe_react_delivered(self, event) -> None:
+        """消息送达 Hermes(广播或出队)后在原消息上贴表情回应(可配置)。
 
         触发条件:功能全局开启且当前会话未单独关闭;Hermes 插件有连接(否则
         消息只进了 ring buffer 等重连重放,不算"送达");event.message_id 可转 int。
         调用 OneBot ``set_msg_emoji_like`` API,失败仅记 debug 日志,不影响主流程。
         """
-        cfg = self.store.config
-        if not cfg.reaction_emoji_id:
+        await self._do_react(event, self.store.config.reaction_emoji_id)
+
+    async def _maybe_react_queued(self, event) -> None:
+        """消息进入排队队列时在原消息上贴表情回应(可配置)。
+
+        与 _maybe_react_delivered 结构相同,但使用 reaction_emoji_id_queued
+        配置项。当该配置为空字符串时,排队时不贴表情。
+        """
+        emoji_id = self.store.config.reaction_emoji_id_queued
+        if not emoji_id:
             return
+        await self._do_react(event, emoji_id)
+
+    async def _do_react(self, event, emoji_id: str) -> None:
+        """统一的贴表情回应实现。"""
+        cfg = self.store.config
         try:
             is_group, num_id = parse_chat_id(event.chat_id)
         except (ValueError, TypeError):
@@ -269,7 +291,7 @@ class AdapterService:
         except (ValueError, TypeError):
             return
         assert self._api is not None
-        params: dict[str, Any] = {"message_id": msg_id, "emoji_id": cfg.reaction_emoji_id}
+        params: dict[str, Any] = {"message_id": msg_id, "emoji_id": emoji_id}
         if is_group:
             params["group_id"] = num_id
         else:
@@ -278,7 +300,7 @@ class AdapterService:
             await self._api.call("set_msg_emoji_like", params)
             logger.debug(
                 "reaction emoji set: msg=%s emoji=%s chat=%s",
-                event.message_id, cfg.reaction_emoji_id, event.chat_id,
+                event.message_id, emoji_id, event.chat_id,
             )
         except Exception:
             logger.debug(
@@ -305,47 +327,6 @@ class AdapterService:
                 reply_to=getattr(filtered, "reply_to_message_id", None),
             )
 
-    async def _maybe_media_reject(self, event) -> None:
-        """媒体超出数量/大小限制或下载失败时,向原会话回发一条融合提示。
-
-        触发条件:``event.skipped_media`` 非空且当前会话的
-        ``media_limit_reject_enabled`` 解析为真。事件已照常转发给 Hermes
-        (LLM 仍能在文本占位符里看到跳过原因);此处仅给用户一条额外提示,
-        带 reply 段指向原消息。失败仅记 debug 日志,不影响主流程。
-        """
-        skipped = getattr(event, "skipped_media", None) or []
-        if not skipped:
-            return
-        cfg = self.store.config
-        try:
-            is_group, num_id = parse_chat_id(event.chat_id)
-        except (ValueError, TypeError):
-            return
-        group_id = str(num_id) if is_group else None
-        if not cfg.resolve_media_limit_reject_enabled(group_id):
-            return
-        if not self._relay:
-            return
-        max_count = cfg.resolve_media_max_count(group_id)
-        max_mb = cfg.resolve_media_max_bytes(group_id) // 1024 // 1024
-        details = _render_media_reject_details(skipped)
-        text = cfg.resolve_media_limit_reject_message(group_id)
-        text = text.replace("{skipped_count}", str(len(skipped)))
-        text = text.replace("{max_count}", str(max_count))
-        text = text.replace("{max_mb}", str(max_mb))
-        text = text.replace("{details}", details)
-        try:
-            await self._relay.send_reject_message(
-                chat_id=event.chat_id,
-                message=text,
-                reply_to=event.message_id,
-            )
-            logger.debug(
-                "media reject sent: chat=%s skipped=%d", event.chat_id, len(skipped),
-            )
-        except Exception:
-            logger.debug("media reject send failed (chat=%s)", event.chat_id)
-
     async def _on_hermes_startup(self, app: aiohttp.web.Application) -> None:
         cfg = self.store.config
         logger.info(
@@ -355,8 +336,6 @@ class AdapterService:
         if cfg.onebot_mode == "forward":
             assert self._onebot_forward is not None
             self._forward_task = self._onebot_forward.start()
-        # Register config change callback for hot-reload of transport mode
-        self.store.on_change(self._on_config_change)
 
     async def _on_hermes_cleanup(self, app: aiohttp.web.Application) -> None:
         if self._cleaning_up:
@@ -368,8 +347,6 @@ class AdapterService:
             await self._onebot_reverse.stop()
         if self._relay:
             await self._relay.stop()
-        if self._api:
-            await self._api.close()
         if self._session and not self._session.closed:
             await self._session.close()
         for runner in self._runners:
