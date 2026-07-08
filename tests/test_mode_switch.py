@@ -94,7 +94,7 @@ async def test_mode_no_change_does_nothing(service):
     await service._on_hermes_startup(relay)
     try:
         old = service.store.config
-        new = old.with_overrides(media_max_mb=10)  # different field, same mode
+        new = old.with_overrides(log_message_preview=10)  # different field, same mode
         await service._on_config_change(old, new)
         # No exception, no transport changes
         assert service._onebot_forward._task is None  # still reverse mode

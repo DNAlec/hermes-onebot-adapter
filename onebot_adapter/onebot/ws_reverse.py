@@ -27,7 +27,7 @@ class OneBotReverseServer:
         self,
         config: AdapterConfig,
         api: Any,
-        on_event: Callable[[Any, list], Any] | None = None,
+        on_event: Callable[[Any], Any] | None = None,
         on_connect: Callable[[], Any] | None = None,
         on_disconnect: Callable[[], Any] | None = None,
         session: aiohttp.ClientSession | None = None,
@@ -80,6 +80,7 @@ class OneBotReverseServer:
                     task = asyncio.create_task(self._handle_text(msg.data))
                     self._text_tasks.add(task)
                     task.add_done_callback(self._text_tasks.discard)
+                    task.add_done_callback(_log_task_exc)
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
         finally:
@@ -116,10 +117,7 @@ class OneBotReverseServer:
             trigger_keywords=self._config.group_trigger_keywords,
             keyword_first_only=self._config.group_keyword_first_only,
             keep_mention=self._config.group_keep_mention,
-            media_max_bytes=self._config.media_max_mb * 1024 * 1024,
-            media_max_count=self._config.media_max_count,
             api=self._api,
-            session=self._session,
             config=self._config,
             name_resolver=self._name_resolver,
             is_known_command_fn=self._is_known_command_fn,
@@ -142,12 +140,12 @@ class OneBotReverseServer:
                 except Exception:
                     logger.exception("OneBot reverse: on_filtered callback failed")
             return
-        event, media = parsed
+        event = parsed
         log_recv_line(event, self._config.log_message_preview)
         logger.debug("OneBot reverse parsed text preview: %r", (event.text or "")[:500])
         if self._on_event:
             try:
-                await self._on_event(event, media)
+                await self._on_event(event)
             except Exception:
                 logger.exception("OneBot: on_event callback failed")
 
@@ -169,3 +167,11 @@ def _bearer(header: str) -> str:
     if header.lower().startswith("bearer "):
         return header[7:].strip()
     return ""
+
+
+def _log_task_exc(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("OneBot reverse background task crashed: %r", exc, exc_info=exc)

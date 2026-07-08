@@ -60,6 +60,8 @@ api.interceptors.response.use(
 
 export interface Status {
   adapter_version: string;
+  plugin_version: string | null;
+  version_mismatch: boolean;
   onebot_connected: boolean;
   hermes_plugin_connected: boolean;
   onebot_mode: string;
@@ -67,6 +69,7 @@ export interface Status {
   onebot_ws_port: number;
   hermes_ws_port: number;
   webui_port: number;
+  hermes_group_sessions_per_user: boolean;
 }
 
 export interface GroupConfig {
@@ -78,16 +81,12 @@ export interface GroupConfig {
   trigger_keywords: string[] | null;
   keyword_first_only: boolean | null;
   keep_mention: boolean | null;
-  session_mode: string;
   custom_prompt: string;
   admins: string[];
   group_user_filter_mode: string;
   group_user_list: string[];
   welcome_enabled: boolean;
   welcome_message: string;
-  media_max_mb: number | null;
-  media_max_count: number | null;
-  media_limit_reject_enabled: boolean | null;
   auto_join: boolean;
   message_show_group_id: boolean | null;
   reaction_emoji_enabled: boolean | null;
@@ -108,7 +107,6 @@ export interface Config {
   group_trigger_keywords: string[];
   group_keyword_first_only: boolean;
   group_keep_mention: boolean;
-  group_session_mode: string;
   global_admins: string[];
   group_auto_join: boolean;
 
@@ -116,10 +114,6 @@ export interface Config {
   dm_user_filter_mode: string;
   dm_user_list: string[];
   groups: Record<string, GroupConfig>;
-  media_max_mb: number;
-  media_max_count: number;
-  media_limit_reject_enabled: boolean;
-  media_limit_reject_message: string;
   platform_hint: string;
   hermes_ws_port: number;
   hermes_ws_path: string;
@@ -138,9 +132,14 @@ export interface Config {
   seq_map_size: number;
   reaction_emoji_enabled: boolean;
   reaction_emoji_id: string;
+  reaction_emoji_id_queued: string;
   // ── 发送去重 ──
   send_dedup_enabled: boolean;
   send_dedup_ttl_seconds: number;
+  // ── 群聊排队 ──
+  event_queue_enabled: boolean;
+  event_queue_max_per_chat: number;
+  event_queue_idle_timeout: number;
   // ── /指令过滤 ──
   command_filter_enabled: boolean;
   command_filter_unknown: boolean;
@@ -216,3 +215,32 @@ export const putHermesTools = (payload: {
 }) => api.put<{ ok: boolean; saved: string[] }>("/hermes_tools", payload).then((r) => r.data);
 export const resetHermesTools = () =>
   api.post<{ ok: boolean }>("/hermes_tools/reset").then((r) => r.data);
+
+// ── Hermes session-isolation mode (group_sessions_per_user) ──
+
+export interface HermesMode {
+  group_sessions_per_user: boolean;
+  source: "plugin_report" | "hermes_config_yaml" | "default";
+  plugin_connected: boolean;
+}
+
+export const getHermesMode = () =>
+  api.get<HermesMode>("/hermes_mode").then((r) => r.data);
+export const putHermesMode = (group_sessions_per_user: boolean) =>
+  api.put<{ ok: boolean; written: boolean; restart_required: boolean; note: string }>(
+    "/hermes_mode", { group_sessions_per_user },
+  ).then((r) => r.data);
+export const refreshHermesMode = () =>
+  api.post<{ ok: boolean; note?: string; error?: string }>("/hermes_mode/refresh").then((r) => r.data);
+
+// ── Version update check ──
+
+export interface UpdateInfo {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  changelog_url: string;
+}
+
+export const getUpdateCheck = () =>
+  api.get<UpdateInfo>("/update_check").then((r) => r.data);

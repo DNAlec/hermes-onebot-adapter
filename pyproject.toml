@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=81", "wheel"]
+requires = ["setuptools>=81", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-onebot-adapter"
-version = "1.0.0b2"
+dynamic = ["version"]
 description = "OneBot 11 adapter service for Hermes Agent (NapCat / go-cqhttp)."
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,6 +24,7 @@ classifiers = [
 keywords = ["onebot", "qq", "hermes", "napcat", "chatbot", "onebot11"]
 dependencies = [
     "aiohttp>=3.10,<4",
+    "packaging>=23",
     "ruamel.yaml>=0.18",
 ]
 
@@ -37,6 +38,10 @@ dev = [
 [project.urls]
 Repository = "https://github.com/DNAlec/hermes-onebot-adapter"
 
+[tool.setuptools_scm]
+write_to = "onebot_adapter/_version_scm.py"
+write_to_template = "__version__ = \"{version}\"\n"
+
 [project.scripts]
 hermes-onebot-adapter = "onebot_adapter.__main__:main"
 
@@ -45,7 +50,7 @@ include = ["onebot_adapter*"]
 
 [tool.setuptools.package-data]
 "onebot_adapter.webui.static" = ["**/*"]
-"onebot_adapter.hermes_plugin" = ["*.yaml", "*.py"]
+"onebot_adapter.hermes_plugin" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

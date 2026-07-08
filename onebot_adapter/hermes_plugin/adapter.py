@@ -17,8 +17,10 @@ import json
 import logging
 import os
 import random
+import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -39,11 +41,8 @@ try:
         MessageEvent,
         MessageType,
         SendResult,
-        cache_document_from_bytes,
-        cache_image_from_bytes,
-        cache_video_from_bytes,
     )
-    from gateway.session import SessionSource
+    from gateway.session import SessionSource, build_session_key
     _BASE_AVAILABLE = True
 except ImportError:
     _BASE_AVAILABLE = False
@@ -53,14 +52,33 @@ except ImportError:
     SendResult = None  # type: ignore[assignment]
     Platform = None  # type: ignore[assignment]
     SessionSource = None  # type: ignore[assignment]
-    cache_document_from_bytes = None  # type: ignore[assignment]
-    cache_image_from_bytes = None  # type: ignore[assignment]
-    cache_video_from_bytes = None  # type: ignore[assignment]
+    build_session_key = None  # type: ignore[assignment]
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
 _RECONNECT_INITIAL_DELAY = 1.0
 _RECONNECT_MAX_DELAY = 30.0
+# Maximum concurrent in-flight send requests (send_text/send_image/...).
+# Each send awaits a ``result`` frame from the adapter with a 30s timeout.
+# Without a limit, Gateway ``_send_with_retry`` retries pile up as parallel
+# ``_request`` coroutines, all hitting the serial OneBot WS and amplifying
+# congestion (death spiral).  Limiting to 2 keeps retries orderly: one
+# in-flight + one retry max, matching the adapter-side semaphore.
+_MAX_INFLIGHT_SENDS = 2
+
+_PLUGIN_YAML_PATH = Path(__file__).parent / "plugin.yaml"
+_VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
+
+
+def _read_plugin_version() -> str:
+    try:
+        text = _PLUGIN_YAML_PATH.read_text(encoding="utf-8")
+        m = _VERSION_RE.search(text)
+        if m:
+            return m.group(1).strip().strip("\"'")
+    except (OSError, FileNotFoundError):
+        pass
+    return "unknown"
 
 
 class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
@@ -94,14 +112,20 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._recv_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
-        self._media_buffer: dict[str, bytes] = {}
-        self._pending_media: asyncio.Queue[str] = asyncio.Queue()
         self._futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Background tasks spawned by _handle_event to run handle_message off
+        # the receive loop (avoids the bypass-command self-deadlock).  Tracked
+        # so disconnect() can cancel them cleanly.
+        self._event_tasks: set[asyncio.Task[None]] = set()
+        # Limit concurrent in-flight send requests to prevent retry storms
+        # from overwhelming the serial OneBot WS API.  See _MAX_INFLIGHT_SENDS.
+        self._send_semaphore = asyncio.Semaphore(_MAX_INFLIGHT_SENDS)
         self._onebot_connected = False
         self._self_id = ""
         self._current_is_admin = False
         self._current_group_id = ""
         self._current_user_id = ""
+        self._plugin_version = _read_plugin_version()
 
         # Inject self into onebot_tools so tool handlers can call _api_call
         try:
@@ -151,6 +175,11 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # receive loop is started so any commands_refresh request from the
         # adapter can also be handled.
         asyncio.create_task(self._push_commands_snapshot())
+        # Push Hermes' group_sessions_per_user so the adapter can decide
+        # whether shared-group queueing is needed.
+        asyncio.create_task(self._push_hermes_mode_report())
+        # Push installed plugin version so the adapter can detect mismatches.
+        asyncio.create_task(self._push_plugin_info())
         return True
 
     async def _ws_connect(self) -> None:
@@ -160,7 +189,13 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             url += f"&token={self._adapter_token}"
         else:
             url += f"?token={self._adapter_token}"
-        self._ws = await self._session.ws_connect(url)
+        # heartbeat=30 enables aiohttp-level PING/PONG keepalive so that a
+        # silent network drop (NAT idle reaping, suspend/resume, Wi-Fi roam)
+        # is detected within ~30s rather than waiting minutes for OS TCP
+        # keepalive.  Without this, an idle plugin↔relay WS can sit dead and
+        # undetected until the next send attempt, at which point the watchdog
+        # kicks off a 1→30s exponential backoff reconnect (~2-3 min total).
+        self._ws = await self._session.ws_connect(url, heartbeat=30)
 
     async def disconnect(self) -> None:
         self._is_connected = False
@@ -179,6 +214,13 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             except (asyncio.CancelledError, Exception):
                 pass
             self._recv_task = None
+        # Cancel any in-flight event dispatch tasks so a lingering
+        # handle_message doesn't try to send on a closing WS.
+        for task in list(self._event_tasks):
+            task.cancel()
+        if self._event_tasks:
+            await asyncio.gather(*self._event_tasks, return_exceptions=True)
+        self._event_tasks.clear()
         if self._ws and not self._ws.closed:
             await self._ws.close()
         if self._session and not self._session.closed:
@@ -228,6 +270,14 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 # Clean up the old WS before opening a new one.
                 if self._ws and not self._ws.closed:
                     await self._ws.close()
+                # Cancel any event dispatch tasks still running from the dead
+                # session so they don't try to send() / _request() on the new
+                # WS, interleaving stale-turn results with the current session.
+                for task in list(self._event_tasks):
+                    task.cancel()
+                if self._event_tasks:
+                    await asyncio.gather(*self._event_tasks, return_exceptions=True)
+                self._event_tasks.clear()
                 # Recreate the session if it was closed.
                 if not self._session or self._session.closed:
                     self._session = aiohttp.ClientSession()
@@ -244,6 +294,11 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 # Re-push commands snapshot after reconnect so the adapter has
                 # the latest registry even across WS drops.
                 asyncio.create_task(self._push_commands_snapshot())
+                # Re-push Hermes mode so the adapter has the current
+                # group_sessions_per_user value.
+                asyncio.create_task(self._push_hermes_mode_report())
+                # Re-push plugin version.
+                asyncio.create_task(self._push_plugin_info())
                 delay = _RECONNECT_INITIAL_DELAY  # reset backoff on success
             except Exception as exc:
                 logger.warning("OneBot: reconnect failed: %s", exc)
@@ -262,11 +317,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                         await self._handle_text(msg.data)
                     except Exception:
                         logger.exception("OneBot: error handling text frame, continuing")
-                elif msg.type == aiohttp.WSMsgType.BINARY:
-                    try:
-                        await self._handle_binary(msg.data)
-                    except Exception:
-                        logger.exception("OneBot: error handling binary frame, continuing")
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
                     break
         except asyncio.CancelledError:
@@ -295,13 +345,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             )
             return
 
-        if mtype == "media":
-            # A binary frame with this id will follow immediately
-            mid = data.get("id", "")
-            if mid:
-                self._pending_media.put_nowait(mid)
-            return
-
         if mtype == "event":
             await self._handle_event(data)
             return
@@ -321,79 +364,26 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             asyncio.create_task(self._push_commands_snapshot())
             return
 
-        logger.debug("OneBot: unhandled frame type %s", mtype)
-
-    async def _handle_binary(self, data: bytes) -> None:
-        try:
-            mid = await asyncio.wait_for(self._pending_media.get(), timeout=5.0)
-        except TimeoutError:
-            logger.warning("OneBot: unexpected binary frame, dropping")
+        if mtype == "mode_refresh":
+            logger.info("OneBot: mode_refresh requested by adapter, re-pushing hermes_mode_report")
+            asyncio.create_task(self._push_hermes_mode_report())
             return
-        self._media_buffer[mid] = data
+
+        logger.debug("OneBot: unhandled frame type %s", mtype)
 
     async def _handle_event(self, data: dict[str, Any]) -> None:
         event = data.get("event")
         if event != "message":
             return
 
-        media_ids: list[str] = data.get("media_ids", []) or []
-        media_types_from_protocol: list[str] = data.get("media_types", []) or []
         logger.debug(
-            "OneBot plugin recv event: chat_id=%s msg_type=%s text_len=%d media=%d",
-            data.get("chat_id", ""), data.get("message_type", "text"),
-            len(data.get("text", "") or ""), len(media_ids),
+            "OneBot plugin recv event: chat_id=%s text_len=%d",
+            data.get("chat_id", ""),
+            len(data.get("text", "") or ""),
         )
         logger.debug("OneBot plugin event text preview: %r", (data.get("text", "") or "")[:500])
-        media_urls: list[str] = []
-        media_types: list[str] = []
-
-        for i, mid in enumerate(media_ids):
-            raw = self._media_buffer.pop(mid, None)
-            if raw is None:
-                logger.warning("OneBot: media %s missing from buffer", mid)
-                continue
-            mtype = media_types_from_protocol[i] if i < len(media_types_from_protocol) else ""
-            try:
-                if mtype.startswith("image/"):
-                    path = cache_image_from_bytes(raw)
-                    media_urls.append(path)
-                    media_types.append(mtype)
-                elif mtype.startswith("audio/"):
-                    path = _cache_audio(raw)
-                    media_urls.append(path)
-                    media_types.append(mtype)
-                elif mtype.startswith("video/"):
-                    path = cache_video_from_bytes(raw)
-                    media_urls.append(path)
-                    media_types.append(mtype)
-                else:
-                    path = cache_document_from_bytes(raw, mid)
-                    media_urls.append(path)
-                    media_types.append(mtype or "application/octet-stream")
-            except Exception:
-                logger.exception("OneBot: failed to cache media %s", mid)
-            else:
-                logger.debug("OneBot plugin cached media mid=%s type=%s path=%s", mid, mtype, path)
 
         text = data.get("text", "")
-        msg_type_str = data.get("message_type", "text")
-        # "mixed" type: degrade to the first media's type. Hermes core
-        # processes media individually via media_types list (run.py:8061+),
-        # so message_type is only a coarse hint here.
-        if msg_type_str == "mixed":
-            if media_types:
-                first_type = media_types[0]
-                if first_type.startswith("image/"):
-                    msg_type_str = "photo"
-                elif first_type.startswith("audio/"):
-                    msg_type_str = "voice"
-                elif first_type.startswith("video/"):
-                    msg_type_str = "video"
-                else:
-                    msg_type_str = "document"
-            else:
-                msg_type_str = "text"
-        msg_type = _MESSAGE_TYPE_MAP.get(msg_type_str, MessageType.TEXT)
 
         # Set admin context for tool gating — from event (computed by adapter)
         self._current_is_admin = data.get("is_admin", False)
@@ -418,22 +408,132 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         message_event = MessageEvent(
             text=text,
-            message_type=msg_type,
+            message_type=MessageType.TEXT,
             source=source,
             raw_message=data,
             message_id=data.get("message_id", ""),
-            media_urls=media_urls,
-            media_types=media_types,
+            media_urls=[],
+            media_types=[],
             reply_to_message_id=data.get("reply_to_message_id"),
             reply_to_text=data.get("reply_to_text"),
             timestamp=timestamp,
             channel_prompt=data.get("channel_prompt"),
         )
         logger.debug(
-            "OneBot plugin → Hermes: chat_id=%s msg_type=%s",
-            message_event.source.chat_id, msg_type,
+            "OneBot plugin → Hermes: chat_id=%s",
+            message_event.source.chat_id,
         )
-        await self.handle_message(message_event)
+        # 群聊排队:shared 群聊(group:<gid> 无 :user: 且 Hermes group_sessions_per_user=False)
+        # 才注册 post_delivery callback,处理完后发 idle 帧给适配器,适配器 dequeue 下一条。
+        # per_user 群聊 / 私聊 / Hermes per_user 隔离时不注册(无需排队)。
+        self._maybe_register_idle_callback(data, message_event)
+        # Dispatch handle_message as a background task so the receive loop is
+        # NOT blocked.  Previously this was ``await self.handle_message(...)``
+        # which deadlocked when handle_message hit the bypass-active-session
+        # path (/approve, /deny, /status, …): that path inline-awaits
+        # ``_send_with_retry`` → ``self.send()`` → ``self._request()``, which
+        # sends a ``send`` frame and awaits the matching ``result`` frame.
+        # The ``result`` frame arrives on this same WS and is processed by
+        # ``_receive_loop`` — but ``_receive_loop`` was blocked here, so the
+        # result frame could never be processed, the 30s timeout fired, the
+        # gateway retried with an identical payload, and the adapter
+        # (unaware of the deadlock) sent the message again — producing
+        # duplicate messages in the chat.  Scheduling as a fire-and-forget
+        # task keeps the receive loop free to process result frames, breaking
+        # the self-deadlock.  This mirrors the normal-message path
+        # (``_start_session_processing`` → ``create_task``) which was never
+        # affected.
+        task = asyncio.create_task(self._dispatch_event(message_event))
+        self._event_tasks.add(task)
+        task.add_done_callback(self._event_tasks.discard)
+
+    async def _dispatch_event(self, message_event: Any) -> None:
+        """Run ``handle_message`` off the receive loop.
+
+        Exceptions are logged instead of propagating — ``_receive_loop``
+        already swallows per-frame exceptions, and a background task that
+        raises would otherwise surface as "Task exception was never
+        retrieved".
+        """
+        try:
+            await self.handle_message(message_event)
+        except Exception:
+            logger.exception("OneBot: handle_message raised in background task")
+
+    def _maybe_register_idle_callback(
+        self, data: dict[str, Any], message_event: Any
+    ) -> None:
+        """Register a post_delivery callback that fires an ``idle`` frame to
+        the adapter service after a shared-group turn finishes.
+
+        Conditions (all must hold):
+        - chat_id is a group chat (``group:<gid>``).  DMs don't queue.
+        - Hermes ``group_sessions_per_user`` is False — read from
+          ``self.config.extra`` exactly like ``BasePlatformAdapter.handle_message``
+          does at base.py:4606, so the plugin's notion of "shared" matches
+          Hermes' actual session-key construction.  When True, Hermes gives
+          each participant their own session and queueing is pointless.
+        - The host exposes ``register_post_delivery_callback`` (older Hermes
+          builds don't — we silently skip and the adapter's busy-timeout
+          watchdog handles any stuck slot).
+        """
+        if not _BASE_AVAILABLE or build_session_key is None or SessionSource is None:
+            return
+        chat_id = data.get("chat_id", "")
+        if not chat_id.startswith("group:"):
+            return  # DM — no queueing.
+        try:
+            group_sessions_per_user = self.config.extra.get("group_sessions_per_user", True)
+        except Exception:
+            group_sessions_per_user = True
+        if group_sessions_per_user:
+            return  # Hermes isolates per-user; queueing pointless.
+        if not hasattr(self, "register_post_delivery_callback"):
+            return  # host too old — skip; adapter watchdog covers stuck slots.
+        # Compute the same session_key base.py:handle_message will compute so
+        # the callback registered here is the one base.py pops after the turn.
+        try:
+            session_key = build_session_key(
+                message_event.source,
+                group_sessions_per_user=group_sessions_per_user,
+                thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            )
+        except Exception:
+            logger.debug("OneBot: build_session_key failed, skipping idle callback")
+            return
+        if not session_key:
+            return
+        # generation ties the callback to the current gateway run so stale
+        # runs cannot fire (and clear) a fresher run's idle slot.
+        generation = None
+        active = getattr(self, "_active_sessions", {}).get(session_key)
+        if active is not None:
+            generation = getattr(active, "_hermes_run_generation", None)
+        gid = chat_id[len("group:"):]
+        if self._ws is None or self._ws.closed:
+            return
+
+        async def _fire_idle() -> None:
+            # Re-fetch self._ws at fire time instead of closing over the value
+            # captured at registration.  If the plugin reconnected between
+            # register_post_delivery_callback and the post-delivery callback
+            # firing, the stale ws would be closed and the idle frame would
+            # be lost silently — leaving the adapter's busy slot stuck until
+            # the watchdog reaps it (default 300s).
+            ws = self._ws
+            if ws is None or ws.closed:
+                logger.warning("OneBot: idle frame dropped — ws closed at fire time (gid=%s)", gid)
+                return
+            try:
+                await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
+                logger.info("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
+            except Exception:
+                logger.warning("OneBot: idle frame send failed (ws closed?) gid=%s", gid, exc_info=True)
+
+        try:
+            self.register_post_delivery_callback(session_key, _fire_idle, generation=generation)
+        except Exception:
+            logger.warning("OneBot: register_post_delivery_callback failed gid=%s", gid, exc_info=True)
 
     # ── Slash-command registry push ─────────────────────────────────────
 
@@ -505,54 +605,87 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         except Exception:
             logger.exception("OneBot: failed to push commands_snapshot")
 
+    async def _push_plugin_info(self) -> None:
+        """Push the installed plugin version to the adapter service.
+        Sent once on initial connect so the adapter can detect mismatches."""
+        if not self._ws or self._ws.closed:
+            return
+        try:
+            await self._ws.send_json({
+                "type": "plugin_info",
+                "v": 1,
+                "plugin_version": self._plugin_version,
+            })
+            logger.debug("OneBot: pushed plugin_info (version=%s) to adapter", self._plugin_version)
+        except Exception:
+            logger.exception("OneBot: failed to push plugin_info")
+
+    async def _push_hermes_mode_report(self) -> None:
+        """Read Hermes' ``group_sessions_per_user`` config and push it to the
+        adapter service as a ``hermes_mode_report`` frame.
+
+        Read from ``self.config.extra`` exactly like
+        ``BasePlatformAdapter.handle_message`` (base.py:4606) — Hermes injects
+        the top-level value into platform ``extra`` via setdefault in
+        ``_create_adapter`` (run.py:8355-8363).  Default True when missing.
+        """
+        if not self._ws or self._ws.closed:
+            return
+        try:
+            group_sessions_per_user = self.config.extra.get("group_sessions_per_user", True)
+        except Exception:
+            group_sessions_per_user = True
+        try:
+            await self._ws.send_json({
+                "type": "hermes_mode_report",
+                "v": 1,
+                "group_sessions_per_user": bool(group_sessions_per_user),
+            })
+            logger.debug(
+                "OneBot: pushed hermes_mode_report (group_sessions_per_user=%s) to adapter",
+                group_sessions_per_user,
+            )
+        except Exception:
+            logger.exception("OneBot: failed to push hermes_mode_report")
+
     # ── Outbound send helpers ────────────────────────────────────────────
 
     async def _request(self, action: str, **payload: Any) -> dict[str, Any]:
-        """Send a ``send`` frame and await the matching ``result``."""
-        if not self._ws or self._ws.closed:
-            return {"success": False, "error": "adapter WS not connected"}
-        req_id = str(uuid.uuid4())
-        msg: dict[str, Any] = {
-            "type": "send",
-            "action": action,
-            "req_id": req_id,
-        }
-        msg.update(payload)
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
-        self._futures[req_id] = fut
-        logger.debug(
-            "OneBot plugin _request: action=%s req_id=%s payload_keys=%s frame=%s",
-            action, req_id, list(payload.keys()),
-            json.dumps(msg, ensure_ascii=False)[:2000],
-        )
-        await self._ws.send_json(msg)
-        try:
-            result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
-            logger.debug(
-                "OneBot plugin _request result: action=%s req_id=%s success=%s message_id=%s",
-                action, req_id, result.get("success"), result.get("message_id"),
-            )
-            return result
-        except TimeoutError:
-            self._futures.pop(req_id, None)
-            return {"success": False, "error": f"timeout waiting for {action} result"}
+        """Send a ``send`` frame and await the matching ``result``.
 
-    async def _send_media_bytes(
-        self, action: str, chat_id: str, data: bytes, mime: str, name: str, **extra: Any,
-    ) -> dict[str, Any]:
-        """Upload bytes via send_media + binary frame, then send the action."""
-        if not self._ws or self._ws.closed:
-            return {"success": False, "error": "adapter WS not connected"}
-        media_id = str(uuid.uuid4())
-        await self._ws.send_json({
-            "type": "send_media",
-            "id": media_id,
-            "mime": mime,
-            "name": name,
-            "size": len(data),
-        })
-        await self._ws.send_bytes(data)
-        return await self._request(action, chat_id=chat_id, media_id=media_id, filename=name, **extra)
+        Concurrency is bounded by ``_MAX_INFLIGHT_SENDS`` so that Gateway
+        ``_send_with_retry`` retry storms cannot pile up unlimited parallel
+        sends on the serial OneBot WS (which would amplify congestion and
+        cause more timeouts → more retries, a death spiral).
+        """
+        async with self._send_semaphore:
+            if not self._ws or self._ws.closed:
+                return {"success": False, "error": "adapter WS not connected"}
+            req_id = str(uuid.uuid4())
+            msg: dict[str, Any] = {
+                "type": "send",
+                "action": action,
+                "req_id": req_id,
+            }
+            msg.update(payload)
+            fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+            self._futures[req_id] = fut
+            logger.debug(
+                "OneBot plugin _request: action=%s req_id=%s payload_keys=%s frame=%s",
+                action, req_id, list(payload.keys()),
+                json.dumps(msg, ensure_ascii=False)[:2000],
+            )
+            await self._ws.send_json(msg)
+            try:
+                result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
+                logger.debug(
+                    "OneBot plugin _request result: action=%s req_id=%s success=%s message_id=%s",
+                    action, req_id, result.get("success"), result.get("message_id"),
+                )
+                return result
+            except TimeoutError:
+                self._futures.pop(req_id, None)
+                return {"success": False, "error": f"timeout waiting for {action} result"}
 
     # ── Required abstract methods ────────────────────────────────────────
 
@@ -609,24 +742,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_image: chat_id=%s url=%s", chat_id, image_url)
-            if image_url.startswith(("http://", "https://")):
-                payload: dict[str, Any] = {"chat_id": chat_id, "image_url": image_url}
-                if caption:
-                    payload["caption"] = strip_markdown(caption)
-                if reply_to:
-                    payload["reply_to"] = reply_to
-                result = await self._request("send_image", **payload)
-            else:
-                with open(image_url, "rb") as f:
-                    data = f.read()
-                extra: dict[str, Any] = {}
-                if caption:
-                    extra["caption"] = strip_markdown(caption)
-                if reply_to:
-                    extra["reply_to"] = reply_to
-                result = await self._send_media_bytes(
-                    "send_image", chat_id, data, "image/jpeg", "image.jpg", **extra,
-                )
+            payload: dict[str, Any] = {"chat_id": chat_id, "image_url": image_url}
+            if caption:
+                payload["caption"] = strip_markdown(caption)
+            if reply_to:
+                payload["reply_to"] = reply_to
+            result = await self._request("send_image", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_image failed: %s", exc)
@@ -643,11 +764,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_voice: chat_id=%s path=%s", chat_id, audio_path)
-            with open(audio_path, "rb") as f:
-                data = f.read()
-            result = await self._send_media_bytes(
-                "send_voice", chat_id, data, "audio/wav", "voice.wav",
-            )
+            payload: dict[str, Any] = {"chat_id": chat_id, "audio_path": audio_path}
+            if reply_to:
+                payload["reply_to"] = reply_to
+            result = await self._request("send_voice", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_voice failed: %s", exc)
@@ -664,14 +784,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_video: chat_id=%s path=%s", chat_id, video_path)
-            with open(video_path, "rb") as f:
-                data = f.read()
-            extra: dict[str, Any] = {}
+            payload: dict[str, Any] = {"chat_id": chat_id, "video_path": video_path}
             if caption:
-                extra["caption"] = strip_markdown(caption)
-            result = await self._send_media_bytes(
-                "send_video", chat_id, data, "video/mp4", "video.mp4", **extra,
-            )
+                payload["caption"] = strip_markdown(caption)
+            if reply_to:
+                payload["reply_to"] = reply_to
+            result = await self._request("send_video", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_video failed: %s", exc)
@@ -689,39 +807,38 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     ) -> SendResult:
         try:
             logger.debug("OneBot plugin send_document: chat_id=%s path=%s", chat_id, file_path)
-            name = file_name or os.path.basename(file_path)
-            with open(file_path, "rb") as f:
-                data = f.read()
-            result = await self._send_media_bytes(
-                "send_document", chat_id, data, "application/octet-stream", name,
-            )
+            payload: dict[str, Any] = {"chat_id": chat_id, "file_path": file_path}
+            if file_name:
+                payload["filename"] = file_name
+            result = await self._request("send_document", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_document failed: %s", exc)
             return SendResult(success=False, error=str(exc))
 
     async def _api_call(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        if not self._ws or self._ws.closed:
-            return {"success": False, "error": "adapter WS not connected"}
-        logger.debug("OneBot plugin api_call: action=%s", action)
-        logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
-        req_id = str(uuid.uuid4())
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
-        self._futures[req_id] = fut
-        await self._ws.send_json({
-            "type": "api_call",
-            "action": action,
-            "req_id": req_id,
-            "params": params,
-        })
-        try:
-            result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
-            logger.debug("OneBot plugin api_call result: action=%s success=%s data=%s",
-                         action, result.get("success"), json.dumps(result.get("data"), ensure_ascii=False)[:2000])
-            return result
-        except TimeoutError:
-            self._futures.pop(req_id, None)
-            return {"success": False, "error": f"timeout waiting for {action}"}
+        async with self._send_semaphore:
+            if not self._ws or self._ws.closed:
+                return {"success": False, "error": "adapter WS not connected"}
+            logger.debug("OneBot plugin api_call: action=%s", action)
+            logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
+            req_id = str(uuid.uuid4())
+            fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+            self._futures[req_id] = fut
+            await self._ws.send_json({
+                "type": "api_call",
+                "action": action,
+                "req_id": req_id,
+                "params": params,
+            })
+            try:
+                result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
+                logger.debug("OneBot plugin api_call result: action=%s success=%s data=%s",
+                             action, result.get("success"), json.dumps(result.get("data"), ensure_ascii=False)[:2000])
+                return result
+            except TimeoutError:
+                self._futures.pop(req_id, None)
+                return {"success": False, "error": f"timeout waiting for {action}"}
 
     # ── Typing (no-op, OneBot has no typing indicator) ───────────────────
 
@@ -738,27 +855,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-
-_MESSAGE_TYPE_MAP = {
-    "text": MessageType.TEXT if _BASE_AVAILABLE else None,
-    "photo": MessageType.PHOTO if _BASE_AVAILABLE else None,
-    "voice": MessageType.VOICE if _BASE_AVAILABLE else None,
-    "video": MessageType.VIDEO if _BASE_AVAILABLE else None,
-    "document": MessageType.DOCUMENT if _BASE_AVAILABLE else None,
-} if _BASE_AVAILABLE else {}
-
-
-def _cache_audio(data: bytes) -> str:
-    """Cache WAV audio bytes via Hermes' audio cache."""
-    try:
-        from gateway.platforms.base import cache_audio_from_bytes
-        return cache_audio_from_bytes(data, ext=".wav")
-    except ImportError:
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix=".wav")
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        return path
 
 
 def _result_to_send_result(result: dict[str, Any]) -> SendResult:
@@ -789,6 +885,14 @@ def validate_config(config) -> bool:
 
 
 def is_connected(config) -> bool:
+    """Check whether the adapter URL and token are configured.
+
+    Note: this validates the *configuration* (is the adapter reachable in
+    principle), not the live WS connection status.  A configured-but-not-
+    running adapter will still return True.  The actual liveness is tracked
+    by ``_is_connected`` on the adapter instance and surfaced via the
+    ``ready`` frame's ``onebot_connected`` field.
+    """
     return validate_config(config)
 
 
@@ -867,7 +971,7 @@ def register(ctx) -> None:
     """Plugin entry point: called by the Hermes plugin system."""
     ctx.register_platform(
         name="onebot",
-        label="OneBot (OneBot)",
+        label="OneBot (NapCat)",
         adapter_factory=lambda cfg: OneBotAdapter(cfg),
         check_fn=check_requirements,
         validate_config=validate_config,

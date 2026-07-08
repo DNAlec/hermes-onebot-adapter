@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
-import { checkHermesDir, installPlugin, uninstallPlugin, type HermesDirStatus } from "../api";
+import {
+  checkHermesDir, installPlugin, uninstallPlugin, type HermesDirStatus,
+} from "../api";
 import { useConfig } from "../composables/useConfig";
 
 const { cfg, load, save: saveConfig } = useConfig();
@@ -756,4 +758,5 @@ input:focus {
   .form-row { grid-template-columns: 1fr; }
   .plugin-actions { flex-direction: column; }
 }
+
 </style>

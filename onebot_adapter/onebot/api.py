@@ -26,10 +26,6 @@ class OneBotApi:
     def __init__(self, ws_transport: WsApiTransport) -> None:
         self._ws = ws_transport
 
-    async def close(self) -> None:
-        # WS 连接由 ws_reverse/forward 管理生命周期，这里不关闭
-        return None
-
     async def call(
         self, action: str, params: dict[str, Any] | None = None, timeout: float | None = None
     ) -> dict[str, Any]:

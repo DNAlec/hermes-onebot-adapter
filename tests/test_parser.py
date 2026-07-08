@@ -4,8 +4,6 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import aiohttp
-
 from onebot_adapter.onebot import parser
 
 
@@ -39,15 +37,12 @@ async def test_parse_private_text():
         _msg_event("hello", user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, media = result
+    event = result
     assert event.text == "hello"
     assert event.chat_id == "100"
     assert event.chat_type == "dm"
-    assert event.message_type == "text"
-    assert media == []
 
 
 async def test_parse_group_with_mention():
@@ -59,10 +54,9 @@ async def test_parse_group_with_mention():
         _msg_event("hi bot", message_type="group", group_id=42, segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.chat_id == "group:42"
     assert event.chat_type == "group"
     assert event.text == "[Tester(100)#1]: hi bot"
@@ -75,7 +69,6 @@ async def test_parse_group_without_mention_filtered():
         _msg_event("no mention", message_type="group", group_id=42, segments=segs),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is None
 
@@ -86,7 +79,6 @@ async def test_parse_group_mention_not_required():
         _msg_event("hi", message_type="group", group_id=42, segments=segs),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
     )
     assert result is not None
 
@@ -96,7 +88,6 @@ async def test_parse_non_message_event_filtered():
         {"post_type": "notice", "notice_type": "group_upload"},
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is None
 
@@ -106,7 +97,6 @@ async def test_parse_empty_message_filtered():
         _msg_event("", segments=[]),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is None
 
@@ -120,10 +110,9 @@ async def test_parse_group_slash_command_no_prefix():
         _msg_event("/help", message_type="group", group_id=42, segments=segs),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text == "/help"
 
 
@@ -141,11 +130,10 @@ async def test_parse_reply_context():
         _msg_event("my reply", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         api=mock_api,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.reply_to_message_id == "55"
     assert event.reply_to_text == "[Quoter(200)]: quoted text"
     mock_api.get_msg.assert_awaited_once_with(55)
@@ -173,11 +161,10 @@ async def test_parse_group_reply_with_mention_first_only():
         self_id="999",
         group_require_mention=True,
         mention_first_only=True,
-        media_max_bytes=1024,
         api=mock_api,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text == "[Tester(100)#1]: my reply"
     assert event.chat_id == "group:42"
     assert event.reply_to_message_id == "55"
@@ -200,7 +187,6 @@ async def test_parse_group_reply_without_mention_dropped_first_only():
         self_id="999",
         group_require_mention=True,
         mention_first_only=True,
-        media_max_bytes=1024,
         api=mock_api,
     )
     assert result is None  # dropped: reply skipped, first non-reply is text, not @bot
@@ -225,11 +211,10 @@ async def test_parse_forward_expansion():
         _msg_event("", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         api=mock_api,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[合并转发开始:1]" in event.text
     assert "[合并转发结束:1]" in event.text
     # 顶层只包一层,不应出现双重 [合并转发开始:1]\n[合并转发开始:1]
@@ -268,11 +253,10 @@ async def test_parse_forward_prefix_no_qq_no_seq():
         _msg_event("", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         api=mock_api,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[小 白 龙🍃]: hello" in event.text
     assert "[Sylphy]: world" in event.text
     assert "1094950020" not in event.text
@@ -282,22 +266,15 @@ async def test_parse_forward_prefix_no_qq_no_seq():
     assert "284840486" not in event.text
 
 
-async def test_parse_image_media_download(tmp_path):
-    img_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+async def test_parse_image_url_placeholder():
     result = await parser.parse_event(
         _msg_event("", segments=[{"type": "image", "data": {"url": "http://x/img.png"}}], user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024 * 1024,
-        session=_mock_session([img_bytes]),
     )
     assert result is not None
-    event, media = result
-    assert event.message_type == "photo"
-    assert len(media) == 1
-    assert media[0].data == img_bytes
-    assert media[0].descriptor.mime.startswith("image")
-    assert "[图1]" in event.text
+    event = result
+    assert "[图1](http://x/img.png)" in event.text
 
 
 async def test_parse_reply_with_image():
@@ -306,53 +283,16 @@ async def test_parse_reply_with_image():
         "sender": {"card": "Q", "user_id": 200},
         "message": [{"type": "image", "data": {"url": "http://x/q.png"}}],
     })
-    img_bytes = b"\x89PNG" + b"\x00" * 50
     segs = [{"type": "reply", "data": {"id": 7}}, {"type": "text", "data": {"text": "see this"}}]
     result = await parser.parse_event(
         _msg_event("see this", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024 * 1024,
         api=mock_api,
-        session=_mock_session([img_bytes]),
     )
     assert result is not None
-    event, media = result
-    assert event.message_type == "photo"
-    assert len(media) == 1
-    assert "[图1]" in event.reply_to_text
-
-
-def _mock_session(responses: list[bytes]) -> aiohttp.ClientSession:
-    """Build a fake ClientSession whose .get() yields sequential byte responses."""
-    response_queue = list(responses)
-
-    class _FakeResp:
-        def __init__(self, data: bytes):
-            self._data = data
-            self.status = 200
-            self.headers = {}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        def raise_for_status(self):
-            pass
-
-        async def read(self):
-            return self._data
-
-    class _FakeSession:
-        def __getattr__(self, name):
-            return None
-
-        def get(self, url, **kw):
-            return _FakeResp(response_queue.pop(0) if response_queue else b"")
-
-    return _FakeSession()  # type: ignore[return-value]
+    event = result
+    assert "[图1](http://x/q.png)" in event.reply_to_text
 
 
 # ── @ mention name resolution ────────────────────────────────────────────
@@ -392,11 +332,10 @@ async def test_parse_at_mentions_resolved_in_main_message():
         _msg_event("", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "@123456(张三)" in event.text
     assert "@789012(李四)" in event.text
 
@@ -420,12 +359,11 @@ async def test_parse_at_mentions_resolved_in_reply_context():
         _msg_event("my reply", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         api=mock_api,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "@111111(Bob)" in event.reply_to_text
 
 
@@ -440,11 +378,10 @@ async def test_parse_at_mentions_unknown_user_when_resolution_fails():
         _msg_event("", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "@999999(未知用户)" in event.text
 
 
@@ -458,10 +395,9 @@ async def test_parse_at_mentions_no_resolver_keeps_at_qq_format():
         _msg_event("", segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "@123456" in event.text
     assert "(" not in event.text
 
@@ -482,11 +418,10 @@ async def test_parse_group_admin_prefix():
         _msg_event("hi", message_type="group", group_id=42, segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.is_admin is True
     assert "[Tester(100)(管理员)#1]: hi" == event.text
 
@@ -504,11 +439,10 @@ async def test_parse_group_non_admin_no_suffix():
         _msg_event("hi", message_type="group", group_id=42, segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.is_admin is False
     assert "[Tester(100)#1]: hi" == event.text
     assert "(管理员)" not in event.text
@@ -528,10 +462,9 @@ async def test_first_mention_only_triggers_when_at_first():
         self_id="999",
         group_require_mention=True,
         mention_first_only=True,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text == "[Tester(100)#1]: hi bot"
 
 
@@ -547,7 +480,6 @@ async def test_first_mention_only_filtered_when_not_first():
         self_id="999",
         group_require_mention=True,
         mention_first_only=True,
-        media_max_bytes=1024,
     )
     assert result is None
 
@@ -561,7 +493,6 @@ async def test_keyword_trigger_any_position():
         group_require_mention=False,
         trigger_keywords=["#bot"],
         keyword_first_only=False,
-        media_max_bytes=1024,
     )
     assert result is not None
 
@@ -575,7 +506,6 @@ async def test_keyword_trigger_filtered_when_no_keyword():
         group_require_mention=False,
         trigger_keywords=["#bot"],
         keyword_first_only=False,
-        media_max_bytes=1024,
     )
     assert result is None
 
@@ -589,7 +519,6 @@ async def test_keyword_first_only_triggers_at_start():
         group_require_mention=False,
         trigger_keywords=["#bot"],
         keyword_first_only=True,
-        media_max_bytes=1024,
     )
     assert result is not None
 
@@ -603,7 +532,6 @@ async def test_keyword_first_only_filtered_when_mid():
         group_require_mention=False,
         trigger_keywords=["#bot"],
         keyword_first_only=True,
-        media_max_bytes=1024,
     )
     assert result is None
 
@@ -620,7 +548,6 @@ async def test_mention_or_keyword_both_pass():
         group_require_mention=True,
         trigger_keywords=["#bot"],
         keyword_first_only=False,
-        media_max_bytes=1024,
     )
     assert result is not None
 
@@ -634,7 +561,6 @@ async def test_mention_or_keyword_neither_filtered():
         group_require_mention=True,
         trigger_keywords=["#bot"],
         keyword_first_only=False,
-        media_max_bytes=1024,
     )
     assert result is None
 
@@ -648,7 +574,6 @@ async def test_no_trigger_requirements_passes_all():
         group_require_mention=False,
         trigger_keywords=[],
         keyword_first_only=False,
-        media_max_bytes=1024,
     )
     assert result is not None
 
@@ -668,11 +593,10 @@ async def test_keep_mention_preserves_at_segment():
         self_id="99999",
         group_require_mention=True,
         keep_mention=True,
-        media_max_bytes=1024,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "@99999(BotNick)" in event.text
 
 
@@ -694,7 +618,6 @@ async def test_per_group_mention_first_only_override():
         _msg_event("hi @999", message_type="group", group_id=42, segments=segs, user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
     )
     assert result is None
@@ -716,12 +639,11 @@ async def test_message_show_group_id_enabled():
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text.startswith("[群:42(测试群)]\n")
     assert "[Tester(100)#1]: hi" in event.text
 
@@ -739,12 +661,11 @@ async def test_message_show_group_id_enabled_no_group_name():
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text.startswith("[群:42]\n")
 
 
@@ -758,12 +679,11 @@ async def test_message_show_group_id_disabled_explicitly():
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[群:" not in event.text
 
 
@@ -780,11 +700,10 @@ async def test_message_show_group_id_skipped_for_dm():
         _msg_event("hi", message_type="private", user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
         config=cfg,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[群:" not in event.text
     assert event.text == "hi"
 
@@ -802,12 +721,11 @@ async def test_message_show_group_id_skipped_for_slash_command():
         _msg_event("/reset", message_type="group", group_id=42, user_id=100),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[群:" not in event.text
     assert event.text == "/reset"
 
@@ -822,12 +740,11 @@ async def test_chat_name_group_with_name():
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.chat_name == "42(测试群)"
 
 
@@ -841,12 +758,11 @@ async def test_chat_name_group_without_name():
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.chat_name == "42"
 
 
@@ -856,10 +772,9 @@ async def test_chat_name_dm_is_sender_name():
         _msg_event("hi", message_type="private", user_id=100),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.chat_name == "Tester"  # sender card from _msg_event
 
 
@@ -878,12 +793,11 @@ async def test_message_show_group_id_per_group_override():
         _msg_event("hi", message_type="group", group_id=42, user_id=100),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
         name_resolver=resolver,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text.startswith("[群:42(测试群)]\n")
 
 
@@ -899,10 +813,9 @@ async def test_group_prefix_shows_real_seq_when_present():
         ev,
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[Tester(100)#15154]: hi" == event.text
     assert "#1380622136" not in event.text  # message_id 不出现在前缀
 
@@ -915,10 +828,9 @@ async def test_group_prefix_falls_back_to_message_id_without_real_seq():
         ev,
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[Tester(100)#9999]: hi" == event.text
 
 
@@ -933,11 +845,10 @@ async def test_group_admin_prefix_with_real_seq():
         ev,
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
         config=cfg,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert "[Tester(100)(管理员)#200]: hi" == event.text
 
 
@@ -947,10 +858,9 @@ async def test_private_prefix_has_no_seq():
         _msg_event("hello", user_id=100, message_id=888),
         self_id="999",
         group_require_mention=True,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text == "hello"  # 私聊不加前缀
 
 
@@ -962,10 +872,9 @@ async def test_normalized_event_carries_real_seq():
         ev,
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.real_seq == "15154"
 
 
@@ -975,10 +884,9 @@ async def test_normalized_event_real_seq_empty_when_absent():
         _msg_event("hi", message_type="group", group_id=42, user_id=100, message_id=1),
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.real_seq == ""
 
 
@@ -990,8 +898,7 @@ async def test_slash_command_no_prefix_with_real_seq():
         ev,
         self_id="999",
         group_require_mention=False,
-        media_max_bytes=1024,
     )
     assert result is not None
-    event, _ = result
+    event = result
     assert event.text == "/reset"
