@@ -15,7 +15,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 import uuid
 from collections import deque
@@ -41,8 +40,6 @@ from onebot_adapter.relay.protocol import (
 )
 
 logger = logging.getLogger(__name__)
-
-_AT_MARKER_PATTERN = re.compile(r"\{@(\d{5,11})\}")
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
@@ -82,26 +79,6 @@ def _send_fingerprint(action: str, data: dict[str, Any]) -> str:
     else:  # defensive: never expected since caller filters by _DEDUP_ACTIONS
         raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
-
-
-def _parse_at_markers(text: str) -> list[dict]:
-    """Split text on ``{@QQ号}`` markers, producing at + text segments.
-
-    Example: ``"hello {@123} world"`` →
-    ``[text_segment("hello "), at_segment("123"), text_segment(" world")]``
-    """
-    segs: list[dict] = []
-    last_end = 0
-    for match in _AT_MARKER_PATTERN.finditer(text):
-        if match.start() > last_end:
-            segs.append(ob.text_segment(text[last_end:match.start()]))
-        segs.append(ob.at_segment(match.group(1)))
-        last_end = match.end()
-    if last_end < len(text):
-        segs.append(ob.text_segment(text[last_end:]))
-    if not segs:
-        segs.append(ob.text_segment(text))
-    return segs
 
 
 class HermesRelayServer:
@@ -908,7 +885,7 @@ class HermesRelayServer:
                     except (ValueError, TypeError):
                         pass
                 content = data.get("content", "")
-                segs.extend(_parse_at_markers(content))
+                segs.append(ob.text_segment(content))
 
             elif action == "send_image":
                 file_ref = str(data.get("image_url", ""))
@@ -1119,7 +1096,7 @@ class HermesRelayServer:
                     segs.append(ob.reply_segment(int(reply_to)))
                 except (ValueError, TypeError):
                     pass
-            segs.extend(_parse_at_markers(message))
+            segs.append(ob.text_segment(message))
             if is_group:
                 async with self._send_api_semaphore:
                     resp = await self._api.send_group_msg(num_id, segs)

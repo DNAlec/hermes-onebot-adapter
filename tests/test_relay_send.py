@@ -184,11 +184,16 @@ async def test_unauthorized_rejected():
         await server.close()
 
 
-# ── {@QQ号} marker parsing in send_text ─────────────────────────────────
+# ── send_text content is plain text (no {@QQ号} marker parsing) ───────────
 
 
-async def test_send_text_with_at_marker_produces_at_segment():
-    """{@QQ号} in content should produce at + text segments."""
+async def test_send_text_at_marker_passed_through_as_plain_text():
+    """{@QQ号} markers are NOT parsed — they are sent as literal text.
+
+    Outbound @ mentions must go through the onebot_send_message tool with
+    proper OneBot at segments; the send_text path treats content as plain
+    text and does not split it into at + text segments.
+    """
     app, mock_api, _ = _make_relay_app()
     server = TestServer(app)
     await server.start_server()
@@ -200,33 +205,10 @@ async def test_send_text_with_at_marker_produces_at_segment():
                 result = await ws.receive_json(timeout=2)
                 assert result["success"] is True
             segs = mock_api.send_group_msg.await_args.args[1]
-            assert segs[0]["type"] == "at"
-            assert segs[0]["data"]["qq"] == "123456"
-            assert segs[1]["type"] == "text"
-            assert segs[1]["data"]["text"] == " 你好"
-    finally:
-        await server.close()
-
-
-async def test_send_text_with_multiple_at_markers():
-    """Multiple {@QQ号} markers should each produce at segments."""
-    app, mock_api, _ = _make_relay_app()
-    server = TestServer(app)
-    await server.start_server()
-    try:
-        async with TestClient(server) as client:
-            async with client.ws_connect("/hermes?token=testtoken") as ws:
-                await ws.receive_json(timeout=2)
-                await ws.send_json(send_message("send_text", "r1", "group:42", content="{@11111} and {@22222}"))
-                result = await ws.receive_json(timeout=2)
-                assert result["success"] is True
-            segs = mock_api.send_group_msg.await_args.args[1]
-            # text("") + at(111) + text(" and ") + at(222) + text("")
-            types = [s["type"] for s in segs]
-            assert "at" in types
-            assert types.count("at") == 2
-            qq_values = [s["data"]["qq"] for s in segs if s["type"] == "at"]
-            assert qq_values == ["11111", "22222"]
+            # Single text segment, marker preserved literally (no at segment).
+            assert len(segs) == 1
+            assert segs[0]["type"] == "text"
+            assert segs[0]["data"]["text"] == "{@123456} 你好"
     finally:
         await server.close()
 
