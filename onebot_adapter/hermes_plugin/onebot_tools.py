@@ -582,8 +582,10 @@ _TOOLS: list[tuple[str, Callable, dict, bool]] = [
         "主动发送 QQ 消息到指定群或私聊。"
         "回复当前对话通常直接输出文本即可——系统会自动把你的输出送达,无需调用本工具。"
         "当你需要主动发送消息时使用本工具:在当前会话中分多条发送、推送到其他群或用户、跨会话通知等。"
+        "直接输出文本无法 @ 人,要 @ 某人必须用本工具的 at 段。"
         "message 为 OneBot 11 消息段数组,例如 "
-        '[{"type":"text","data":{"text":"hello"}}]。',
+        '纯文本 [{"type":"text","data":{"text":"hello"}}],'
+        '或 @ 人 [{"type":"at","data":{"qq":"123456"}},{"type":"text","data":{"text":" 你好"}}]。',
         {
             "message_type": _str("'group' 或 'private'"),
             "group_id": _str("群号(message_type=group时必填)"),
