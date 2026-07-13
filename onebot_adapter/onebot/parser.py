@@ -107,9 +107,11 @@ async def _resolve_at_mentions(
 ) -> str:
     """Replace ``@QQ号`` with ``@QQ号(昵称)`` in *text*.
 
-    Bot's own @ mentions are already stripped by ``strip_bot_mention()``,
-    so remaining @ mentions are all other users (or bot itself when
-    ``group_require_mention`` is False).
+    Bot's own leading @ mention is already stripped by
+    ``strip_first_bot_mention()``, so remaining @ mentions are all other
+    users, or a non-leading @bot mention (kept for message completeness),
+    or the bot itself when ``group_require_mention`` is False and the
+    @bot mention is not in the leading position.
     """
     if not name_resolver:
         return text
@@ -237,7 +239,7 @@ async def parse_event(
     mention_first_only: bool = False,
     trigger_keywords: list[str] | None = None,
     keyword_first_only: bool = False,
-    keep_mention: bool = False,
+    strip_first_mention: bool = True,
     is_known_command_fn: Any = None,
     canonical_command_name_fn: Any = None,
 ) -> NormalizedEvent | FilteredEvent | None:
@@ -302,7 +304,7 @@ async def parse_event(
         mention_first_only = config.resolve_mention_first_only(group_id)
         trigger_keywords = config.resolve_trigger_keywords(group_id)
         keyword_first_only = config.resolve_keyword_first_only(group_id)
-        keep_mention = config.resolve_keep_mention(group_id)
+        strip_first_mention = config.resolve_strip_first_mention(group_id)
         channel_prompt = config.resolve_custom_prompt(group_id)
         is_admin = config.is_admin(sender_id, group_id)
     elif config and not is_group:
@@ -332,7 +334,7 @@ async def parse_event(
 
     raw_segments: list[dict] = event.get("message", []) or []
 
-    # Group: trigger gating (@-mention and/or keyword), then strip @bot mention
+    # Group: trigger gating (@-mention and/or keyword), then strip leading @bot
     if is_group:
         checks: list[bool] = []
         if group_require_mention and self_id:
@@ -349,8 +351,11 @@ async def parse_event(
                 checks.append(any(kw in plain_text for kw in kws))
         if checks and not any(checks):
             return None  # some trigger required, none satisfied → drop
-        if group_require_mention and self_id and not keep_mention:
-            raw_segments = seg.strip_bot_mention(raw_segments, self_id)
+        # 移除首 @bot 段：仅在消息以 @bot 开头时去掉该段(跳过 reply 段)；
+        # 非首 @bot 一律保留以保证消息完整。与 group_require_mention 无关，
+        # 即使不要求 @ 触发，只要消息以 @bot 开头也会被去掉。
+        if self_id and strip_first_mention:
+            raw_segments = seg.strip_first_bot_mention(raw_segments, self_id)
 
     # ── /command filter ───────────────────────────────────────────────
     # After @bot stripping (group) or on raw segments (DM), check whether the

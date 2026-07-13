@@ -179,17 +179,17 @@ def test_resolve_keyword_first_only_group_override():
     assert cfg.resolve_keyword_first_only("42") is True
 
 
-def test_resolve_keep_mention_global():
-    cfg = AdapterConfig(group_keep_mention=True)
-    assert cfg.resolve_keep_mention("999") is True
+def test_resolve_strip_first_mention_global():
+    cfg = AdapterConfig(group_strip_first_mention=True)
+    assert cfg.resolve_strip_first_mention("999") is True
 
 
-def test_resolve_keep_mention_group_override():
+def test_resolve_strip_first_mention_group_override():
     cfg = AdapterConfig(
-        group_keep_mention=False,
-        groups={"42": GroupConfig(group_id="42", keep_mention=True).to_dict()},
+        group_strip_first_mention=False,
+        groups={"42": GroupConfig(group_id="42", strip_first_mention=True).to_dict()},
     )
-    assert cfg.resolve_keep_mention("42") is True
+    assert cfg.resolve_strip_first_mention("42") is True
 
 
 def test_resolve_reaction_emoji_default_enabled():

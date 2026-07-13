@@ -80,7 +80,7 @@ export interface GroupConfig {
   mention_first_only: boolean | null;
   trigger_keywords: string[] | null;
   keyword_first_only: boolean | null;
-  keep_mention: boolean | null;
+  strip_first_mention: boolean | null;
   custom_prompt: string;
   admins: string[];
   group_user_filter_mode: string;
@@ -106,7 +106,7 @@ export interface Config {
   group_mention_first_only: boolean;
   group_trigger_keywords: string[];
   group_keyword_first_only: boolean;
-  group_keep_mention: boolean;
+  group_strip_first_mention: boolean;
   global_admins: string[];
   group_auto_join: boolean;
 
