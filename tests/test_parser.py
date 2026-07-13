@@ -578,8 +578,8 @@ async def test_no_trigger_requirements_passes_all():
     assert result is not None
 
 
-async def test_keep_mention_preserves_at_segment():
-    """keep_mention=True: @bot segment stays in text as @QQ号(昵称)."""
+async def test_strip_first_mention_disabled_preserves_leading_at():
+    """strip_first_mention=False: leading @bot segment stays in text as @QQ号(昵称)."""
     resolver = MagicMock()
     resolver.resolve = AsyncMock(return_value="BotNick")
     resolver.resolve_group_name = AsyncMock(return_value="")
@@ -592,12 +592,61 @@ async def test_keep_mention_preserves_at_segment():
         _msg_event("@99999 hi", message_type="group", group_id=42, segments=segs, user_id=100),
         self_id="99999",
         group_require_mention=True,
-        keep_mention=True,
+        strip_first_mention=False,
         name_resolver=resolver,
     )
     assert result is not None
     event = result
     assert "@99999(BotNick)" in event.text
+
+
+async def test_strip_first_mention_removes_only_leading():
+    """strip_first_mention=True (default): only the leading @bot is removed;
+    a second, non-leading @bot mention is preserved as @QQ号(昵称)."""
+    resolver = MagicMock()
+    resolver.resolve = AsyncMock(return_value="BotNick")
+    resolver.resolve_group_name = AsyncMock(return_value="")
+
+    segs = [
+        {"type": "at", "data": {"qq": "99999"}},
+        {"type": "text", "data": {"text": "hi "}},
+        {"type": "at", "data": {"qq": "99999"}},
+    ]
+    result = await parser.parse_event(
+        _msg_event("@99999 hi @99999", message_type="group", group_id=42, segments=segs, user_id=100),
+        self_id="99999",
+        group_require_mention=True,
+        name_resolver=resolver,
+    )
+    assert result is not None
+    event = result
+    # Leading @bot stripped (not present as @99999(BotNick) at start of user text),
+    # but trailing @bot preserved.
+    assert event.text.endswith("@99999(BotNick)")
+    assert "@99999(BotNick): " not in event.text  # leading one was stripped, not rendered
+
+
+async def test_strip_first_mention_works_without_require_mention():
+    """strip_first_mention applies even when group_require_mention=False:
+    a leading @bot is stripped regardless of trigger mode."""
+    resolver = MagicMock()
+    resolver.resolve = AsyncMock(return_value="BotNick")
+    resolver.resolve_group_name = AsyncMock(return_value="")
+
+    segs = [
+        {"type": "at", "data": {"qq": "99999"}},
+        {"type": "text", "data": {"text": "hello"}},
+    ]
+    result = await parser.parse_event(
+        _msg_event("@99999 hello", message_type="group", group_id=42, segments=segs, user_id=100),
+        self_id="99999",
+        group_require_mention=False,
+        strip_first_mention=True,
+        name_resolver=resolver,
+    )
+    assert result is not None
+    event = result
+    assert "@99999" not in event.text  # leading @bot stripped, none remaining
 
 
 async def test_per_group_mention_first_only_override():

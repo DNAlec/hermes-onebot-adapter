@@ -92,7 +92,7 @@ async function saveGlobal() {
       group_mention_first_only: c.group_mention_first_only,
       group_trigger_keywords: c.group_trigger_keywords,
       group_keyword_first_only: c.group_keyword_first_only,
-      group_keep_mention: c.group_keep_mention,
+      group_strip_first_mention: c.group_strip_first_mention,
       group_auto_join: c.group_auto_join,
       global_admins: c.global_admins,
       dm_user_filter_mode: c.dm_user_filter_mode,
@@ -132,7 +132,7 @@ async function syncFromOneBot() {
 function addGroup() {
   editingGroup.value = {
     group_id: "", name: "", enabled: true, require_mention: null,
-    mention_first_only: null, trigger_keywords: null, keyword_first_only: null, keep_mention: null,
+    mention_first_only: null, trigger_keywords: null, keyword_first_only: null, strip_first_mention: null,
     custom_prompt: "", admins: [],
     group_user_filter_mode: "blacklist", group_user_list: [],
     welcome_enabled: false, welcome_message: "", auto_join: false,
@@ -247,8 +247,8 @@ function resetHint() {
           <span>关键词仅首部匹配</span>
         </label>
         <label>
-          <input type="checkbox" v-model="cfg.group_keep_mention" />
-          <span>保留 @bot 段（触发后不移除，如果@bot出现在开头，会导致/命令无法被解析）</span>
+          <input type="checkbox" v-model="cfg.group_strip_first_mention" />
+          <span>移除首 @bot 段（消息以 @bot 开头时去掉该段；非首 @bot 始终保留以保证消息完整）</span>
         </label>
         <label class="full">
           触发关键词（回车添加，空=不启用）
@@ -510,15 +510,15 @@ function resetHint() {
         </label>
 
         <label>
-          保留 @bot 段
-          <select v-model="editingGroup.keep_mention">
+          移除首 @bot 段
+          <select v-model="editingGroup.strip_first_mention">
             <option :value="null">跟随全局</option>
-            <option :value="true">保留</option>
-            <option :value="false">移除</option>
+            <option :value="true">移除首@bot</option>
+            <option :value="false">保留所有@bot</option>
           </select>
         </label>
-        <span class="hint" v-if="editingGroup.keep_mention === true">
-          ⚠️ 开启后保留 @bot 段, 但 @bot /指令 将无法被识别
+        <span class="hint" v-if="editingGroup.strip_first_mention === false">
+          ⚠️ 关闭后保留首 @bot 段, 此时 @bot /指令 将无法被识别
         </span>
 
         <label>

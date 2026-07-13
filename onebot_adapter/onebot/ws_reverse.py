@@ -116,7 +116,7 @@ class OneBotReverseServer:
             mention_first_only=self._config.group_mention_first_only,
             trigger_keywords=self._config.group_trigger_keywords,
             keyword_first_only=self._config.group_keyword_first_only,
-            keep_mention=self._config.group_keep_mention,
+            strip_first_mention=self._config.group_strip_first_mention,
             api=self._api,
             config=self._config,
             name_resolver=self._name_resolver,

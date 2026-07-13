@@ -196,10 +196,38 @@ def has_bot_mention_first(segments: list[dict], self_id: str) -> bool:
 
 
 def strip_bot_mention(segments: list[dict], self_id: str) -> list[dict]:
+    """Remove *all* @bot segments from *segments* (legacy helper).
+
+    Kept for backward compatibility and ad-hoc use (e.g. tests). The parser
+    now uses :func:`strip_first_bot_mention` instead, which only strips a
+    leading @bot mention so non-leading @bot mentions are preserved for
+    message completeness.
+    """
     return [
         s for s in segments
         if not (s.get("type") == "at" and str(s.get("data", {}).get("qq")) == self_id)
     ]
+
+
+def strip_first_bot_mention(segments: list[dict], self_id: str) -> list[dict]:
+    """Remove only a *leading* @bot mention, preserving non-leading ones.
+
+    Leading ``reply`` segments are skipped first (OneBot puts the ``reply``
+    segment ahead of the ``at`` segment in quoted messages, mirroring
+    :func:`has_bot_mention_first`). After the skipped replies, if the next
+    segment is an @bot mention (``type == "at"`` with ``data.qq == self_id``),
+    it is dropped; otherwise the list is returned unchanged. Non-leading
+    @bot mentions are always preserved to keep the message complete.
+    """
+    i = 0
+    n = len(segments)
+    while i < n and segments[i].get("type") == "reply":
+        i += 1
+    if i < n:
+        s = segments[i]
+        if s.get("type") == "at" and str(s.get("data", {}).get("qq")) == self_id:
+            return segments[:i] + segments[i + 1:]
+    return segments
 
 
 def sender_display(sender: dict) -> str:

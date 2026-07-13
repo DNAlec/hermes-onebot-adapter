@@ -146,7 +146,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
   "group_mention_first_only": false,
   "group_trigger_keywords": [],
   "group_keyword_first_only": false,
-  "group_keep_mention": false,
+  "group_strip_first_mention": true,
   "global_admins": [],
   "group_auto_join": false,
   "dm_user_filter_mode": "whitelist",
@@ -312,7 +312,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
       "mention_first_only": null,
       "trigger_keywords": [],
       "keyword_first_only": null,
-      "keep_mention": null,
+      "strip_first_mention": null,
       "custom_prompt": "",
       "admins": [],
       "group_user_filter_mode": "blacklist",
@@ -522,7 +522,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `group_mention_first_only` | bool | `false` | True=仅首 @ 触发 |
 | `group_trigger_keywords` | string[] | `[]` | 群聊关键词触发列表 |
 | `group_keyword_first_only` | bool | `false` | True=关键词须在开头 |
-| `group_keep_mention` | bool | `false` | True=保留 @bot 段 |
+| `group_strip_first_mention` | bool | `true` | True=消息以@bot开头时移除该段(非首@bot保留) |
 | `global_admins` | string[] | `[]` | 全局管理员 QQ 号列表 |
 | `group_auto_join` | bool | `false` | 是否自动加入新群 |
 | `dm_user_filter_mode` | string | `"whitelist"` | 私聊过滤：`whitelist` / `blacklist` |
@@ -563,7 +563,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `mention_first_only` | bool\|null | `null` | 仅首 @ 触发 |
 | `trigger_keywords` | string[]\|null | `null` | 关键词列表（`[]`=强制禁用） |
 | `keyword_first_only` | bool\|null | `null` | 关键词须在开头 |
-| `keep_mention` | bool\|null | `null` | 保留 @ 段 |
+| `strip_first_mention` | bool\|null | `null` | 移除首 @bot 段 |
 | `custom_prompt` | string | `""` | 群专属提示词（覆盖全局 platform_hint） |
 | `admins` | string[] | `[]` | 群管理员 QQ 号 |
 | `group_user_filter_mode` | string | `"blacklist"` | 用户过滤：`whitelist`/`blacklist` |

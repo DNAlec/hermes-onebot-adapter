@@ -98,7 +98,7 @@ class GroupConfig:
     mention_first_only: bool | None = None    # None=跟随全局，True=仅首@段触发
     trigger_keywords: list[str] | None = None  # None=跟随全局，[] = 强制禁用关键词
     keyword_first_only: bool | None = None   # None=跟随全局，True=关键词须在开头
-    keep_mention: bool | None = None         # None=跟随全局，True=保留@bot段
+    strip_first_mention: bool | None = None  # None=跟随全局，True=移除首@bot段
     custom_prompt: str = ""                   # 空=用全局 platform_hint
     admins: list[str] = field(default_factory=list)
     # ── 群成员准入（黑名单/白名单）──
@@ -148,7 +148,7 @@ class AdapterConfig:
     group_mention_first_only: bool = False       # True=仅首@段触发，False=任意位置@
     group_trigger_keywords: list[str] = field(default_factory=list)  # 关键词触发，空=不启用
     group_keyword_first_only: bool = False       # True=关键词须出现在文本开头
-    group_keep_mention: bool = False              # True=触发后保留@bot段（不 strip）
+    group_strip_first_mention: bool = True       # True=消息以@bot开头时移除该段(非首@bot保留)
     global_admins: list[str] = field(default_factory=list)
 
     # ── 私聊设置 ──
@@ -240,8 +240,8 @@ class AdapterConfig:
                 errors.append(f"group {gid} mention_first_only must be bool or null")
             if gc.keyword_first_only is not None and not isinstance(gc.keyword_first_only, bool):
                 errors.append(f"group {gid} keyword_first_only must be bool or null")
-            if gc.keep_mention is not None and not isinstance(gc.keep_mention, bool):
-                errors.append(f"group {gid} keep_mention must be bool or null")
+            if gc.strip_first_mention is not None and not isinstance(gc.strip_first_mention, bool):
+                errors.append(f"group {gid} strip_first_mention must be bool or null")
             if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
                 errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
             if gc.command_permissions is not None:
@@ -311,11 +311,11 @@ class AdapterConfig:
             return gc.keyword_first_only
         return self.group_keyword_first_only
 
-    def resolve_keep_mention(self, group_id: str) -> bool:
+    def resolve_strip_first_mention(self, group_id: str) -> bool:
         gc = self.get_group_config(group_id)
-        if gc.keep_mention is not None:
-            return gc.keep_mention
-        return self.group_keep_mention
+        if gc.strip_first_mention is not None:
+            return gc.strip_first_mention
+        return self.group_strip_first_mention
 
     def resolve_custom_prompt(self, group_id: str) -> str | None:
         gc = self.get_group_config(group_id)

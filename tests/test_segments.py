@@ -85,6 +85,74 @@ def test_has_and_strip_bot_mention():
     assert all(s.get("data", {}).get("qq") != "999" for s in stripped)
 
 
+def test_strip_first_bot_mention_leading():
+    """Leading @bot is removed; non-leading @bot preserved."""
+    # [at(bot), text] → [text]
+    segs = [
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": "hi"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert [s.get("type") for s in out] == ["text"]
+
+
+def test_strip_first_bot_mention_skips_reply():
+    """Leading `reply` segments are skipped before checking @bot."""
+    segs = [
+        {"type": "reply", "data": {"id": "55"}},
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": "hi"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert [s.get("type") for s in out] == ["reply", "text"]
+
+
+def test_strip_first_bot_mention_non_leading_preserved():
+    """When @bot is not the first non-reply segment, nothing is stripped."""
+    # @someone-else first → bot mention kept
+    segs = [
+        {"type": "at", "data": {"qq": "111"}},
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": "hi"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert out == segs  # unchanged
+
+    # text first, @bot later → kept
+    segs2 = [
+        {"type": "text", "data": {"text": "hi "}},
+        {"type": "at", "data": {"qq": "999"}},
+    ]
+    out2 = seg.strip_first_bot_mention(segs2, "999")
+    assert out2 == segs2
+
+
+def test_strip_first_bot_mention_only_first_bot_removed():
+    """Two @bot mentions: only the leading one is removed."""
+    segs = [
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": " "}},
+        {"type": "at", "data": {"qq": "999"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert [s.get("type") for s in out] == ["text", "at"]
+    assert out[1].get("data", {}).get("qq") == "999"
+
+
+def test_strip_first_bot_mention_no_bot():
+    """No @bot at the leading position → list returned unchanged."""
+    segs = [
+        {"type": "text", "data": {"text": "hi"}},
+        {"type": "at", "data": {"qq": "111"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert out == segs
+
+
+def test_strip_first_bot_mention_empty():
+    assert seg.strip_first_bot_mention([], "999") == []
+
+
 def test_has_bot_mention_first():
     assert seg.has_bot_mention_first([], "999") is False
     # first segment is the @bot mention
