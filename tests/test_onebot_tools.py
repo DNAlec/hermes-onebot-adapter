@@ -74,8 +74,8 @@ def test_toolset_constant():
 
 
 def test_tool_count():
-    # 18 read-only/messaging + 10 admin = 28
-    assert len(_TOOLS) == 28
+    # 21 read-only/messaging + 14 admin = 35
+    assert len(_TOOLS) == 35
 
 
 def test_all_tools_have_required_fields():
@@ -217,6 +217,128 @@ async def test_poke():
     assert adapter._api_calls[0] == ("send_poke", {"user_id": 100, "group_id": 42})
 
 
+async def test_get_file():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_get_file")
+    raw = await handler({"file_id": "f_abc123"})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("get_file", {"file_id": "f_abc123"})
+
+
+async def test_get_recent_contact():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_get_recent_contact")
+    raw = await handler({})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("get_recent_contact", {"count": 10})
+
+
+async def test_get_recent_contact_custom_count():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_get_recent_contact")
+    raw = await handler({"count": 5})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("get_recent_contact", {"count": 5})
+
+
+async def test_send_like():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_send_like")
+    raw = await handler({"user_id": 100, "times": 3})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("send_like", {"user_id": 100, "times": 3})
+
+
+async def test_send_like_default_times():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_send_like")
+    raw = await handler({"user_id": 100})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("send_like", {"user_id": 100, "times": 1})
+
+
+async def test_send_forward_msg_group():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_send_forward_msg")
+    nodes = [{"type": "node", "data": {"name": "test", "content": [{"type": "text", "data": {"text": "hi"}}]}}]
+    raw = await handler({"message_type": "group", "group_id": "42", "messages": nodes})
+    assert _is_success(raw) is True
+    action, params = adapter._api_calls[0]
+    assert action == "send_forward_msg"
+    assert params["message_type"] == "group"
+    assert params["group_id"] == 42
+    assert params["messages"] == nodes
+
+
+async def test_send_forward_msg_private():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_send_forward_msg")
+    nodes = [{"type": "node", "data": {"name": "test", "content": [{"type": "text", "data": {"text": "hi"}}]}}]
+    raw = await handler({"message_type": "private", "user_id": "100", "messages": nodes})
+    assert _is_success(raw) is True
+    action, params = adapter._api_calls[0]
+    assert action == "send_forward_msg"
+    assert params["message_type"] == "private"
+    assert params["user_id"] == 100
+    assert params["messages"] == nodes
+
+
+async def test_forward_single_msg_group_context():
+    """群聊上下文:转发到当前群,action=forward_group_single_msg。"""
+    adapter = MockAdapter(group_id="42")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_forward_single_msg")
+    raw = await handler({"real_seq": 999})
+    assert _is_success(raw) is True
+    action, params = adapter._api_calls[0]
+    assert action == "forward_group_single_msg"
+    assert params["real_seq"] == 999
+    assert params["group_id"] == 42
+
+
+async def test_forward_single_msg_dm_context():
+    """私聊上下文:转发到当前好友,action=forward_friend_single_msg。"""
+    adapter = MockAdapter(user_id="10001000")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_forward_single_msg")
+    raw = await handler({"real_seq": 888})
+    assert _is_success(raw) is True
+    action, params = adapter._api_calls[0]
+    assert action == "forward_friend_single_msg"
+    assert params["real_seq"] == 888
+    assert params["user_id"] == 10001000
+
+
+async def test_forward_single_msg_no_context_explicit_group_id():
+    """无当前会话上下文:用 args 中的 group_id 决定目标。"""
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_forward_single_msg")
+    raw = await handler({"real_seq": 777, "group_id": 99})
+    assert _is_success(raw) is True
+    action, params = adapter._api_calls[0]
+    assert action == "forward_group_single_msg"
+    assert params["real_seq"] == 777
+    assert params["group_id"] == 99
+
+
+async def test_forward_single_msg_no_target_error():
+    """无当前会话上下文且无 group_id/user_id:返回错误。"""
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_forward_single_msg")
+    raw = await handler({"real_seq": 666})
+    assert _has_error(raw) is True
+    assert len(adapter._api_calls) == 0
+
+
 # ── Admin tool tests (require admin) ─────────────────────────────────────
 
 
@@ -287,14 +409,60 @@ async def test_handle_group_request_admin():
     )
 
 
+async def test_set_group_special_title_admin():
+    adapter = MockAdapter(is_admin=True)
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_set_group_special_title")
+    raw = await handler({"group_id": 42, "user_id": 100, "special_title": "龙王"})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == (
+        "set_group_special_title",
+        {"group_id": 42, "user_id": 100, "special_title": "龙王"},
+    )
+
+
+async def test_set_online_status_admin():
+    adapter = MockAdapter(is_admin=True)
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_set_online_status")
+    raw = await handler({"status": 11, "ext_status": 0, "battery_status": 80})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == (
+        "set_online_status",
+        {"status": 11, "ext_status": 0, "battery_status": 80},
+    )
+
+
+async def test_set_signature_admin():
+    adapter = MockAdapter(is_admin=True)
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_set_signature")
+    raw = await handler({"longNick": "新签名"})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("set_self_longnick", {"longNick": "新签名"})
+
+
+async def test_set_avatar_admin():
+    adapter = MockAdapter(is_admin=True)
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_set_avatar")
+    raw = await handler({"file": "https://example.com/avatar.png"})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("set_qq_avatar", {"file": "https://example.com/avatar.png"})
+
+
 async def test_all_admin_tools_blocked_without_admin():
     """Every admin tool should return error when user is not admin."""
     adapter = MockAdapter(is_admin=False)
     set_adapter(adapter)
     admin_tools = [(name, handler) for name, handler, _, is_admin in _TOOLS if is_admin]
-    assert len(admin_tools) == 10
+    assert len(admin_tools) == 14
     for name, handler in admin_tools:
-        raw = await handler({"group_id": 1, "user_id": 2, "flag": "x", "group_name": "n", "card": "c"})
+        raw = await handler({
+            "group_id": 1, "user_id": 2, "flag": "x", "group_name": "n", "card": "c",
+            "special_title": "t", "status": 1, "ext_status": 0, "longNick": "sig",
+            "file": "/tmp/x.png",
+        })
         assert _has_error(raw) is True, f"{name} should be blocked for non-admin"
         assert len(adapter._api_calls) == 0, f"{name} should not have called API"
 
