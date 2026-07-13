@@ -1055,7 +1055,8 @@ class HermesRelayServer:
         """
         if self._seq_map is None:
             return params
-        seq_actions = {"get_msg", "delete_msg", "set_msg_emoji_like", "mark_msg_as_read"}
+        seq_actions = {"get_msg", "delete_msg", "set_msg_emoji_like", "mark_msg_as_read",
+                   "forward_group_single_msg", "forward_friend_single_msg"}
         if action not in seq_actions:
             return params
         real_seq = params.pop("real_seq", None)

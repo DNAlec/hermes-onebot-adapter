@@ -252,6 +252,33 @@ async def _mark_msg_as_read(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
+async def _get_file(args: dict, **_) -> str:
+    try:
+        data = await _api_call("get_file", file_id=args["file_id"])
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _get_recent_contact(args: dict, **_) -> str:
+    try:
+        data = await _api_call("get_recent_contact", count=int(args.get("count", 10)))
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _send_like(args: dict, **_) -> str:
+    try:
+        await _api_call("send_like", user_id=int(args["user_id"]), times=int(args.get("times", 1)))
+        return tool_result({"liked": True})
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MESSAGING TOOLS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -289,11 +316,13 @@ async def _recall_message(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
-async def _send_group_forward_msg(args: dict, **_) -> str:
+async def _send_forward_msg(args: dict, **_) -> str:
     try:
         data = await _api_call(
-            "send_group_forward_msg",
-            group_id=int(args["group_id"]),
+            "send_forward_msg",
+            message_type=args["message_type"],
+            group_id=int(args["group_id"]) if args.get("group_id") else None,
+            user_id=int(args["user_id"]) if args.get("user_id") else None,
             messages=args["messages"],
         )
         return tool_result(data)
@@ -302,14 +331,28 @@ async def _send_group_forward_msg(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
-async def _send_private_forward_msg(args: dict, **_) -> str:
+async def _forward_single_msg(args: dict, **_) -> str:
+    """单条消息转发(群聊或私聊)。action 由 group_id/user_id 决定。"""
     try:
-        data = await _api_call(
-            "send_private_forward_msg",
-            user_id=int(args["user_id"]),
-            messages=args["messages"],
-        )
-        return tool_result(data)
+        params: dict = {"real_seq": int(args["real_seq"])}
+        gid = _current_group_id()
+        uid = _current_user_id()
+        if gid:
+            params["group_id"] = int(gid)
+            action = "forward_group_single_msg"
+        elif uid:
+            params["user_id"] = int(uid)
+            action = "forward_friend_single_msg"
+        elif args.get("group_id"):
+            params["group_id"] = int(args["group_id"])
+            action = "forward_group_single_msg"
+        elif args.get("user_id"):
+            params["user_id"] = int(args["user_id"])
+            action = "forward_friend_single_msg"
+        else:
+            return tool_error("无法确定转发目标:需要 group_id 或 user_id")
+        await _api_call(action, **params)
+        return tool_result({"forwarded": True})
     except Exception as e:
         logger.warning("tool call failed: %s", e)
         return tool_error(str(e))
@@ -501,6 +544,64 @@ async def _delete_friend(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
+async def _set_group_special_title(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    try:
+        await _api_call(
+            "set_group_special_title",
+            group_id=int(args["group_id"]),
+            user_id=int(args["user_id"]),
+            special_title=args.get("special_title", ""),
+        )
+        return tool_result({"title_set": True})
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _set_online_status(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    try:
+        await _api_call(
+            "set_online_status",
+            status=int(args["status"]),
+            ext_status=int(args["ext_status"]),
+            battery_status=int(args.get("battery_status", 0)),
+        )
+        return tool_result({"status_set": True})
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _set_signature(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    try:
+        await _api_call("set_self_longnick", longNick=args["longNick"])
+        return tool_result({"signature_set": True})
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _set_avatar(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    try:
+        await _api_call("set_qq_avatar", file=args["file"])
+        return tool_result({"avatar_set": True})
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════
@@ -576,6 +677,21 @@ _TOOLS: list[tuple[str, Callable, dict, bool]] = [
         {"real_seq": _int("消息序号(留空标记全部已读)")},
         [],
     ), False),
+    ("onebot_get_file", _get_file, _schema(
+        "onebot_get_file", "获取群/私聊文件信息(返回 url/path/size/name)。file_id 从消息段的 file 类型获取。",
+        {"file_id": _str("文件ID(从消息段 file 类型获取)")},
+        ["file_id"],
+    ), False),
+    ("onebot_get_recent_contact", _get_recent_contact, _schema(
+        "onebot_get_recent_contact", "获取最近联系人列表(含最后一条消息预览)。",
+        {"count": _int("返回数量(默认10)")},
+        [],
+    ), False),
+    ("onebot_send_like", _send_like, _schema(
+        "onebot_send_like", "给好友点赞(每日上限10次)。",
+        {"user_id": _int("QQ号"), "times": _int("点赞次数(默认1)")},
+        ["user_id"],
+    ), False),
     # ── Messaging ──
     ("onebot_send_message", _send_message, _schema(
         "onebot_send_message",
@@ -599,15 +715,29 @@ _TOOLS: list[tuple[str, Callable, dict, bool]] = [
         {"real_seq": _int("消息序号(群聊为前缀#后的群内序号,私聊为全局消息ID)")},
         ["real_seq"],
     ), False),
-    ("onebot_send_group_forward_msg", _send_group_forward_msg, _schema(
-        "onebot_send_group_forward_msg", "发送群合并转发消息。",
-        {"group_id": _int("群号"), "messages": _array("合并转发消息段数组")},
-        ["group_id", "messages"],
+    ("onebot_send_forward_msg", _send_forward_msg, _schema(
+        "onebot_send_forward_msg",
+        "发送合并转发消息(统一接口,支持群聊和私聊)。"
+        "messages 为 node 消息段数组,每个 node 包含 name/uin/content 或引用已有消息的 id。"
+        "返回 message_id 和 res_id。",
+        {
+            "message_type": _str("'group' 或 'private'"),
+            "group_id": _str("群号(message_type=group时必填)"),
+            "user_id": _str("QQ号(message_type=private时必填)"),
+            "messages": _array("合并转发 node 消息段数组"),
+        },
+        ["message_type", "messages"],
     ), False),
-    ("onebot_send_private_forward_msg", _send_private_forward_msg, _schema(
-        "onebot_send_private_forward_msg", "发送私聊合并转发消息。",
-        {"user_id": _int("QQ号"), "messages": _array("合并转发消息段数组")},
-        ["user_id", "messages"],
+    ("onebot_forward_single_msg", _forward_single_msg, _schema(
+        "onebot_forward_single_msg",
+        "单条消息转发到群聊或私聊(无需构造 node 数组,比合并转发更轻量)。"
+        "默认转发到当前会话;无当前会话时通过 group_id 或 user_id 指定目标。",
+        {
+            "real_seq": _int("要转发的消息序号(群聊为前缀#后的群内序号,私聊为全局消息ID)"),
+            "group_id": _int("目标群号(转发到群聊时填写)"),
+            "user_id": _int("目标QQ号(转发到私聊时填写)"),
+        },
+        ["real_seq"],
     ), False),
     ("onebot_poke", _poke, _schema(
         "onebot_poke", "发送戳一戳（拍一拍）。",
@@ -682,6 +812,30 @@ _TOOLS: list[tuple[str, Callable, dict, bool]] = [
         "onebot_delete_friend", "删除好友（需管理员权限）。",
         {"user_id": _int("QQ号")},
         ["user_id"],
+    ), True),
+    ("onebot_set_group_special_title", _set_group_special_title, _schema(
+        "onebot_set_group_special_title", "设置群成员专属头衔（需管理员权限）。空字符串删除头衔。",
+        {"group_id": _int("群号"), "user_id": _int("QQ号"), "special_title": _str("专属头衔内容")},
+        ["group_id", "user_id"],
+    ), True),
+    ("onebot_set_online_status", _set_online_status, _schema(
+        "onebot_set_online_status", "设置机器人在线状态（需管理员权限）。status/ext_status 参考 NapCat 状态列表。",
+        {
+            "status": _int("在线状态编号"),
+            "ext_status": _int("扩展状态编号"),
+            "battery_status": _int("电量(0-100)"),
+        },
+        ["status", "ext_status"],
+    ), True),
+    ("onebot_set_signature", _set_signature, _schema(
+        "onebot_set_signature", "设置机器人个性签名（需管理员权限）。",
+        {"longNick": _str("个性签名内容")},
+        ["longNick"],
+    ), True),
+    ("onebot_set_avatar", _set_avatar, _schema(
+        "onebot_set_avatar", "设置机器人头像（需管理员权限）。",
+        {"file": _str("图片路径或URL")},
+        ["file"],
     ), True),
 ]
 
