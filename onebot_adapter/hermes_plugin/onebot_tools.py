@@ -279,6 +279,33 @@ async def _send_like(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
+async def _get_friends_with_category(args: dict, **_) -> str:
+    try:
+        data = await _api_call("get_friends_with_category")
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _get_profile_like(args: dict, **_) -> str:
+    try:
+        data = await _api_call("get_profile_like")
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _fetch_custom_face(args: dict, **_) -> str:
+    try:
+        data = await _api_call("fetch_custom_face", count=int(args.get("count", 48)))
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MESSAGING TOOLS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -691,6 +718,20 @@ _TOOLS: list[tuple[str, Callable, dict, bool]] = [
         "onebot_send_like", "给好友点赞(每日上限10次)。",
         {"user_id": _int("QQ号"), "times": _int("点赞次数(默认1)")},
         ["user_id"],
+    ), False),
+    ("onebot_get_friends_with_category", _get_friends_with_category, _schema(
+        "onebot_get_friends_with_category",
+        "获取带分类的好友列表(比 get_friend_list 信息更全:含分类名、在线数、签名、生日等)。",
+        {},
+    ), False),
+    ("onebot_get_profile_like", _get_profile_like, _schema(
+        "onebot_get_profile_like", "获取自身点赞列表(总点赞数、新点赞数、点赞用户详情)。",
+        {},
+    ), False),
+    ("onebot_fetch_custom_face", _fetch_custom_face, _schema(
+        "onebot_fetch_custom_face", "获取自定义表情列表(返回表情 URL 数组)。",
+        {"count": _int("返回数量(默认48)")},
+        [],
     ), False),
     # ── Messaging ──
     ("onebot_send_message", _send_message, _schema(

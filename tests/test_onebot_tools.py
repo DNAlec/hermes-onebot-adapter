@@ -74,8 +74,8 @@ def test_toolset_constant():
 
 
 def test_tool_count():
-    # 21 read-only/messaging + 14 admin = 35
-    assert len(_TOOLS) == 35
+    # 24 read-only/messaging + 14 admin = 38
+    assert len(_TOOLS) == 38
 
 
 def test_all_tools_have_required_fields():
@@ -260,6 +260,42 @@ async def test_send_like_default_times():
     raw = await handler({"user_id": 100})
     assert _is_success(raw) is True
     assert adapter._api_calls[0] == ("send_like", {"user_id": 100, "times": 1})
+
+
+async def test_get_friends_with_category():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_get_friends_with_category")
+    raw = await handler({})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("get_friends_with_category", {})
+
+
+async def test_get_profile_like():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_get_profile_like")
+    raw = await handler({})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("get_profile_like", {})
+
+
+async def test_fetch_custom_face():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_fetch_custom_face")
+    raw = await handler({})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("fetch_custom_face", {"count": 48})
+
+
+async def test_fetch_custom_face_custom_count():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_fetch_custom_face")
+    raw = await handler({"count": 20})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("fetch_custom_face", {"count": 20})
 
 
 async def test_send_forward_msg_group():
