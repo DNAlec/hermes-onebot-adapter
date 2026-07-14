@@ -33,6 +33,9 @@ class WsApiTransport:
     def __init__(self) -> None:
         self._active: set[Any] = set()
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Track which ws each echo was sent on so we can reject only that
+        # ws's pending requests when it disconnects (multi-instance mode).
+        self._echo_ws: dict[str, Any] = {}
 
     @property
     def has_active(self) -> bool:
@@ -44,14 +47,21 @@ class WsApiTransport:
         logger.debug("WsApiTransport: registered ws (%d active)", len(self._active))
 
     def unregister(self, ws: Any) -> None:
-        """注销一条 WS 连接，并把 pending 中由该 ws 发出但未收到响应的请求 reject 掉。
+        """注销一条 WS 连接，并 reject 该 ws 发出的 pending 请求。
 
-        由于我们无法精确知道哪些 echo 是由这条 ws 发出的（pending 表是共享的），
-        采用简单策略：连接断开时 reject 所有 pending 请求。多连接场景下若有
-        其他活跃连接，调用方可以重试。
+        多连接场景下只 reject 属于这条 ws 的请求，其它连接的请求保留。
+        若这是最后一条活跃连接，reject 全部 pending。
         """
         self._active.discard(ws)
         logger.debug("WsApiTransport: unregistered ws (%d active)", len(self._active))
+        # Reject pending requests issued by this ws
+        to_reject = [echo for echo, w in self._echo_ws.items() if w is ws]
+        for echo in to_reject:
+            fut = self._pending.pop(echo, None)
+            self._echo_ws.pop(echo, None)
+            if fut is not None and not fut.done():
+                fut.set_exception(ConnectionError("OneBot WS connection closed"))
+                logger.debug("WsApiTransport: rejected pending echo=%s (ws closed)", echo)
         if not self._active:
             self._reject_all_pending("OneBot WS connection closed")
 
@@ -73,11 +83,12 @@ class WsApiTransport:
         if not echo or echo not in self._pending:
             return False
         fut = self._pending.pop(echo)
+        self._echo_ws.pop(echo, None)
         if not fut.done():
             fut.set_result(data)
         logger.debug(
-            "WsApiTransport: resolved echo=%s action=%s retcode=%s data=%s",
-            echo, data.get("echo"), data.get("retcode"),
+            "WsApiTransport: resolved echo=%s retcode=%s data=%s",
+            echo, data.get("retcode"),
             json.dumps(data.get("data"), ensure_ascii=False)[:500],
         )
         return True
@@ -96,6 +107,7 @@ class WsApiTransport:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[echo] = fut
+        self._echo_ws[echo] = ws
         frame = {"action": action, "params": params or {}, "echo": echo}
         logger.debug(
             "WsApiTransport: sending action=%s echo=%s params=%s",
@@ -105,6 +117,7 @@ class WsApiTransport:
             await ws.send_json(frame)
         except Exception as exc:
             self._pending.pop(echo, None)
+            self._echo_ws.pop(echo, None)
             if not fut.done():
                 fut.cancel()
             raise RuntimeError(f"failed to send WS API frame for {action!r}: {exc}") from exc
@@ -114,13 +127,15 @@ class WsApiTransport:
             return await asyncio.wait_for(fut, timeout=wait_timeout)
         except TimeoutError:
             self._pending.pop(echo, None)
+            self._echo_ws.pop(echo, None)
             if not fut.done():
                 fut.cancel()
             logger.warning("WsApiTransport: request %s timed out (echo=%s, %.1fs)", action, echo, wait_timeout)
             raise
         except Exception:
-            # Future 被 _reject_all_pending 设置了 ConnectionError 等
+            # Future 被 _reject_all_pending / unregister 设置了 ConnectionError 等
             self._pending.pop(echo, None)
+            self._echo_ws.pop(echo, None)
             raise
 
     def _pick_ws(self) -> Any:
@@ -134,6 +149,7 @@ class WsApiTransport:
             return
         pending = list(self._pending.items())
         self._pending.clear()
+        self._echo_ws.clear()
         for echo, fut in pending:
             if not fut.done():
                 fut.set_exception(ConnectionError(reason))

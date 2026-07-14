@@ -100,7 +100,6 @@ class AdapterService:
             on_event=self._on_onebot_event,
             on_connect=self._on_onebot_connect,
             on_disconnect=self._update_status,
-            session=self._session,
             on_filtered=self._on_filtered_command,
             is_known_command_fn=self._relay.is_known_command,
             canonical_command_name_fn=self._relay.canonical_command_name,

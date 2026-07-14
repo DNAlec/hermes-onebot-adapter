@@ -12,11 +12,13 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -55,10 +57,37 @@ def _yaml() -> YAML:
     return yaml
 
 
+class HermesConfigParseError(Exception):
+    """config.yaml 存在但解析失败时抛出,防止写入逻辑覆盖损坏的原始文件。"""
+
+
+@contextmanager
+def _locked(config_path: Path):
+    """对 config.yaml 加文件锁(进程级),避免与 Hermes 网关并发写互相覆盖。
+
+    使用 ``fcntl.flock`` 阻塞式排他锁,作用域为本上下文。Linux/macOS 可用;
+    Windows 无 flock 但有 msvcrt,此处仅支持 POSIX(适配器部署目标)。
+    """
+    import fcntl
+
+    lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
 def read_config(hermes_install_dir: str | None) -> Any:
     """Round-trip load Hermes config.yaml;不存在返回空 dict-like。
 
     返回 ruamel.yaml 的 CommentedMap(支持注释保留);文件不存在时返回空 CommentedMap。
+
+    文件存在但解析失败时抛 :class:`HermesConfigParseError`,避免调用方(写入逻辑)
+    基于空数据覆盖用户的(可恢复的)损坏 YAML。
     """
     yaml = _yaml()
     config_path = resolve_hermes_config_path(hermes_install_dir)
@@ -70,9 +99,9 @@ def read_config(hermes_install_dir: str | None) -> Any:
         return yaml.load(config_path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Hermes config.yaml 解析失败 (%s): %s", config_path, exc)
-        from ruamel.yaml.comments import CommentedMap
-
-        return CommentedMap()
+        raise HermesConfigParseError(
+            f"Hermes config.yaml 解析失败 ({config_path}): {exc}"
+        ) from exc
 
 
 def _atomic_write(config_path: Path, content: str) -> None:
@@ -82,13 +111,22 @@ def _atomic_write(config_path: Path, content: str) -> None:
     os.replace(tmp, config_path)
 
 
+def _dump_and_write(config_path: Path, data: Any) -> None:
+    """在文件锁保护下 dump 并原子写 config.yaml。"""
+    with _locked(config_path):
+        buf = io.StringIO()
+        _yaml().dump(data, buf)
+        _atomic_write(config_path, buf.getvalue())
+
+
 def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str]) -> None:
     """写入 ``platform_toolsets.onebot`` 和 ``known_plugin_toolsets.onebot``。
 
     - ``platform_toolsets.onebot`` = sorted(set(toolsets))
     - ``known_plugin_toolsets.onebot`` 至少含 ``"onebot"``(若已存在则补入,保留其它条目)
 
-    保留 config.yaml 其它顶层 key、注释和顺序。原子写。
+    保留 config.yaml 其它顶层 key、注释和顺序。原子写。解析失败时抛
+    :class:`HermesConfigParseError`,不覆盖原始文件。
     """
     config_path = resolve_hermes_config_path(hermes_install_dir)
     if config_path is None:
@@ -118,11 +156,7 @@ def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str])
         existing.append(PLUGIN_TOOLSET_KEY)
     known[PLATFORM] = sorted(set(existing))
 
-    import io
-
-    buf = io.StringIO()
-    _yaml().dump(data, buf)
-    _atomic_write(config_path, buf.getvalue())
+    _dump_and_write(config_path, data)
 
 
 def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
@@ -139,11 +173,7 @@ def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
     platform_toolsets = data.get("platform_toolsets")
     if platform_toolsets is not None and PLATFORM in platform_toolsets:
         del platform_toolsets[PLATFORM]
-        import io
-
-        buf = io.StringIO()
-        _yaml().dump(data, buf)
-        _atomic_write(config_path, buf.getvalue())
+        _dump_and_write(config_path, data)
 
 
 # ── 顶层 group_sessions_per_user 读写(供 WebUI 管理)────────────────────
@@ -184,11 +214,7 @@ def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -
     data = read_config(hermes_install_dir)
     data["group_sessions_per_user"] = bool(value)
 
-    import io
-
-    buf = io.StringIO()
-    _yaml().dump(data, buf)
-    _atomic_write(config_path, buf.getvalue())
+    _dump_and_write(config_path, data)
 
 
 # ── 工具集列表(从 Hermes 安装目录 import)──────────────────────────────

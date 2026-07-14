@@ -18,7 +18,9 @@ _cache: dict | None = None
 _cache_at: float = 0.0
 
 _TAG_RE = re.compile(r"^v?(\d+\.\d+\.\S+)$")
-_DEV_SUFFIX_RE = re.compile(r"\.dev\d+.*$")
+# Strip local-version suffixes that ``packaging.version.Version`` rejects:
+#   ``.dev0+g123abc`` (setuptools-scm) and ``.dirty`` (dirty git checkout).
+_DEV_SUFFIX_RE = re.compile(r"\.dev\d+.*$|\.dirty$")
 
 
 def _parse_version(raw: str) -> Version | None:

@@ -94,10 +94,6 @@ def image_segment(file_url: str) -> dict:
     return {"type": "image", "data": {"file": file_url}}
 
 
-def at_segment(qq: int | str) -> dict:
-    return {"type": "at", "data": {"qq": str(qq)}}
-
-
 def reply_segment(message_id: int | str) -> dict:
     return {"type": "reply", "data": {"id": str(message_id)}}
 

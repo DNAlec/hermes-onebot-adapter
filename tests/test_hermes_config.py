@@ -79,6 +79,27 @@ def test_read_config_empty_dir_returns_empty(empty_hermes_dir: Path):
     assert len(data) == 0
 
 
+def test_read_config_raises_on_parse_failure(tmp_path: Path):
+    """解析失败应抛 HermesConfigParseError,而非静默返回空 dict。"""
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text("bad: yaml: :::", encoding="utf-8")
+    with pytest.raises(hc.HermesConfigParseError):
+        hc.read_config(str(d))
+
+
+def test_write_does_not_overwrite_broken_yaml(tmp_path: Path):
+    """写入操作不应在 parse 失败时覆盖原始(可恢复的)YAML。"""
+    d = tmp_path / "hermes"
+    d.mkdir()
+    original = "bad: yaml: :::\n# a comment to preserve\n"
+    (d / "config.yaml").write_text(original, encoding="utf-8")
+    with pytest.raises(hc.HermesConfigParseError):
+        hc.write_platform_toolsets(str(d), ["web"])
+    # 原文件应保持不变
+    assert (d / "config.yaml").read_text(encoding="utf-8") == original
+
+
 # ── write_platform_toolsets ──────────────────────────────────────────────
 
 

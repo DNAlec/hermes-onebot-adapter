@@ -22,6 +22,24 @@ _ENV_VAR_URL = "ONEBOT_ADAPTER_URL"
 _ENV_VAR_TOKEN = "ONEBOT_ADAPTER_TOKEN"
 
 
+def _is_safe_install_path(target: Path) -> bool:
+    """Return True if *target* is safe to use as an install target.
+
+    Only allow writes under the user's home directory, /home, or /tmp.
+    Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
+    writes via the CLI or WebUI.
+    """
+    allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
+    resolved = target.resolve(strict=False)
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            pass
+    return False
+
+
 def _resolve_hermes_dir(install_dir: str | None) -> Path:
     if install_dir:
         return Path(install_dir).expanduser()
@@ -72,6 +90,12 @@ def install(
     adapter_token: str = "",
 ) -> dict:
     hermes_dir = _resolve_hermes_dir(install_dir)
+    if not _is_safe_install_path(hermes_dir):
+        return {
+            "adapter_version": __version__,
+            "hermes_dir": str(hermes_dir),
+            "error": f"install_dir resolved to {hermes_dir}, which is outside $HOME",
+        }
     dest = hermes_dir / "plugins" / "onebot"
     result: dict = {
         "adapter_version": __version__,
@@ -153,6 +177,12 @@ def install(
 
 def uninstall(install_dir: str | None = None) -> dict:
     hermes_dir = _resolve_hermes_dir(install_dir)
+    if not _is_safe_install_path(hermes_dir):
+        return {
+            "adapter_version": __version__,
+            "hermes_dir": str(hermes_dir),
+            "error": f"install_dir resolved to {hermes_dir}, which is outside $HOME",
+        }
     dest = hermes_dir / "plugins" / "onebot"
     env_path = _env_path(hermes_dir)
 

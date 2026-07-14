@@ -28,6 +28,7 @@ def _init_config(force: bool) -> int:
         existing_tokens = {
             "onebot_ws_token": old.onebot_ws_token,
             "hermes_ws_token": old.hermes_ws_token,
+            "webui_token": old.webui_token,
         }
 
     cfg = AdapterConfig(**existing_tokens)
