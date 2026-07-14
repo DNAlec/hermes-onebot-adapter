@@ -30,6 +30,25 @@ def test_config_forward_requires_url():
     assert any("onebot_forward_ws_url" in e for e in errors)
 
 
+def test_config_media_delivery_mode_invalid():
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", media_delivery_mode="bogus")
+    errors = cfg.validate()
+    assert any("media_delivery_mode" in e for e in errors)
+
+
+def test_config_media_delivery_mode_valid():
+    from onebot_adapter.config import MEDIA_DELIVERY_CACHE
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", media_delivery_mode=MEDIA_DELIVERY_CACHE)
+    errors = cfg.validate()
+    assert not any("media_delivery_mode" in e for e in errors)
+
+
+def test_protocol_ready_includes_media_delivery_mode():
+    msg = ready_message(True, "0.1.0", self_id="100", media_delivery_mode="cache")
+    assert msg["type"] == "ready"
+    assert msg["media_delivery_mode"] == "cache"
+
+
 def test_config_roundtrip(tmp_path):
     from onebot_adapter.config import load_config, save_config
 

@@ -41,6 +41,11 @@ try:
         MessageEvent,
         MessageType,
         SendResult,
+        cache_audio_from_url,
+        cache_document_from_bytes,
+        cache_image_from_url,
+        cache_video_from_bytes,
+        safe_url_for_log,
     )
     from gateway.session import SessionSource, build_session_key
     _BASE_AVAILABLE = True
@@ -53,6 +58,11 @@ except ImportError:
     Platform = None  # type: ignore[assignment]
     SessionSource = None  # type: ignore[assignment]
     build_session_key = None  # type: ignore[assignment]
+    cache_image_from_url = None  # type: ignore[assignment]
+    cache_audio_from_url = None  # type: ignore[assignment]
+    cache_video_from_bytes = None  # type: ignore[assignment]
+    cache_document_from_bytes = None  # type: ignore[assignment]
+    safe_url_for_log = None  # type: ignore[assignment]
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
@@ -68,6 +78,87 @@ _MAX_INFLIGHT_SENDS = 2
 
 _PLUGIN_YAML_PATH = Path(__file__).parent / "plugin.yaml"
 _VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
+
+# ── Media caching helpers ────────────────────────────────────────────────
+# Used only when media_delivery_mode == "cache".  Extracts a file extension
+# from a URL's path component (ignoring query string); returns *fallback* when
+# the URL has no recognizable extension or a non-media extension.
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+_AUDIO_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".opus", ".flac", ".silk"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+
+
+def _ext_from_url(url: str, fallback: str = "") -> str:
+    """Extract a media extension from a URL's path, or *fallback* if none."""
+    if not url:
+        return fallback
+    # Strip query/fragment then take the last path segment.
+    path = url.split("?", 1)[0].split("#", 1)[0]
+    dot = path.rfind(".")
+    if dot < 0:
+        return fallback
+    ext = path[dot:].lower()
+    # Accept any 2-5 char extension; let the cache helpers validate content.
+    if 2 <= len(ext) <= 6:
+        return ext
+    return fallback
+
+
+async def _download_url_bytes(url: str) -> bytes:
+    """Download bytes from a URL with SSRF protection.
+
+    Uses aiohttp with a 30s timeout and follows redirects.  Raises
+    ValueError if the URL targets a private/internal network (delegates to
+    the host's ``is_safe_url`` check when available, else a minimal guard).
+    """
+    # Try the host's SSRF guard first — it knows the full private-range list.
+    try:
+        from tools.url_safety import is_safe_url  # type: ignore[import-untyped]
+        if not is_safe_url(url):
+            raise ValueError(f"Blocked unsafe URL (SSRF protection): {url[:80]}")
+    except ImportError:
+        # tools.url_safety not available — fall back to a basic private-IP guard.
+        _basic_ssrf_guard(url)
+
+    timeout = aiohttp.ClientTimeout(total=30.0)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+                "Accept": "*/*",
+            },
+            allow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            return await response.read()
+
+
+def _basic_ssrf_guard(url: str) -> None:
+    """Minimal SSRF guard: reject private/loopback IPs in the hostname.
+
+    This is a fallback when ``tools.url_safety.is_safe_url`` is unavailable
+    (e.g. standalone import outside a running gateway).  The host's full
+    guard is preferred because it covers IPv6, DNS rebinding, and redirect
+    chains.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Blocked non-HTTP URL: {url[:80]}")
+    host = parsed.hostname or ""
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"):
+        raise ValueError(f"Blocked localhost URL (SSRF protection): {url[:80]}")
+    # 10.x / 172.16-31.x / 192.168.x
+    parts = host.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        octets = [int(p) for p in parts]
+        if octets[0] == 10:
+            raise ValueError(f"Blocked private-IP URL (SSRF protection): {url[:80]}")
+        if octets[0] == 172 and 16 <= octets[1] <= 31:
+            raise ValueError(f"Blocked private-IP URL (SSRF protection): {url[:80]}")
+        if octets[0] == 192 and octets[1] == 168:
+            raise ValueError(f"Blocked private-IP URL (SSRF protection): {url[:80]}")
 
 
 def _read_plugin_version() -> str:
@@ -122,6 +213,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._send_semaphore = asyncio.Semaphore(_MAX_INFLIGHT_SENDS)
         self._onebot_connected = False
         self._self_id = ""
+        self._media_delivery_mode = "passthrough"
         self._current_is_admin = False
         self._current_group_id = ""
         self._current_user_id = ""
@@ -339,9 +431,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if mtype == "ready":
             self._onebot_connected = data.get("onebot_connected", False)
             self._self_id = data.get("self_id", "")
+            self._media_delivery_mode = data.get("media_delivery_mode", "passthrough")
             logger.debug(
-                "OneBot: adapter ready (onebot=%s self_id=%s)",
-                self._onebot_connected, self._self_id or "?",
+                "OneBot: adapter ready (onebot=%s self_id=%s media=%s)",
+                self._onebot_connected, self._self_id or "?", self._media_delivery_mode,
             )
             return
 
@@ -406,14 +499,28 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             message_id=data.get("message_id", ""),
         )
 
+        # ── Media caching ──────────────────────────────────────────────
+        # In ``cache`` mode the adapter populates ``media_items`` with one entry
+        # per media segment (image/record/video/file).  We download each via
+        # the appropriate ``cache_*_from_url`` / ``cache_*_from_bytes`` helper
+        # from ``gateway.platforms.base`` and fill ``media_urls`` / ``media_types``
+        # with local paths so vision/STT tools can read them directly.
+        # In ``passthrough`` mode (default) ``media_items`` is empty and media
+        # URLs are rendered inline in ``text`` as placeholders — no download.
+        media_urls: list[str] = []
+        media_types: list[str] = []
+        raw_media_items = data.get("media_items") or []
+        if self._media_delivery_mode == "cache" and raw_media_items:
+            media_urls, media_types = await self._cache_media_items(raw_media_items)
+
         message_event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message=data,
             message_id=data.get("message_id", ""),
-            media_urls=[],
-            media_types=[],
+            media_urls=media_urls,
+            media_types=media_types,
             reply_to_message_id=data.get("reply_to_message_id"),
             reply_to_text=data.get("reply_to_text"),
             timestamp=timestamp,
@@ -459,6 +566,72 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             await self.handle_message(message_event)
         except Exception:
             logger.exception("OneBot: handle_message raised in background task")
+
+    async def _cache_media_items(self, raw_items: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+        """Download media referenced by *raw_items* and cache them locally.
+
+        Called only when ``media_delivery_mode == "cache"``.  Each entry in
+        *raw_items* is a dict from ``NormalizedEvent.media_items`` (kind, url,
+        mime, name, file_id, index).  Uses the host's ``cache_image_from_url`` /
+        ``cache_audio_from_url`` helpers (which include SSRF protection and
+        retries) for images and audio; for videos and files, downloads bytes
+        via httpx (SSRF-gated) then calls ``cache_video_from_bytes`` /
+        ``cache_document_from_bytes``.
+
+        On any failure (download error, cache error, missing URL) the media
+        is skipped — the LLM still sees its ``[图N]`` placeholder in ``text``
+        but ``media_urls`` won't include a path for it.  File segments without
+        a URL are always skipped (the LLM can use the ``onebot_get_file``
+        tool to fetch them by ``file_id`` on demand).
+        """
+        if not _BASE_AVAILABLE or cache_image_from_url is None:
+            logger.warning(
+                "OneBot: cache mode requested but gateway.platforms.base cache "
+                "helpers unavailable; skipping media download"
+            )
+            return [], []
+
+        media_urls: list[str] = []
+        media_types: list[str] = []
+        for item in raw_items:
+            kind = item.get("kind", "")
+            url = item.get("url", "")
+            name = item.get("name", "")
+            file_id = item.get("file_id", "")
+            if not url:
+                # File segments without a URL — LLM can use onebot_get_file
+                # tool to fetch by file_id on demand.
+                logger.debug("OneBot: skip media item (no url) kind=%s file_id=%s", kind, file_id)
+                continue
+            try:
+                if kind == "image":
+                    ext = _ext_from_url(url, ".jpg")
+                    path = await cache_image_from_url(url, ext=ext)
+                    mime = f"image/{ext.lstrip('.')}" if ext else "image/jpeg"
+                elif kind == "record":
+                    ext = _ext_from_url(url, ".ogg")
+                    path = await cache_audio_from_url(url, ext=ext)
+                    mime = f"audio/{ext.lstrip('.')}" if ext else "audio/ogg"
+                elif kind == "video":
+                    ext = _ext_from_url(url, ".mp4")
+                    data = await _download_url_bytes(url)
+                    path = cache_video_from_bytes(data, ext=ext)
+                    mime = f"video/{ext.lstrip('.')}" if ext else "video/mp4"
+                elif kind == "file":
+                    data = await _download_url_bytes(url)
+                    path = cache_document_from_bytes(data, name or "file")
+                    mime = "application/octet-stream"
+                else:
+                    logger.debug("OneBot: skip media item (unknown kind=%s)", kind)
+                    continue
+                media_urls.append(path)
+                media_types.append(mime)
+                logger.debug("OneBot: cached media kind=%s url=%s -> %s", kind, url[:80], path)
+            except Exception as exc:
+                logger.warning("OneBot: cache media failed kind=%s url=%s: %s", kind, (url or "")[:80], exc)
+                # Skip this media; LLM still sees its [图N] placeholder.
+                continue
+        return media_urls, media_types
 
     def _maybe_register_idle_callback(
         self, data: dict[str, Any], message_event: Any

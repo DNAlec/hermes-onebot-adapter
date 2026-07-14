@@ -38,6 +38,10 @@ USER_FILTER_WHITELIST = "whitelist"
 USER_FILTER_BLACKLIST = "blacklist"
 _VALID_USER_FILTER_MODES = {USER_FILTER_WHITELIST, USER_FILTER_BLACKLIST}
 
+MEDIA_DELIVERY_PASSTHROUGH = "passthrough"
+MEDIA_DELIVERY_CACHE = "cache"
+_VALID_MEDIA_DELIVERY_MODES = {MEDIA_DELIVERY_PASSTHROUGH, MEDIA_DELIVERY_CACHE}
+
 COMMAND_PERM_EVERYONE = "everyone"
 COMMAND_PERM_ADMIN = "admin"
 COMMAND_PERM_DISABLED = "disabled"
@@ -58,7 +62,8 @@ DEFAULT_PLATFORM_HINT = (
     "  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n"
     "- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n"
     "- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n"
-    "- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [语音1](语音转换失败,保留原始格式)\n"
+    "- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 "
+    "[图1](已跳过:下载失败) 或 [语音1](语音转换失败,保留原始格式)\n"
     "- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n"
     "- 合并转发:\n"
     "  [合并转发开始:1]\n"
@@ -187,6 +192,9 @@ class AdapterConfig:
     event_queue_max_per_chat: int = 50          # 单群排队上限,超限拒绝入队
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
 
+    # ── 媒体投递 ──
+    media_delivery_mode: str = MEDIA_DELIVERY_PASSTHROUGH  # "passthrough"(默认,URL 占位符) | "cache"(插件侧下载落盘)
+
     # ── /指令过滤 ──
     command_filter_enabled: bool = False                # 总开关：是否对 /指令 做权限过滤
     command_filter_unknown: bool = False                # 未知指令(不在 hermes 列表)是否过滤，默认放行
@@ -215,6 +223,8 @@ class AdapterConfig:
             errors.append("event_queue_max_per_chat must be at least 1")
         if self.event_queue_idle_timeout <= 0:
             errors.append("event_queue_idle_timeout must be positive")
+        if self.media_delivery_mode not in _VALID_MEDIA_DELIVERY_MODES:
+            errors.append(f"media_delivery_mode must be one of {sorted(_VALID_MEDIA_DELIVERY_MODES)}")
         if self.webui_token_lifetime_hours < 1:
             errors.append("webui_token_lifetime_hours must be at least 1")
         if not self.reaction_emoji_id:
@@ -465,6 +475,7 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
         "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
+        "media_delivery_mode": "可选值: passthrough(URL 占位符直传,默认) | cache(插件侧下载落盘到 ~/.hermes/cache/)",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():

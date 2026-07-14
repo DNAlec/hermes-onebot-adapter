@@ -7,10 +7,15 @@ Reduces raw OneBot 11 event dicts into a :class:`NormalizedEvent`. Handles:
     (top level) plus inline ``forward.data.content`` (NapCat nested forwards),
     with level-numbered begin/end tags
   * reply context via ``get_msg`` (text / image / voice / video / file / forward)
-  * media URL passthrough — all media (images/videos/voice/files) are rendered
-    as URL placeholders in the text (e.g. ``[图1](https://...)``) so the LLM
-    can fetch them on demand via code execution or vision tools. No media is
-    downloaded by the adapter; no binary WS frames are produced.
+  * media delivery — controlled by ``media_delivery_mode``:
+    - ``passthrough`` (default): media URLs are rendered inline in ``text``
+      as placeholders like ``[图1](https://...)`` so the LLM can fetch them
+      on demand via code execution or vision tools. ``media_items`` is empty.
+    - ``cache``: ``media_items`` carries one entry per media segment so the
+      plugin can download them via ``cache_image_from_url`` etc.; text
+      placeholders are rendered without URLs (``[图1]``) so the LLM still sees
+      media positions. No media is downloaded by the adapter; no binary WS
+      frames are produced.
 """
 from __future__ import annotations
 
@@ -19,9 +24,9 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from onebot_adapter.config import AdapterConfig
+from onebot_adapter.config import MEDIA_DELIVERY_CACHE, AdapterConfig
 from onebot_adapter.onebot import segments as seg
-from onebot_adapter.relay.protocol import FilteredEvent, NormalizedEvent
+from onebot_adapter.relay.protocol import FilteredEvent, MediaItem, NormalizedEvent
 
 if TYPE_CHECKING:
     from onebot_adapter.onebot.name_resolver import NameResolver
@@ -70,13 +75,18 @@ class _MediaCounter:
 # ── Placeholder rendering ────────────────────────────────────────────────
 
 
-def _render_url_placeholder(marker: dict) -> str:
-    """Render a media marker as a URL placeholder string.
+def _render_url_placeholder(marker: dict, *, include_url: bool = True) -> str:
+    """Render a media marker as a placeholder string.
 
-    Format: ``[图1](https://...)`` / ``[视频2](https://...)`` /
-    ``[语音3](https://...)`` / ``[文件4:name.ext](https://...)``.
-    When no URL is available (e.g. a file segment with only ``file_id``),
-    the parenthesised part is ``无URL``.
+    Passthrough mode (``include_url=True``): ``[图1](https://...)`` /
+    ``[视频2](https://...)`` / ``[语音3](https://...)`` /
+    ``[文件4:name.ext](https://...)``. When no URL is available, the
+    parenthesised part is ``无URL``.
+
+    Cache mode (``include_url=False``): ``[图1]`` / ``[视频2]`` / ``[语音3]`` /
+    ``[文件4:name.ext]`` — the URL is omitted because it is carried in
+    ``media_items`` for the plugin to download; the LLM only needs to see the
+    media's position in the message.
     """
     kind = marker["kind"]
     idx = marker["index"] + 1  # 1-based display number
@@ -92,11 +102,51 @@ def _render_url_placeholder(marker: dict) -> str:
     else:
         label = f"[媒体{idx}]"
 
+    if not include_url:
+        return label
+
     if kind == "file":
         url = marker.get("file_info", {}).get("url", "")
     else:
         url = marker.get("url", "")
     return f"{label}({url or '无URL'})"
+
+
+def _marker_to_media_item(marker: dict) -> MediaItem:
+    """Convert a parser-internal media marker dict to a ``MediaItem``.
+
+    The plugin side receives ``MediaItem`` via the ``media_items`` field of
+    ``NormalizedEvent`` and uses it to pick the right ``cache_*_from_url`` /
+    ``cache_*_from_bytes`` helper when ``media_delivery_mode == "cache"``.
+    """
+    kind = marker.get("kind", "")
+    idx = marker.get("index", 0)
+    if kind == "file":
+        info = marker.get("file_info", {}) or {}
+        return MediaItem(
+            kind="file",
+            url=info.get("url", ""),
+            name=info.get("name", ""),
+            file_id=info.get("file_id", ""),
+            index=idx,
+        )
+    return MediaItem(
+        kind=kind,
+        url=marker.get("url", ""),
+        index=idx,
+    )
+
+
+def _marker_has_url(marker: dict) -> bool:
+    """Return True if the marker carries a usable download URL.
+
+    File segments without a URL (only ``file_id``) are skipped in cache mode —
+    the LLM can fetch them via the ``onebot_get_file`` tool using ``file_id``.
+    """
+    kind = marker.get("kind", "")
+    if kind == "file":
+        return bool(marker.get("file_info", {}).get("url", ""))
+    return bool(marker.get("url", ""))
 
 
 # ── @ mention name resolution ─────────────────────────────────────────────
@@ -242,6 +292,7 @@ async def parse_event(
     strip_first_mention: bool = True,
     is_known_command_fn: Any = None,
     canonical_command_name_fn: Any = None,
+    media_delivery_mode: str = "passthrough",
 ) -> NormalizedEvent | FilteredEvent | None:
     """Parse a OneBot 11 message event.
 
@@ -253,10 +304,17 @@ async def parse_event(
         * ``None`` for non-message events, filtered messages, or empty
           messages (no text).
 
-    Media (images / videos / voice / files) are rendered as URL placeholders
-    in the text — no media is downloaded and no binary frames are produced.
-    The LLM is expected to fetch URLs on demand via code execution or
-    vision tools.
+    Media delivery is controlled by *media_delivery_mode* (defaults to
+    ``"passthrough"``, overridable via *config.media_delivery_mode* when
+    *config* is supplied):
+
+      * ``passthrough``: media URLs are rendered inline in ``text`` as
+        placeholders like ``[图1](https://...)`` so the LLM can fetch them on
+        demand. ``media_items`` is empty.
+      * ``cache``: ``media_items`` carries one entry per media segment so
+        the plugin can download them; ``text`` placeholders are rendered
+        without URLs (``[图1]``). No media is downloaded by the adapter and
+        no binary WS frames are produced in either mode.
 
     When *config* is provided, it overrides *group_require_mention* with
     per-group resolved values, and applies group allowlist/blocklist,
@@ -307,10 +365,14 @@ async def parse_event(
         strip_first_mention = config.resolve_strip_first_mention(group_id)
         channel_prompt = config.resolve_custom_prompt(group_id)
         is_admin = config.is_admin(sender_id, group_id)
+        media_delivery_mode = config.media_delivery_mode
     elif config and not is_group:
         if not config.is_dm_allowed(sender_id):
             return None
         is_admin = config.is_admin(sender_id)
+        media_delivery_mode = config.media_delivery_mode
+
+    include_url = media_delivery_mode != MEDIA_DELIVERY_CACHE
 
     # ── chat_id ──────────────────────────────────────────────────────
     # 群聊固定发 group:<gid>;Hermes 端的 session 隔离由其自己的
@@ -372,6 +434,7 @@ async def parse_event(
             return filtered
 
     counter = _MediaCounter()
+    media_items: list[MediaItem] = []
 
     # Media ordering matches placeholder numbering:
     #   1. forward media   2. reply media   3. main message media
@@ -386,6 +449,7 @@ async def parse_event(
         forward_text = await _expand_forward(
             api, forward_id, counter, depth=0,
             name_resolver=name_resolver, group_id=group_id,
+            include_url=include_url, media_items=media_items,
         )
         # _expand_messages already wraps the result in
         # [合并转发开始:1]...[合并转发结束:1] — no extra wrapping here.
@@ -397,6 +461,7 @@ async def parse_event(
         reply_to_text = await _build_reply_context(
             api, reply_to_id, counter,
             name_resolver=name_resolver, group_id=group_id,
+            include_url=include_url, media_items=media_items,
         )
 
     # ── Main message text + media ─────────────────────────────────────
@@ -417,8 +482,10 @@ async def parse_event(
             str(marker.get("url") or marker.get("file_info", {}).get("url", ""))[:120],
         )
         counter.counter += 1
-        rendered = _render_url_placeholder(marker)
+        rendered = _render_url_placeholder(marker, include_url=include_url)
         text = text.replace(marker["marker"], rendered)
+        if not include_url and _marker_has_url(marker):
+            media_items.append(_marker_to_media_item(marker))
 
     # ── Resolve @ mentions to @QQ号(昵称) ──────────────────────────────
     if name_resolver:
@@ -464,6 +531,7 @@ async def parse_event(
         is_admin=is_admin,
         chat_name=chat_name,
         real_seq=str(event.get("real_seq", "") or ""),
+        media_items=media_items,
         raw=event,
     )
     logger.debug(
@@ -482,8 +550,16 @@ async def _build_reply_context(
     counter: _MediaCounter,
     name_resolver: NameResolver | None = None,
     group_id: str = "",
+    include_url: bool = True,
+    media_items: list[MediaItem] | None = None,
 ) -> str | None:
-    """Fetch the quoted message and build reply text (URL placeholders only)."""
+    """Fetch the quoted message and build reply text.
+
+    Media markers are rendered as placeholders; in cache mode (``include_url=
+    False``) the URLs are omitted from the placeholders and the corresponding
+    :class:`MediaItem` entries are appended to *media_items* for the plugin
+    to download.
+    """
     try:
         quoted = await api.get_msg(reply_id)
     except Exception as exc:
@@ -512,6 +588,7 @@ async def _build_reply_context(
         fwd_text = await _expand_forward(
             api, q_forward_id, counter, depth=0,
             name_resolver=name_resolver, group_id=group_id,
+            include_url=include_url, media_items=media_items,
         )
         label = fwd_text or "（无内容）"
         q_prefix = _format_sender_prefix(q_name, q_id, q_seq)
@@ -524,8 +601,10 @@ async def _build_reply_context(
 
     for marker in markers:
         counter.counter += 1
-        rendered = _render_url_placeholder(marker)
+        rendered = _render_url_placeholder(marker, include_url=include_url)
         q_text = q_text.replace(marker["marker"], rendered)
+        if not include_url and media_items is not None and _marker_has_url(marker):
+            media_items.append(_marker_to_media_item(marker))
 
     # Resolve @ mentions before adding sender prefix (avoids matching
     # numbers in the prefix as QQ IDs)
@@ -546,6 +625,8 @@ async def _expand_forward(
     depth: int = 0,
     name_resolver: NameResolver | None = None,
     group_id: str = "",
+    include_url: bool = True,
+    media_items: list[MediaItem] | None = None,
 ) -> str:
     """Fetch a merged-forward by id and expand it into text.
 
@@ -579,6 +660,7 @@ async def _expand_forward(
     return await _expand_messages(
         messages, counter, depth,
         name_resolver=name_resolver, group_id=group_id,
+        include_url=include_url, media_items=media_items,
     )
 
 
@@ -588,6 +670,8 @@ async def _expand_messages(
     depth: int,
     name_resolver: NameResolver | None = None,
     group_id: str = "",
+    include_url: bool = True,
+    media_items: list[MediaItem] | None = None,
 ) -> str:
     """Expand a list of message objects (each ``{sender, message, ...}``).
 
@@ -595,7 +679,10 @@ async def _expand_messages(
     ``forward.data.content`` array. Pure traversal: no API calls — nested
     forwards are read from their inline ``content`` field. Begin/end tags
     carry a level number to help the LLM understand nesting structure.
-    Media markers are rendered as URL placeholders (no downloads).
+    Media markers are rendered as placeholders; in cache mode
+    (``include_url=False``) URLs are omitted from placeholders and the
+    corresponding :class:`MediaItem` entries are appended to *media_items*
+    for the plugin to download.
     """
     if depth > _MAX_FORWARD_DEPTH:
         return "[合并转发(已跳过:超过最大深度)]"
@@ -615,6 +702,7 @@ async def _expand_messages(
             nested_text = await _expand_messages(
                 nested_content, counter, depth + 1,
                 name_resolver=name_resolver, group_id=group_id,
+                include_url=include_url, media_items=media_items,
             )
             if nested_text:
                 parts.append(f"{fwd_prefix}: {nested_text}")
@@ -627,8 +715,10 @@ async def _expand_messages(
 
         for marker in markers:
             counter.counter += 1
-            rendered = _render_url_placeholder(marker)
+            rendered = _render_url_placeholder(marker, include_url=include_url)
             msg_text = msg_text.replace(marker["marker"], rendered)
+            if not include_url and media_items is not None and _marker_has_url(marker):
+                media_items.append(_marker_to_media_item(marker))
 
         # Resolve @ mentions in sub-message text
         if name_resolver:

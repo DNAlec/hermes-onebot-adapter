@@ -183,6 +183,14 @@ class HermesRelayServer:
                 )
             self._busy_groups.clear()
             self._queues.clear()
+        # 媒体投递模式变化:广播 fresh ready 让插件实时切换缓存策略。
+        # broadcast_self_id 复用 ready 帧机制,这里用新参数广播即可。
+        if old.media_delivery_mode != config.media_delivery_mode:
+            logger.info(
+                "relay: media_delivery_mode changed %s -> %s, broadcasting fresh ready",
+                old.media_delivery_mode, config.media_delivery_mode,
+            )
+            asyncio.create_task(self.broadcast_self_id(self._config.self_id))
         self._config = config
 
     def _maybe_evict_send_cache(self) -> None:
@@ -352,13 +360,20 @@ class HermesRelayServer:
                 self._clients.discard(ws)
 
     async def broadcast_self_id(self, self_id: str) -> None:
-        """Push an updated self_id to every connected plugin client by sending
-        a fresh ``ready`` frame.  Called after _probe_self_id succeeds so that
-        plugins that connected before the probe completes see the new self_id."""
+        """Push an updated self_id (and media_delivery_mode) to every connected
+        plugin client by sending a fresh ``ready`` frame.
+
+        Called after _probe_self_id succeeds so that plugins that connected
+        before the probe completes see the new self_id.  Also called when
+        ``media_delivery_mode`` changes via hot-reload — the fresh ready frame
+        carries the new mode so plugins can switch caching strategy without
+        reconnecting.
+        """
         msg = ready_message(
             onebot_connected=self._onebot_connected_fn(),
             adapter_version=self._adapter_version,
             self_id=self_id,
+            media_delivery_mode=self._config.media_delivery_mode,
         )
         for ws in list(self._clients):
             try:
@@ -384,6 +399,7 @@ class HermesRelayServer:
                 onebot_connected=self._onebot_connected_fn(),
                 adapter_version=self._adapter_version,
                 self_id=self._config.self_id,
+                media_delivery_mode=self._config.media_delivery_mode,
             )
         )
         # Replay buffered events so a reconnecting plugin doesn't miss messages.
