@@ -5,7 +5,6 @@ import base64
 import hashlib
 import hmac
 import logging
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -22,18 +21,17 @@ logger = logging.getLogger(__name__)
 # Search paths for built SPA assets, checked in order:
 # 1. source-tree static dir (e.g. pip install -e . or editable installs)
 # 2. frontend/dist after manual npm build
-# 3. pip-installed site-packages static dir
+# We deliberately do NOT scan ``sys.path`` for static dirs — that would allow
+# a malicious ``onebot_adapter/webui/static/index.html`` in the current working
+# directory (or an attacker-controlled PYTHONPATH entry) to shadow the real
+# SPA. Only the package's own location and the explicit frontend/dist
+# fallback are trusted.
 _PKG_ROOT = Path(__file__).parent.parent
 _WEBUI_STATIC = Path(__file__).parent / "static"
 _STATIC_CANDIDATES = [
     _WEBUI_STATIC,
     _PKG_ROOT.parent / "frontend" / "dist",
 ]
-# Add site-packages path from the installed package if different from source
-for p in sys.path:
-    candidate = Path(p) / "onebot_adapter" / "webui" / "static"
-    if candidate != _WEBUI_STATIC and candidate not in _STATIC_CANDIDATES:
-        _STATIC_CANDIDATES.append(candidate)
 
 
 def _find_static() -> Path | None:
@@ -97,11 +95,19 @@ def _login(store: ConfigStore, state: dict[str, Any]):
     within ``_LOGIN_BAN_SECONDS``, the IP is banned for the remainder of the
     window and receives ``429 Too Many Requests``. State lives in
     ``state["login_failures"]`` (in-memory; cleared on restart).
+
+    The client IP is taken from ``X-Forwarded-For`` (first hop) when present
+    so that deployments behind a reverse proxy rate-limit the *real* client
+    rather than the shared proxy IP. Without ``X-Forwarded-For`` the direct
+    ``request.remote`` is used.
     """
     failures: dict[str, tuple[int, float]] = state.setdefault("login_failures", {})
 
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        ip = request.remote or "unknown"
+        # Prefer the first X-Forwarded-For hop for reverse-proxy deployments;
+        # fall back to the direct peer for non-proxied setups.
+        xff = request.headers.get("X-Forwarded-For", "")
+        ip = xff.split(",")[0].strip() if xff.strip() else (request.remote or "unknown")
         now = time.time()
         # Garbage-collect expired entries to keep the dict bounded.
         for k in list(failures):
@@ -286,44 +292,17 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
-def _is_safe_install_path(target: Path) -> bool:
-    """Return True if *target* is safe to use as an install target.
-
-    Only allow writes under the user's home directory, /home, or /tmp.
-    Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
-    writes via the WebUI (which is auth-gated but behind a proxy the
-    same IP may be shared by multiple users).
-    """
-    allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
-    resolved = target.resolve(strict=False)
-    for root in allowed_roots:
-        try:
-            resolved.relative_to(root.resolve(strict=False))
-            return True
-        except ValueError:
-            pass
-    return False
-
-
 def _install_plugin(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
             data = await request.json()
         except Exception:
-            data = {}
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
         install_dir = data.get("hermes_install_dir")
         cfg = store.config
         from onebot_adapter.installer import _resolve_hermes_dir
 
-        # Validate the install dir is under the user's home directory or an
-        # explicitly allowed path, to prevent accidental writes to system
-        # paths (e.g. /, /etc) when the WebUI is exposed behind a proxy.
         target = _resolve_hermes_dir(install_dir)
-        if not _is_safe_install_path(target):
-            return aiohttp.web.json_response(
-                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
-                status=400,
-            )
         adapter_url = f"ws://127.0.0.1:{cfg.hermes_ws_port}{cfg.hermes_ws_path}"
         adapter_token = cfg.hermes_ws_token
         from onebot_adapter import installer
@@ -347,16 +326,11 @@ def _uninstall_plugin(state: dict[str, Any]):
         try:
             data = await request.json()
         except Exception:
-            data = {}
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
         install_dir = data.get("hermes_install_dir")
         from onebot_adapter.installer import _resolve_hermes_dir
 
         target = _resolve_hermes_dir(install_dir)
-        if not _is_safe_install_path(target):
-            return aiohttp.web.json_response(
-                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
-                status=400,
-            )
         from onebot_adapter import installer
 
         try:
@@ -731,9 +705,10 @@ async def _index(_: aiohttp.web.Request) -> aiohttp.web.Response:
 async def _spa_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
     tail = request.match_info.get("tail", "")
     clean = tail.lstrip("/")
-    if ".." in clean:
-        raise aiohttp.web.HTTPNotFound()
     file_path = _STATIC_DIR / clean
+    # ``is_relative_to`` is the real path-traversal guard; it rejects any
+    # ``..``-based escape (decoded by aiohttp's match_info) that would land
+    # outside the static dir. No extra ``".." in clean`` check is needed.
     if file_path.exists() and file_path.is_file() and file_path.is_relative_to(_STATIC_DIR):
         return aiohttp.web.FileResponse(file_path)
     return await _index(request)

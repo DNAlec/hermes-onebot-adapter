@@ -101,6 +101,42 @@ async def test_resolve_dm_failure_returns_empty():
     assert name == ""
 
 
+async def test_failure_not_cached_retries_on_next_call():
+    """Failed lookups should not be cached so the next call retries.
+
+    Both get_group_member_info and get_stranger_info must fail on the first
+    call (so the result is ""), then succeed on the second call to prove the
+    failure wasn't cached.
+    """
+    call_count = 0
+    api = MagicMock()
+
+    async def _gmi(group_id, user_id, no_cache=False):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("transient")
+        return {"card": "Later", "nickname": "L"}
+
+    async def _stranger(user_id, no_cache=True):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise RuntimeError("transient stranger")
+        return {"nickname": "StrangerOK"}
+
+    api.get_group_member_info = _gmi
+    api.get_stranger_info = _stranger
+    resolver = NameResolver(api)
+
+    name1 = await resolver.resolve("123", "42")
+    assert name1 == ""  # both APIs failed
+    # Not cached → next call retries and succeeds
+    name2 = await resolver.resolve("123", "42")
+    assert name2 == "Later"
+    assert call_count >= 3  # retried both APIs on the second call
+
+
 # ── Caching ──────────────────────────────────────────────────────────────
 
 

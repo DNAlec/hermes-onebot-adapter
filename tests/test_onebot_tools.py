@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from onebot_adapter.hermes_plugin.onebot_tools import (
+    _ADMIN_TOOL_NAMES,
     _TOOLS,
     TOOLSET,
     _check_admin,
@@ -63,7 +64,7 @@ def reset_adapter():
 
 def _tool_handler(name: str):
     """Get the handler function for a tool by name."""
-    for tname, handler, _, _ in _TOOLS:
+    for tname, handler, _ in _TOOLS:
         if tname == name:
             return handler
     raise KeyError(f"tool {name!r} not found")
@@ -79,14 +80,13 @@ def test_tool_count():
 
 
 def test_all_tools_have_required_fields():
-    for name, handler, schema, is_admin in _TOOLS:
+    for name, handler, schema in _TOOLS:
         assert name.startswith("onebot_")
         assert callable(handler)
         assert "name" in schema
         assert "description" in schema
         assert "parameters" in schema
         assert schema["name"] == name
-        assert isinstance(is_admin, bool)
 
 
 def test_register_tools_calls_ctx():
@@ -491,7 +491,7 @@ async def test_all_admin_tools_blocked_without_admin():
     """Every admin tool should return error when user is not admin."""
     adapter = MockAdapter(is_admin=False)
     set_adapter(adapter)
-    admin_tools = [(name, handler) for name, handler, _, is_admin in _TOOLS if is_admin]
+    admin_tools = [(name, handler) for name, handler, _ in _TOOLS if name in _ADMIN_TOOL_NAMES]
     assert len(admin_tools) == 14
     for name, handler in admin_tools:
         raw = await handler({

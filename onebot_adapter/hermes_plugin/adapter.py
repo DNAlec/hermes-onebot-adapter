@@ -45,7 +45,6 @@ try:
         cache_document_from_bytes,
         cache_image_from_url,
         cache_video_from_bytes,
-        safe_url_for_log,
     )
     from gateway.session import SessionSource, build_session_key
     _BASE_AVAILABLE = True
@@ -62,7 +61,6 @@ except ImportError:
     cache_audio_from_url = None  # type: ignore[assignment]
     cache_video_from_bytes = None  # type: ignore[assignment]
     cache_document_from_bytes = None  # type: ignore[assignment]
-    safe_url_for_log = None  # type: ignore[assignment]
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
@@ -139,26 +137,43 @@ def _basic_ssrf_guard(url: str) -> None:
 
     This is a fallback when ``tools.url_safety.is_safe_url`` is unavailable
     (e.g. standalone import outside a running gateway).  The host's full
-    guard is preferred because it covers IPv6, DNS rebinding, and redirect
-    chains.
+    guard is preferred because it covers DNS rebinding and redirect chains;
+    this fallback covers the most common SSRF targets using ``ipaddress``
+    for robust IPv4/IPv6 classification:
+
+      - loopback (127.0.0.0/8, ::1)
+      - private (10/8, 172.16-31, 192.168/16, fc00::/7)
+      - link-local / cloud metadata (169.254/16, fe80::/10)
+      - carrier-grade NAT (100.64/10)
+      - unspecified (0.0.0.0, ::)
     """
     from urllib.parse import urlparse
+
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"Blocked non-HTTP URL: {url[:80]}")
     host = parsed.hostname or ""
-    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"):
+    if host in ("localhost",):
         raise ValueError(f"Blocked localhost URL (SSRF protection): {url[:80]}")
-    # 10.x / 172.16-31.x / 192.168.x
-    parts = host.split(".")
-    if len(parts) == 4 and all(p.isdigit() for p in parts):
-        octets = [int(p) for p in parts]
-        if octets[0] == 10:
-            raise ValueError(f"Blocked private-IP URL (SSRF protection): {url[:80]}")
-        if octets[0] == 172 and 16 <= octets[1] <= 31:
-            raise ValueError(f"Blocked private-IP URL (SSRF protection): {url[:80]}")
-        if octets[0] == 192 and octets[1] == 168:
-            raise ValueError(f"Blocked private-IP URL (SSRF protection): {url[:80]}")
+    # Strip IPv6 brackets for ipaddress parsing
+    ip_str = host.strip("[]")
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        # Not an IP literal (hostname) — leave to the host's full guard.
+        return
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_reserved
+    ):
+        raise ValueError(f"Blocked private/internal IP (SSRF protection): {url[:80]}")
+    # Carrier-grade NAT (100.64.0.0/10) — not in ipaddress.is_private
+    if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
+        raise ValueError(f"Blocked CGN IP (SSRF protection): {url[:80]}")
 
 
 def _read_plugin_version() -> str:
@@ -296,15 +311,19 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             self._watchdog_task.cancel()
             try:
                 await self._watchdog_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("OneBot: watchdog task error during disconnect")
             self._watchdog_task = None
         if self._recv_task:
             self._recv_task.cancel()
             try:
                 await self._recv_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("OneBot: recv task error during disconnect")
             self._recv_task = None
         # Cancel any in-flight event dispatch tasks so a lingering
         # handle_message doesn't try to send on a closing WS.
@@ -339,8 +358,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             if recv and not recv.done():
                 try:
                     await recv
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
+                except Exception:
+                    logger.exception("OneBot: recv task error in watchdog")
 
             if self._stop_event.is_set():
                 break
@@ -841,7 +862,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 "req_id": req_id,
             }
             msg.update(payload)
-            fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+            fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._futures[req_id] = fut
             logger.debug(
                 "OneBot plugin _request: action=%s req_id=%s payload_keys=%s frame=%s",
@@ -996,7 +1017,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.debug("OneBot plugin api_call: action=%s", action)
             logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
             req_id = str(uuid.uuid4())
-            fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+            fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._futures[req_id] = fut
             await self._ws.send_json({
                 "type": "api_call",
