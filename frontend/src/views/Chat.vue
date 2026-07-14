@@ -104,6 +104,7 @@ async function saveGlobal() {
       event_queue_enabled: c.event_queue_enabled,
       event_queue_max_per_chat: c.event_queue_max_per_chat,
       event_queue_idle_timeout: c.event_queue_idle_timeout,
+      media_delivery_mode: c.media_delivery_mode,
       platform_hint: c.platform_hint,
     });
     msg.value = "全局设置已保存";
@@ -219,7 +220,7 @@ function tryParseCmdPerms(text: string) {
 
 function resetHint() {
   if (!cfg.value) return;
-  cfg.value.platform_hint = "# 平台特性\n你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n回复当前对话通常直接输出文本即可(系统会自动送达);当你需要主动发送消息(分多条发、推送其他会话、跨会话通知等)时,使用 onebot_send_message 工具。\n群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n# chat_id 格式\n- 私聊: <QQ号>(如 100)\n- 群聊: group:<群号>(如 group:42)\n\n# 入站消息格式(你看到的样子)\n- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [语音1](语音转换失败,保留原始格式)\n- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n- 合并转发:\n  [合并转发开始:1]\n  [Alice]: msg one\n  [Bob]: msg two\n  [合并转发结束:1]\n  嵌套时层级号递增;超过 4 层显示 [合并转发(已跳过:超过最大深度)]\n  合并转发中仅含昵称,无 QQ 号和群内序号,请勿尝试获取转发中发言者的详细信息\n- 斜杠命令(/reset 等)不加发送者前缀,原样传递\n- 启用群号标识时,消息头部会有 [群:42(测试群)] 行(仅主消息,斜杠命令不加)\n\n# 消息序号与工具调用\n- 群聊前缀 # 后的数字是群内序号(real_seq),不是全局消息 ID(message_id)\n- onebot_get_msg / onebot_recall_message / onebot_set_msg_emoji_like 等工具的 real_seq 参数填此群内序号\n- onebot_get_group_msg_history 的 message_seq 参数例外:填消息 ID(message_id),不是群内序号\n- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,需用 onebot_get_group_msg_history 重新获取\n\n# 出站消息格式(你输出时)\n- 直接输出文本只能发纯文本,**无法 @ 人**;要 @ 某人必须用 onebot_send_message 工具,message 参数传 OneBot 11 消息段数组,如 [{\"type\":\"at\",\"data\":{\"qq\":\"123456\"}},{\"type\":\"text\",\"data\":{\"text\":\" 你好\"}}]\n- 不要用 Markdown 语法(**粗体**、## 标题、- 列表 等),会被自动剥离;如需结构化展示可用纯文本约定(• 列表、【标题】、「引用」、───── 分隔线)\n- 回复时无需重复发送者前缀,直接输出正文\n\n# 不支持的元素\n- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n- 不支持打字状态提示(send_typing 为 no-op)";
+  cfg.value.platform_hint = "# 平台特性\n你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n回复当前对话通常直接输出文本即可(系统会自动送达);当你需要主动发送消息(分多条发、推送其他会话、跨会话通知等)时,使用 onebot_send_message 工具。\n群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n# chat_id 格式\n- 私聊: <QQ号>(如 100)\n- 群聊: group:<群号>(如 group:42)\n\n# 入站消息格式(你看到的样子)\n- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [图1](已跳过:下载失败) 或 [语音1](语音转换失败,保留原始格式)\n- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n- 合并转发:\n  [合并转发开始:1]\n  [Alice]: msg one\n  [Bob]: msg two\n  [合并转发结束:1]\n  嵌套时层级号递增;超过 4 层显示 [合并转发(已跳过:超过最大深度)]\n  合并转发中仅含昵称,无 QQ 号和群内序号,请勿尝试获取转发中发言者的详细信息\n- 斜杠命令(/reset 等)不加发送者前缀,原样传递\n- 启用群号标识时,消息头部会有 [群:42(测试群)] 行(仅主消息,斜杠命令不加)\n\n# 消息序号与工具调用\n- 群聊前缀 # 后的数字是群内序号(real_seq),不是全局消息 ID(message_id)\n- onebot_get_msg / onebot_recall_message / onebot_set_msg_emoji_like 等工具的 real_seq 参数填此群内序号\n- onebot_get_group_msg_history 的 message_seq 参数例外:填消息 ID(message_id),不是群内序号\n- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,需用 onebot_get_group_msg_history 重新获取\n\n# 出站消息格式(你输出时)\n- 直接输出文本只能发纯文本,**无法 @ 人**;要 @ 某人必须用 onebot_send_message 工具,message 参数传 OneBot 11 消息段数组,如 [{\"type\":\"at\",\"data\":{\"qq\":\"123456\"}},{\"type\":\"text\",\"data\":{\"text\":\" 你好\"}}]\n- 不要用 Markdown 语法(**粗体**、## 标题、- 列表 等),会被自动剥离;如需结构化展示可用纯文本约定(• 列表、【标题】、「引用」、───── 分隔线)\n- 回复时无需重复发送者前缀,直接输出正文\n\n# 不支持的元素\n- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n- 不支持打字状态提示(send_typing 为 no-op)";
 }
 </script>
 
@@ -365,6 +366,25 @@ function resetHint() {
         busy 超时(秒)
         <input type="number" v-model.number="cfg.event_queue_idle_timeout" min="10" step="10" />
         <span class="hint">Hermes 无响应的超时阈值,超时后强制清空 busy 并派发下一条。</span>
+      </label>
+    </div>
+
+    <!-- 媒体投递 -->
+    <div v-if="cfg" class="section">
+      <h3>媒体投递</h3>
+      <p class="hint">入站媒体(图片/语音/视频/文件)的投递方式。</p>
+      <label>
+        投递模式
+        <select v-model="cfg.media_delivery_mode">
+          <option value="passthrough">URL 直传（默认）</option>
+          <option value="cache">插件侧下载落盘</option>
+        </select>
+        <span class="hint">
+          <strong>URL 直传</strong>:媒体 URL 作为文本占位符(如 [图1](https://...))传给 LLM,LLM 按需 fetch。<br>
+          <strong>下载落盘</strong>:插件在 Hermes 进程内调用 cache_image_from_url 等下载到 ~/.hermes/cache/,
+          填 media_urls 字段供 vision/STT 工具读取。缓存失败则丢弃该媒体,保留空占位符 [图N]。
+          file 段无 URL 时一律跳过,LLM 可用 onebot_get_file 工具按需拉取。
+        </span>
       </label>
     </div>
 

@@ -1,13 +1,15 @@
 """Integration tests for the parser with media URL passthrough.
 
 These verify that the parser renders media markers as URL placeholders
-(e.g. ``[图1](https://...)``) without downloading any bytes.
+(e.g. ``[图1](https://...)``) without downloading any bytes, and that in
+``cache`` mode the placeholders omit URLs and ``media_items`` is populated.
 """
 from __future__ import annotations
 
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from onebot_adapter.config import MEDIA_DELIVERY_CACHE, AdapterConfig
 from onebot_adapter.onebot import parser
 
 
@@ -438,3 +440,202 @@ async def test_parser_reply_with_forward():
     assert event.reply_to_text is not None
     assert "[合并转发开始:1]" in event.reply_to_text
     assert "forward content" in event.reply_to_text
+
+
+# ── Cache mode ──────────────────────────────────────────────────────────
+
+
+def _config_with_cache() -> AdapterConfig:
+    """Build a minimal AdapterConfig with media_delivery_mode=cache."""
+    cfg = AdapterConfig()
+    cfg.media_delivery_mode = MEDIA_DELIVERY_CACHE
+    cfg.dm_user_filter_mode = "blacklist"  # allow all DMs
+    return cfg
+
+
+async def test_parser_cache_image_no_url_in_placeholder():
+    """In cache mode, image placeholders omit the URL but media_items is populated."""
+    result = await parser.parse_event(
+        _msg_event([{"type": "image", "data": {"url": "https://example.com/cat.jpg"}}]),
+        self_id="999",
+        group_require_mention=True,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    assert "[图1]" in event.text
+    assert "https://example.com/cat.jpg" not in event.text
+    assert len(event.media_items) == 1
+    assert event.media_items[0].kind == "image"
+    assert event.media_items[0].url == "https://example.com/cat.jpg"
+
+
+async def test_parser_cache_voice_populates_media_items():
+    """In cache mode, voice segments populate media_items."""
+    result = await parser.parse_event(
+        _msg_event([{"type": "record", "data": {"url": "https://example.com/voice.silk"}}]),
+        self_id="999",
+        group_require_mention=True,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    assert "[语音1]" in event.text
+    assert len(event.media_items) == 1
+    assert event.media_items[0].kind == "record"
+
+
+async def test_parser_cache_video_populates_media_items():
+    """In cache mode, video segments populate media_items."""
+    result = await parser.parse_event(
+        _msg_event([{"type": "video", "data": {"url": "https://example.com/clip.mp4"}}]),
+        self_id="999",
+        group_require_mention=True,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    assert "[视频1]" in event.text
+    assert len(event.media_items) == 1
+    assert event.media_items[0].kind == "video"
+
+
+async def test_parser_cache_file_with_url():
+    """In cache mode, file segments with URL populate media_items with file info."""
+    result = await parser.parse_event(
+        _msg_event([{"type": "file", "data": {"file": "report.pdf", "url": "https://example.com/report.pdf"}}]),
+        self_id="999",
+        group_require_mention=True,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    assert "[文件1:report.pdf]" in event.text
+    assert len(event.media_items) == 1
+    assert event.media_items[0].kind == "file"
+    assert event.media_items[0].name == "report.pdf"
+    assert event.media_items[0].url == "https://example.com/report.pdf"
+
+
+async def test_parser_cache_file_no_url_skipped():
+    """In cache mode, file segments without URL are skipped (no media_item)."""
+    result = await parser.parse_event(
+        _msg_event([{"type": "file", "data": {"file": "doc.zip", "file_id": "abc123"}}]),
+        self_id="999",
+        group_require_mention=True,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    # In cache mode the placeholder omits the URL entirely (no "(无URL)" suffix).
+    assert "[文件1:doc.zip]" in event.text
+    assert len(event.media_items) == 0
+
+
+async def test_parser_cache_mixed_media_indices():
+    """In cache mode, mixed media types get correct indices in media_items."""
+    result = await parser.parse_event(
+        _msg_event([
+            {"type": "text", "data": {"text": "look "}},
+            {"type": "image", "data": {"url": "https://example.com/a.jpg"}},
+            {"type": "text", "data": {"text": " and "}},
+            {"type": "video", "data": {"url": "https://example.com/v.mp4"}},
+        ]),
+        self_id="999",
+        group_require_mention=True,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    assert "[图1]" in event.text
+    assert "[视频2]" in event.text
+    assert len(event.media_items) == 2
+    assert event.media_items[0].kind == "image"
+    assert event.media_items[0].index == 0
+    assert event.media_items[1].kind == "video"
+    assert event.media_items[1].index == 1
+
+
+async def test_parser_cache_reply_populates_media_items():
+    """In cache mode, reply context media also populates media_items."""
+    mock_api = MagicMock()
+    quoted = {
+        "sender": {"user_id": 200, "nickname": "Other", "card": ""},
+        "message_id": 555,
+        "message": [{"type": "image", "data": {"url": "https://example.com/quoted.jpg"}}],
+        "real_seq": "10",
+    }
+    mock_api.get_msg = AsyncMock(return_value=quoted)
+    result = await parser.parse_event(
+        _msg_event([
+            {"type": "reply", "data": {"id": "555"}},
+            {"type": "text", "data": {"text": "reply"}},
+        ]),
+        self_id="999",
+        group_require_mention=True,
+        api=mock_api,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    assert event.reply_to_text is not None
+    assert "[图1]" in event.reply_to_text
+    assert len(event.media_items) == 1
+    assert event.media_items[0].kind == "image"
+    assert event.media_items[0].url == "https://example.com/quoted.jpg"
+
+
+async def test_parser_cache_forward_populates_media_items():
+    """In cache mode, forward media also populates media_items."""
+    mock_api = MagicMock()
+    mock_api.get_forward_msg = AsyncMock(return_value={
+        "messages": [
+            {
+                "sender": {"user_id": 300, "nickname": "Alice", "card": ""},
+                "message_id": 111,
+                "message": [{"type": "image", "data": {"url": "https://example.com/fwd.jpg"}}],
+            },
+        ],
+    })
+    result = await parser.parse_event(
+        _msg_event([{"type": "forward", "data": {"id": "fwd123"}}]),
+        self_id="999",
+        group_require_mention=True,
+        api=mock_api,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    event = result
+    assert "[图1]" in event.text
+    assert len(event.media_items) == 1
+    assert event.media_items[0].kind == "image"
+    assert event.media_items[0].url == "https://example.com/fwd.jpg"
+
+
+async def test_parser_passthrough_no_media_items():
+    """In passthrough mode (default), media_items is empty."""
+    result = await parser.parse_event(
+        _msg_event([{"type": "image", "data": {"url": "https://example.com/cat.jpg"}}]),
+        self_id="999",
+        group_require_mention=True,
+    )
+    assert result is not None
+    event = result
+    assert "[图1](https://example.com/cat.jpg)" in event.text
+    assert len(event.media_items) == 0
+
+
+async def test_parser_cache_mode_to_dict_includes_media_items():
+    """NormalizedEvent.to_dict serializes media_items."""
+    result = await parser.parse_event(
+        _msg_event([{"type": "image", "data": {"url": "https://example.com/cat.jpg"}}]),
+        self_id="999",
+        group_require_mention=True,
+        config=_config_with_cache(),
+    )
+    assert result is not None
+    d = result.to_dict()
+    assert "media_items" in d
+    assert len(d["media_items"]) == 1
+    assert d["media_items"][0]["kind"] == "image"
+    assert d["media_items"][0]["url"] == "https://example.com/cat.jpg"

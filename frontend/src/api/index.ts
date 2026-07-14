@@ -140,6 +140,8 @@ export interface Config {
   event_queue_enabled: boolean;
   event_queue_max_per_chat: number;
   event_queue_idle_timeout: number;
+  // ── 媒体投递 ──
+  media_delivery_mode: string;
   // ── /指令过滤 ──
   command_filter_enabled: boolean;
   command_filter_unknown: boolean;
