@@ -122,7 +122,6 @@ export interface Config {
   webui_port: number;
   webui_token?: string;
   webui_token_lifetime_hours: number;
-  webui_token_epoch: number;
   log_level: string;
   log_message_preview: number;
   log_file_enabled: boolean;

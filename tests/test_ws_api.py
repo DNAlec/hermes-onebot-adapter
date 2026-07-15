@@ -111,6 +111,52 @@ async def test_send_json_failure_raises_runtime_error():
     assert t._pending == {}
 
 
+async def test_send_json_failure_after_unregister_re_raises_connection_error():
+    """Race: unregister() sets ConnectionError on the future before send_json
+    raises.  The caller should see ConnectionError, not a masked RuntimeError.
+
+    This exercises the ``if fut.done(): raise fut.exception()`` branch in
+    ``request()``: the WS disconnects between ``_pick_ws()`` and
+    ``ws.send_json()``, so ``unregister`` rejects the future first, then
+    ``send_json`` fails on the closed WS.
+    """
+    t = WsApiTransport()
+    ws = _make_ws()
+
+    async def fail_send(frame):
+        # Simulate send failing because the WS is closed — but by the time
+        # this runs, unregister has already set ConnectionError on the future.
+        raise RuntimeError("ws is closed")
+
+    ws.send_json = AsyncMock(side_effect=fail_send)
+    t.register(ws)
+
+    # Pre-reject the future by unregistering *before* the request runs the
+    # send_json call.  We need the unregister to happen between _pick_ws and
+    # send_json.  Achieve this by making the request task start, then
+    # unregister, then let send_json fire.
+
+    # Actually, simpler: call unregister first to set ConnectionError, then
+    # call request. _pick_ws will raise RuntimeError (no active ws) — not the
+    # branch we want.  Instead, keep ws active but pre-set the future.
+    #
+    # The cleanest way: register ws, start request, intercept before send_json
+    # to unregister, then let send_json fail.
+    t.register(ws)
+
+    # Patch send_json to unregister ws first (simulating a concurrent close),
+    # then raise.
+    async def unregister_then_fail(frame):
+        t.unregister(ws)
+        raise RuntimeError("ws is closed")
+
+    ws.send_json = AsyncMock(side_effect=unregister_then_fail)
+
+    with pytest.raises(ConnectionError):
+        await t.request("get_login_info", {})
+    assert t._pending == {}
+
+
 # ── on_text interception ───────────────────────────────────────────────
 
 

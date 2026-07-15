@@ -540,12 +540,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         if mtype == "commands_refresh":
             logger.info("OneBot: commands_refresh requested by adapter, re-pushing snapshot")
-            asyncio.create_task(self._push_commands_snapshot())
+            self._spawn_push(self._push_commands_snapshot())
             return
 
         if mtype == "mode_refresh":
             logger.info("OneBot: mode_refresh requested by adapter, re-pushing hermes_mode_report")
-            asyncio.create_task(self._push_hermes_mode_report())
+            self._spawn_push(self._push_hermes_mode_report())
             return
 
         logger.debug("OneBot: unhandled frame type %s", mtype)
