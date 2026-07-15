@@ -111,11 +111,47 @@ def _atomic_write(config_path: Path, content: str) -> None:
     os.replace(tmp, config_path)
 
 
-def _dump_and_write(config_path: Path, data: Any) -> None:
-    """在文件锁保护下 dump 并原子写 config.yaml。"""
+def _read_modify_write(
+    hermes_install_dir: str | None,
+    *,
+    modify: Any,
+) -> None:
+    """在文件锁保护下完成读取-修改-写入,避免 TOCTOU 丢失更新。
+
+    *modify* 是一个接收已解析的 ``data`` (CommentedMap) 并就地修改它的 callable。
+    整个 read-modify-write 都在 ``_locked`` 作用域内,保证 Hermes 网关与适配器
+    的并发写入不会互相覆盖。
+
+    当目录不存在时抛 ``FileNotFoundError``;解析失败抛 ``HermesConfigParseError``。
+    """
+    config_path = resolve_hermes_config_path(hermes_install_dir)
+    if config_path is None:
+        raise FileNotFoundError(
+            f"Hermes 安装目录未配置或不存在: {hermes_install_dir!r}; "
+            "请先在 WebUI 设置 hermes_install_dir"
+        )
+
     with _locked(config_path):
+        # Read inside the lock so no concurrent writer can slip in between
+        # our read and our write.
+        yaml = _yaml()
+        if not config_path.exists():
+            from ruamel.yaml.comments import CommentedMap
+
+            data: Any = CommentedMap()
+        else:
+            try:
+                data = yaml.load(config_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Hermes config.yaml 解析失败 (%s): %s", config_path, exc)
+                raise HermesConfigParseError(
+                    f"Hermes config.yaml 解析失败 ({config_path}): {exc}"
+                ) from exc
+
+        modify(data)
+
         buf = io.StringIO()
-        _yaml().dump(data, buf)
+        yaml.dump(data, buf)
         _atomic_write(config_path, buf.getvalue())
 
 
@@ -125,55 +161,50 @@ def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str])
     - ``platform_toolsets.onebot`` = sorted(set(toolsets))
     - ``known_plugin_toolsets.onebot`` 至少含 ``"onebot"``(若已存在则补入,保留其它条目)
 
-    保留 config.yaml 其它顶层 key、注释和顺序。原子写。解析失败时抛
+    保留 config.yaml 其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁
+    保护下完成,避免与 Hermes 网关并发写互相覆盖。解析失败时抛
     :class:`HermesConfigParseError`,不覆盖原始文件。
     """
-    config_path = resolve_hermes_config_path(hermes_install_dir)
-    if config_path is None:
-        raise FileNotFoundError(
-            f"Hermes 安装目录未配置或不存在: {hermes_install_dir!r}; "
-            "请先在 WebUI 设置 hermes_install_dir"
-        )
+    def _modify(data: Any) -> None:
+        platform_toolsets = data.get("platform_toolsets")
+        if platform_toolsets is None:
+            from ruamel.yaml.comments import CommentedMap
 
-    data = read_config(hermes_install_dir)
+            platform_toolsets = CommentedMap()
+            data["platform_toolsets"] = platform_toolsets
+        platform_toolsets[PLATFORM] = sorted(set(toolsets))
 
-    platform_toolsets = data.get("platform_toolsets")
-    if platform_toolsets is None:
-        from ruamel.yaml.comments import CommentedMap
+        known = data.get("known_plugin_toolsets")
+        if known is None:
+            from ruamel.yaml.comments import CommentedMap
 
-        platform_toolsets = CommentedMap()
-        data["platform_toolsets"] = platform_toolsets
-    platform_toolsets[PLATFORM] = sorted(set(toolsets))
+            known = CommentedMap()
+            data["known_plugin_toolsets"] = known
+        existing = list(known.get(PLATFORM, []) or [])
+        if PLUGIN_TOOLSET_KEY not in existing:
+            existing.append(PLUGIN_TOOLSET_KEY)
+        known[PLATFORM] = sorted(set(existing))
 
-    known = data.get("known_plugin_toolsets")
-    if known is None:
-        from ruamel.yaml.comments import CommentedMap
-
-        known = CommentedMap()
-        data["known_plugin_toolsets"] = known
-    existing = list(known.get(PLATFORM, []) or [])
-    if PLUGIN_TOOLSET_KEY not in existing:
-        existing.append(PLUGIN_TOOLSET_KEY)
-    known[PLATFORM] = sorted(set(existing))
-
-    _dump_and_write(config_path, data)
+    _read_modify_write(hermes_install_dir, modify=_modify)
 
 
 def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
     """删除 ``platform_toolsets.onebot`` 条目(其它平台保留)。
 
     不删 ``known_plugin_toolsets`` —— 删除 known 会让 Hermes 把 onebot 当"新插件"
-    默认启用,与 reset 的"回到未配置状态"语义不符。
+    默认启用,与 reset 的"回到未配置状态"语义不符。整个 read-modify-write 在文件锁
+    保护下完成。
     """
     config_path = resolve_hermes_config_path(hermes_install_dir)
     if config_path is None or not config_path.exists():
         return
 
-    data = read_config(hermes_install_dir)
-    platform_toolsets = data.get("platform_toolsets")
-    if platform_toolsets is not None and PLATFORM in platform_toolsets:
-        del platform_toolsets[PLATFORM]
-        _dump_and_write(config_path, data)
+    def _modify(data: Any) -> None:
+        platform_toolsets = data.get("platform_toolsets")
+        if platform_toolsets is not None and PLATFORM in platform_toolsets:
+            del platform_toolsets[PLATFORM]
+
+    _read_modify_write(hermes_install_dir, modify=_modify)
 
 
 # ── 顶层 group_sessions_per_user 读写(供 WebUI 管理)────────────────────
@@ -202,19 +233,14 @@ def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
 def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -> None:
     """写入 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
 
-    保留其它顶层 key、注释和顺序。原子写。修改后需重启 Hermes 网关生效。
+    保留其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁保护下完成。
+    修改后需重启 Hermes 网关生效。
     """
-    config_path = resolve_hermes_config_path(hermes_install_dir)
-    if config_path is None:
-        raise FileNotFoundError(
-            f"Hermes 安装目录未配置或不存在: {hermes_install_dir!r}; "
-            "请先在 WebUI 设置 hermes_install_dir"
-        )
 
-    data = read_config(hermes_install_dir)
-    data["group_sessions_per_user"] = bool(value)
+    def _modify(data: Any) -> None:
+        data["group_sessions_per_user"] = bool(value)
 
-    _dump_and_write(config_path, data)
+    _read_modify_write(hermes_install_dir, modify=_modify)
 
 
 # ── 工具集列表(从 Hermes 安装目录 import)──────────────────────────────

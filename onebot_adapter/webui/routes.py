@@ -96,18 +96,23 @@ def _login(store: ConfigStore, state: dict[str, Any]):
     window and receives ``429 Too Many Requests``. State lives in
     ``state["login_failures"]`` (in-memory; cleared on restart).
 
-    The client IP is taken from ``X-Forwarded-For`` (first hop) when present
-    so that deployments behind a reverse proxy rate-limit the *real* client
-    rather than the shared proxy IP. Without ``X-Forwarded-For`` the direct
-    ``request.remote`` is used.
+    The client IP is taken from ``X-Forwarded-For`` (first hop) **only** when
+    ``cfg.webui_trust_proxy_headers`` is True — i.e. the adapter is explicitly
+    deployed behind a trusted reverse proxy. Without the flag (default), the
+    direct ``request.remote`` is used; this prevents a non-proxied client from
+    spoofing ``X-Forwarded-For`` to bypass the rate limit.
     """
     failures: dict[str, tuple[int, float]] = state.setdefault("login_failures", {})
 
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        # Prefer the first X-Forwarded-For hop for reverse-proxy deployments;
-        # fall back to the direct peer for non-proxied setups.
-        xff = request.headers.get("X-Forwarded-For", "")
-        ip = xff.split(",")[0].strip() if xff.strip() else (request.remote or "unknown")
+        # Use X-Forwarded-For only when the user has explicitly opted in via
+        # config; otherwise the direct peer IP is used to prevent spoofing.
+        ip: str
+        if store.config.webui_trust_proxy_headers:
+            xff = request.headers.get("X-Forwarded-For", "")
+            ip = xff.split(",")[0].strip() if xff.strip() else (request.remote or "unknown")
+        else:
+            ip = request.remote or "unknown"
         now = time.time()
         # Garbage-collect expired entries to keep the dict bounded.
         for k in list(failures):
@@ -426,6 +431,26 @@ def _get_groups(store: ConfigStore):
     return handler
 
 
+def _coerce_group_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce WebUI-supplied group fields to their expected types.
+
+    The existing ``GroupConfig.from_dict`` drops unknown keys but doesn't
+    type-check known ones. A WebUI bug or malicious payload could push
+    ``admins: "123"`` (string) instead of ``["123"]`` (list), which would
+    crash ``is_admin()`` at lookup time. This function coerces list fields
+    to lists of strings and ``command_permissions`` to a str→str dict.
+    """
+    for list_field in ("admins", "trigger_keywords", "group_user_list"):
+        val = data.get(list_field)
+        if val is not None and not isinstance(val, list):
+            data[list_field] = [str(val)]
+    # Coerce command_permissions values to strings
+    cp = data.get("command_permissions")
+    if cp is not None and isinstance(cp, dict):
+        data["command_permissions"] = {str(k): str(v) for k, v in cp.items()}
+    return data
+
+
 def _put_group(store: ConfigStore):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         group_id = request.match_info.get("group_id", "")
@@ -435,10 +460,14 @@ def _put_group(store: ConfigStore):
             data = await request.json()
         except Exception:
             return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        data = _coerce_group_fields(data)
         gc = GroupConfig.from_dict({**data, "group_id": str(group_id)})
         cfg = store.config
         new_groups = {**cfg.groups, str(group_id): gc.to_dict()}
-        store.patch(groups=new_groups)
+        try:
+            store.patch(groups=new_groups)
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         save_config(store.config)
         return aiohttp.web.json_response(gc.to_dict())
 

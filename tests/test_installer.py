@@ -131,3 +131,71 @@ def test_uninstall_preserves_other_env_vars(tmp_path):
     content = env.read_text()
     assert "OTHER_VAR=stay" in content
     assert "ONEBOT_ADAPTER_URL" not in content
+
+
+# ── _write_env quoting + atomic write ──────────────────────────────────────
+
+
+def test_write_env_quotes_values_with_spaces(tmp_path):
+    """Values containing spaces are quoted so dotenv parsers read them correctly."""
+    env_path = tmp_path / ".env"
+    installer._write_env(env_path, {"KEY": "value with spaces"})
+    content = env_path.read_text()
+    assert 'KEY="value with spaces"' in content
+
+
+def test_write_env_preserves_plain_values(tmp_path):
+    """Values without special characters are written bare for readability."""
+    env_path = tmp_path / ".env"
+    installer._write_env(env_path, {"URL": "ws://127.0.0.1:18810/hermes"})
+    content = env_path.read_text()
+    assert "URL=ws://127.0.0.1:18810/hermes" in content
+    assert '"' not in content.split("URL=")[1].split("\n")[0]
+
+
+def test_read_env_strips_quotes(tmp_path):
+    """_read_env strips surrounding quotes so round-trip writes are idempotent."""
+    env_path = tmp_path / ".env"
+    env_path.write_text('KEY="quoted value"\nBARE=plain\n')
+    env = installer._read_env(env_path)
+    assert env["KEY"] == "quoted value"
+    assert env["BARE"] == "plain"
+
+
+def test_write_env_roundtrip_idempotent(tmp_path):
+    """Read → write → read produces the same values (no quote accumulation)."""
+    env_path = tmp_path / ".env"
+    env_path.write_text('KEY="value with spaces"\n')
+    # Read, re-write (no changes), read again
+    env = installer._read_env(env_path)
+    installer._write_env(env_path, env)
+    env2 = installer._read_env(env_path)
+    assert env2["KEY"] == "value with spaces"
+    # File should still have exactly one layer of quotes
+    content = env_path.read_text()
+    assert content.count('"') == 2  # exactly one pair of quotes
+
+
+def test_write_env_atomic_no_tmp_left(tmp_path):
+    """After a successful write, no .tmp file is left behind."""
+    env_path = tmp_path / ".env"
+    installer._write_env(env_path, {"K": "v"})
+    assert env_path.exists()
+    assert not (tmp_path / ".env.tmp").exists()
+
+
+# ── install path safety ────────────────────────────────────────────────────
+
+
+def test_install_rejects_system_path():
+    """install() should refuse to write to system paths like /etc."""
+    result = installer.install("/etc/hermes-test")
+    assert "error" in result
+    assert "$HOME" in result["error"] or "outside" in result["error"]
+
+
+def test_uninstall_rejects_system_path():
+    """uninstall() should refuse to operate on system paths."""
+    result = installer.uninstall("/usr/local/hermes-test")
+    assert "error" in result
+    assert "$HOME" in result["error"] or "outside" in result["error"]

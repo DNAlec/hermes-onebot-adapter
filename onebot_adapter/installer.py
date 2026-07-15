@@ -53,7 +53,25 @@ def _env_path(hermes_dir: Path) -> Path:
     return hermes_dir / ".env"
 
 
+def _strip_quotes(value: str) -> str:
+    """Strip a single layer of surrounding quotes from a .env value.
+
+    Handles both ``"..."`` and ``'...'`` quoting. If the value is not
+    quoted, returns it unchanged.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 def _read_env(env_path: Path) -> dict[str, str]:
+    """Read a .env file into a dict. Comments and blank lines are dropped.
+
+    Surrounding quotes (``"..."`` or ``'...'``) are stripped so the returned
+    value is the raw string. This makes read-modify-write idempotent: the
+    writer re-quotes values that need it, so a round-trip doesn't accumulate
+    extra layers of quoting.
+    """
     if not env_path.exists():
         return {}
     env: dict[str, str] = {}
@@ -62,22 +80,35 @@ def _read_env(env_path: Path) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
-        env[k.strip()] = v.strip()
+        env[k.strip()] = _strip_quotes(v.strip())
     return env
 
 
 def _write_env(env_path: Path, updates: dict[str, str]) -> dict[str, str]:
-    """Merge *updates* into an existing env file and persist.
+    """Merge *updates* into an existing env file and persist atomically.
 
-    Returns the final env dict.
+    Values that contain spaces or shell-special characters are quoted with
+    double quotes to ensure correct parsing by dotenv loaders. The write is
+    atomic (tmp + ``os.replace``) so a crash mid-write doesn't corrupt the
+    existing .env.  Returns the final env dict.
     """
     env = _read_env(env_path)
     env.update(updates)
     lines: list[str] = []
     for k, v in env.items():
-        lines.append(f"{k}={v}")
+        # Quote values that contain spaces or special shell characters to
+        # ensure correct dotenv parsing. Values without special chars are
+        # written bare for readability.
+        if v and any(c in v for c in (" ", "\t", "'", '"', "#", "$")):
+            # Escape any embedded double quotes
+            escaped = v.replace('"', '\\"')
+            lines.append(f'{k}="{escaped}"')
+        else:
+            lines.append(f"{k}={v}")
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, env_path)
     return env
 
 

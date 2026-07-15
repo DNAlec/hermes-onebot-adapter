@@ -173,6 +173,7 @@ class AdapterConfig:
     webui_token: str = ""  # WebUI 登录鉴权 token,自动生成,请勿清空
     webui_token_lifetime_hours: int = 168  # 登录有效期(小时),最小 1;默认 168(7 天)
     webui_token_epoch: int = 0  # token 纪元,改 lifetime 时 bump 使所有旧 session token 立即失效
+    webui_trust_proxy_headers: bool = False  # 信任 X-Forwarded-For(仅反向代理时开启)
     log_level: str = "INFO"
     log_message_preview: int = 100
     log_file_enabled: bool = True
@@ -465,6 +466,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "webui_token": "WebUI 登录鉴权 token,自动生成,请勿清空",
         "webui_token_lifetime_hours": "WebUI 登录有效期(小时),最小 1,默认 168(7天);改后已登录会话立即失效",
         "webui_token_epoch": "token 纪元(内部状态,勿手动修改);改 lifetime 时自动递增使旧 session token 失效",
+        "webui_trust_proxy_headers": "信任 X-Forwarded-For 获取客户端 IP(仅反向代理时开启;"
+                                     "直连开启会被伪造 IP 绕过登录限流)",
         "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",

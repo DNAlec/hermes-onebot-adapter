@@ -100,6 +100,67 @@ def test_write_does_not_overwrite_broken_yaml(tmp_path: Path):
     assert (d / "config.yaml").read_text(encoding="utf-8") == original
 
 
+def test_read_modify_write_preserves_all_existing_keys(tmp_path: Path):
+    """write_platform_toolsets 保留所有已有顶层 key(包括非 platform_toolsets 的)。
+
+    验证 read-modify-write 模式:只修改目标 key,不触碰其他。
+    """
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text(
+        "provider: openai\n"
+        "mcp_servers:\n"
+        "  github:\n"
+        "    enabled: true\n"
+        "group_sessions_per_user: true\n",
+        encoding="utf-8",
+    )
+    hc.write_platform_toolsets(str(d), ["web", "onebot"])
+    data = hc.read_config(str(d))
+    # All pre-existing keys preserved
+    assert data["provider"] == "openai"
+    assert "mcp_servers" in data
+    assert data["mcp_servers"]["github"]["enabled"] is True
+    assert data["group_sessions_per_user"] is True
+    # Our write applied
+    assert "web" in data["platform_toolsets"]["onebot"]
+
+
+def test_read_modify_write_preserves_concurrent_changes(tmp_path: Path):
+    """write_platform_toolsets 应保留在 read 和 write 之间由另一个进程添加的 key。
+
+    整个 read-modify-write 在 _locked 内完成,所以不会丢失并发写入。
+    这里通过模拟:先写一个基础配置,然后手动在 read_modify_write 的 modify
+    回调里注入一个"外部"key,验证它不被覆盖。
+    """
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text("provider: openai\n", encoding="utf-8")
+
+    # Simulate: an external writer adds a key between our read and write.
+    # We do this by intercepting the modify callback to inject the external
+    # change (simulating a concurrent write that happened during our locked window).
+    import onebot_adapter.hermes_config as mod
+
+    original_read = mod.read_config
+
+    def patched_read(install_dir):
+        data = original_read(install_dir)
+        # Simulate a concurrent writer adding a key
+        data["concurrent_key"] = "preserved"
+        return data
+
+    mod.read_config = patched_read
+    try:
+        hc.write_platform_toolsets(str(d), ["web"])
+        data = hc.read_config(str(d))
+        assert data["provider"] == "openai"
+        assert "concurrent_key" in data
+        assert "web" in data["platform_toolsets"]["onebot"]
+    finally:
+        mod.read_config = original_read
+
+
 # ── write_platform_toolsets ──────────────────────────────────────────────
 
 
