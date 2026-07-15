@@ -30,6 +30,16 @@ def set_adapter(adapter: Any) -> None:
     _adapter = adapter
 
 
+# Per-message context (admin, group_id, user_id) set by _dispatch_event.
+# Imported from adapter.py; the contextvar is defined there because
+# _dispatch_event sets it before calling handle_message.
+try:
+    from .adapter import _msg_context
+except ImportError:
+    import contextvars as _contextvars_mod
+    _msg_context = _contextvars_mod.ContextVar("_msg_context", default=None)
+
+
 def _api_call(action: str, **params: Any) -> Any:
     """Return an awaitable that calls the adapter's _api_call method."""
     if _adapter is None:
@@ -89,18 +99,26 @@ def _check_admin() -> str | None:
     """Return an error string if the current user is not an admin."""
     if _adapter is None:
         return "OneBot adapter not initialized"
-    if not getattr(_adapter, "_current_is_admin", False):
+    ctx = _msg_context.get()
+    is_admin = ctx[0] if ctx is not None else getattr(_adapter, "_current_is_admin", False)
+    if not is_admin:
         return "此操作需要管理员权限"
     return None
 
 
 def _current_group_id() -> str:
     """获取当前消息的 group_id(供工具传给适配器侧做 real_seq→message_id 转换)。"""
+    ctx = _msg_context.get()
+    if ctx is not None:
+        return ctx[1]
     return getattr(_adapter, "_current_group_id", "") if _adapter else ""
 
 
 def _current_user_id() -> str:
     """获取当前消息的 user_id(DM 场景下 SeqMap 用 user_id 作 scope_id)。"""
+    ctx = _msg_context.get()
+    if ctx is not None:
+        return ctx[2]
     return getattr(_adapter, "_current_user_id", "") if _adapter else ""
 
 
@@ -682,7 +700,11 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_get_group_msg_history", "获取群历史消息记录。",
         {
             "group_id": _int("群号"),
-            "message_seq": _int("起始消息ID(0为最新;注意此处传消息ID而非群内序号)"),
+            "message_seq": _int(
+                "起始消息ID(0为最新)。注意:此参数名虽为message_seq但实际填"
+                "message_id(消息ID),不是群内序号real_seq;请用onebot_get_msg"
+                "获取单条消息时传real_seq。"
+            ),
             "count": _int("获取条数（默认20）"),
         },
         ["group_id"],

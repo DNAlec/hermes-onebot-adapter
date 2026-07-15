@@ -5,8 +5,6 @@ No I/O, no downloads — just shape extraction so the parser stays readable.
 """
 from __future__ import annotations
 
-from typing import Any
-
 
 def extract_text(segments: list[dict]) -> str:
     """Concatenate text from text/at/file segments into a plain string."""
@@ -87,53 +85,6 @@ def extract_text_with_placeholders(
     return "".join(parts).strip(), markers
 
 
-def extract_image_urls(segments: list[dict]) -> list[str]:
-    urls: list[str] = []
-    for s in segments:
-        if s.get("type") == "image":
-            data = s.get("data", {}) or {}
-            url = data.get("url") or data.get("file", "")
-            if url:
-                urls.append(url)
-    return urls
-
-
-def extract_record_url(segments: list[dict]) -> str | None:
-    for s in segments:
-        if s.get("type") == "record":
-            data = s.get("data", {}) or {}
-            return data.get("url") or data.get("file")
-    return None
-
-
-def extract_video_urls(segments: list[dict]) -> list[str]:
-    urls: list[str] = []
-    for s in segments:
-        if s.get("type") == "video":
-            data = s.get("data", {}) or {}
-            url = data.get("url") or data.get("file", "")
-            if url:
-                urls.append(url)
-    return urls
-
-
-def extract_files(segments: list[dict]) -> list[dict[str, Any]]:
-    """Extract file segments. Returns list of {name, file_id, url, size}."""
-    result: list[dict[str, Any]] = []
-    for s in segments:
-        if s.get("type") == "file":
-            data = s.get("data", {}) or {}
-            result.append(
-                {
-                    "name": data.get("file") or data.get("name", "未知文件"),
-                    "file_id": data.get("file_id", ""),
-                    "url": data.get("url", ""),
-                    "size": data.get("file_size", 0),
-                }
-            )
-    return result
-
-
 def extract_reply_id(segments: list[dict]) -> int | None:
     for s in segments:
         if s.get("type") == "reply":
@@ -193,20 +144,6 @@ def has_bot_mention_first(segments: list[dict], self_id: str) -> bool:
         return False
     s = segments[i]
     return s.get("type") == "at" and str(s.get("data", {}).get("qq")) == self_id
-
-
-def strip_bot_mention(segments: list[dict], self_id: str) -> list[dict]:
-    """Remove *all* @bot segments from *segments* (legacy helper).
-
-    Kept for backward compatibility and ad-hoc use (e.g. tests). The parser
-    now uses :func:`strip_first_bot_mention` instead, which only strips a
-    leading @bot mention so non-leading @bot mentions are preserved for
-    message completeness.
-    """
-    return [
-        s for s in segments
-        if not (s.get("type") == "at" and str(s.get("data", {}).get("qq")) == self_id)
-    ]
 
 
 def strip_first_bot_mention(segments: list[dict], self_id: str) -> list[dict]:

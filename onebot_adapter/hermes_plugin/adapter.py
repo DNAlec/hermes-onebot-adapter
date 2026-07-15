@@ -13,6 +13,7 @@ Configuration (env vars or config.yaml ``platforms.onebot.extra``):
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -28,6 +29,15 @@ import aiohttp
 from .markdown import strip_markdown
 
 logger = logging.getLogger(__name__)
+
+# Per-message context for tool handlers.  Set in _dispatch_event so that
+# concurrent message processing (multiple _dispatch_event tasks) each see
+# their own admin/group/user context without racing on instance attributes.
+# Tools read via _current_*() helpers in onebot_tools.py which check the
+# contextvar first, then fall back to the instance attribute for compat.
+_msg_context: contextvars.ContextVar[tuple[bool, str, str] | None] = contextvars.ContextVar(
+    "_msg_context", default=None,
+)
 
 # ── Lazy imports from the Hermes host ────────────────────────────────────
 # These live in the main Hermes repo and are only available when the plugin
@@ -87,7 +97,12 @@ _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 
 
 def _ext_from_url(url: str, fallback: str = "") -> str:
-    """Extract a media extension from a URL's path, or *fallback* if none."""
+    """Extract a media extension from a URL's path, or *fallback* if none.
+
+    Only returns extensions that match a known media type (image/audio/video)
+    so non-media URLs (``.php``, ``.exe``, etc.) fall back to the caller's
+    default.  The cache helpers still validate actual content.
+    """
     if not url:
         return fallback
     # Strip query/fragment then take the last path segment.
@@ -96,8 +111,7 @@ def _ext_from_url(url: str, fallback: str = "") -> str:
     if dot < 0:
         return fallback
     ext = path[dot:].lower()
-    # Accept any 2-5 char extension; let the cache helpers validate content.
-    if 2 <= len(ext) <= 6:
+    if ext in _IMAGE_EXTS or ext in _AUDIO_EXTS or ext in _VIDEO_EXTS:
         return ext
     return fallback
 
@@ -184,7 +198,13 @@ def _basic_ssrf_guard(url: str) -> None:
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        # Not an IP literal (hostname) — leave to the host's full guard.
+        # Not an IP literal (hostname).  The host's full guard (is_safe_url)
+        # would handle DNS rebinding and redirect chains, but it's not
+        # available in this fallback path.  Log a warning so that standalone
+        # deployments using the fallback guard are aware hostname-based SSRF
+        # is not blocked here — the adapter's media download is opt-in
+        # (media_delivery_mode == "cache") which limits exposure.
+        logger.debug("SSRF fallback guard: hostname %r not checked (host guard unavailable)", host)
         return
     if (
         ip.is_private
@@ -522,15 +542,19 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         text = data.get("text", "")
 
-        # Set admin context for tool gating — from event (computed by adapter)
-        self._current_is_admin = data.get("is_admin", False)
-        # Set current group_id/user_id for tool param (real_seq→message_id 转换在适配器侧)
+        # Per-message context for tool gating.  Stored in a contextvar (set
+        # in _dispatch_event) so concurrent message tasks don't race on
+        # instance attributes.  We still set the instance attributes for
+        # backward compat with code that reads them directly.
+        is_admin = data.get("is_admin", False)
         chat_id = data.get("chat_id", "")
-        self._current_group_id = ""
-        self._current_user_id = str(data.get("user_id", ""))
+        user_id = str(data.get("user_id", ""))
+        group_id = ""
         if chat_id.startswith("group:"):
-            # group:42 或 group:42:user:100 → 取群号
-            self._current_group_id = chat_id.split(":")[1]
+            group_id = chat_id.split(":")[1]
+        self._current_is_admin = is_admin
+        self._current_group_id = group_id
+        self._current_user_id = user_id
 
         timestamp = datetime.fromtimestamp(data["timestamp"]) if data.get("timestamp") else datetime.now()
 
@@ -601,15 +625,23 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     async def _dispatch_event(self, message_event: Any) -> None:
         """Run ``handle_message`` off the receive loop.
 
+        Sets the per-message contextvar so tool handlers read the correct
+        admin/group/user context for *this* message, even when multiple
+        messages are being processed concurrently (each gets its own
+        ``_dispatch_event`` task with its own contextvar value).
+
         Exceptions are logged instead of propagating — ``_receive_loop``
         already swallows per-frame exceptions, and a background task that
         raises would otherwise surface as "Task exception was never
         retrieved".
         """
+        token = _msg_context.set((self._current_is_admin, self._current_group_id, self._current_user_id))
         try:
             await self.handle_message(message_event)
         except Exception:
             logger.exception("OneBot: handle_message raised in background task")
+        finally:
+            _msg_context.reset(token)
 
     async def _cache_media_items(self, raw_items: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
         """Download media referenced by *raw_items* and cache them locally.
@@ -721,11 +753,11 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if not session_key:
             return
         # generation ties the callback to the current gateway run so stale
-        # runs cannot fire (and clear) a fresher run's idle slot.
-        generation = None
-        active = getattr(self, "_active_sessions", {}).get(session_key)
-        if active is not None:
-            generation = getattr(active, "_hermes_run_generation", None)
+        # runs cannot fire (and clear) a fresher run's idle slot.  We read
+        # the generation at fire-time (inside _fire_idle) rather than at
+        # registration time, because handle_message may bump the generation
+        # (e.g. /stop /new /reset) and we want the callback tied to the run
+        # that actually processes this message.
         gid = chat_id[len("group:"):]
         if self._ws is None or self._ws.closed:
             return
@@ -748,7 +780,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 logger.warning("OneBot: idle frame send failed (ws closed?) gid=%s", gid, exc_info=True)
 
         try:
-            self.register_post_delivery_callback(session_key, _fire_idle, generation=generation)
+            # Pass generation=None — the host will tie the callback to the
+            # current run's generation at pop time.  Reading it here would
+            # race with handle_message bumping it (e.g. interrupt commands).
+            self.register_post_delivery_callback(session_key, _fire_idle, generation=None)
         except Exception:
             logger.warning("OneBot: register_post_delivery_callback failed gid=%s", gid, exc_info=True)
 
@@ -867,42 +902,45 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
     # ── Outbound send helpers ────────────────────────────────────────────
 
-    async def _request(self, action: str, **payload: Any) -> dict[str, Any]:
-        """Send a ``send`` frame and await the matching ``result``.
+    async def _rpc(self, frame_type: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send a ``send`` or ``api_call`` frame and await the matching ``result``.
 
-        Concurrency is bounded by ``_MAX_INFLIGHT_SENDS`` so that Gateway
-        ``_send_with_retry`` retry storms cannot pile up unlimited parallel
-        sends on the serial OneBot WS (which would amplify congestion and
-        cause more timeouts → more retries, a death spiral).
+        Shared implementation for ``_request`` (send actions) and ``_api_call``
+        (OneBot API calls).  Concurrency is bounded by ``_send_semaphore`` so
+        that Gateway retry storms cannot pile up unlimited parallel sends on
+        the serial OneBot WS.
         """
         async with self._send_semaphore:
             if not self._ws or self._ws.closed:
                 return {"success": False, "error": "adapter WS not connected"}
             req_id = str(uuid.uuid4())
-            msg: dict[str, Any] = {
-                "type": "send",
-                "action": action,
-                "req_id": req_id,
-            }
-            msg.update(payload)
+            msg: dict[str, Any] = {"type": frame_type, "action": action, "req_id": req_id}
+            if frame_type == "api_call":
+                msg["params"] = payload
+            else:
+                msg.update(payload)
             fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._futures[req_id] = fut
             logger.debug(
-                "OneBot plugin _request: action=%s req_id=%s payload_keys=%s frame=%s",
-                action, req_id, list(payload.keys()),
+                "OneBot plugin _rpc: frame_type=%s action=%s req_id=%s payload_keys=%s frame=%s",
+                frame_type, action, req_id, list(payload.keys()),
                 json.dumps(msg, ensure_ascii=False)[:2000],
             )
             await self._ws.send_json(msg)
             try:
                 result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
                 logger.debug(
-                    "OneBot plugin _request result: action=%s req_id=%s success=%s message_id=%s",
-                    action, req_id, result.get("success"), result.get("message_id"),
+                    "OneBot plugin _rpc result: action=%s req_id=%s success=%s",
+                    action, req_id, result.get("success"),
                 )
                 return result
             except TimeoutError:
                 self._futures.pop(req_id, None)
                 return {"success": False, "error": f"timeout waiting for {action} result"}
+
+    async def _request(self, action: str, **payload: Any) -> dict[str, Any]:
+        """Send a ``send`` frame and await the matching ``result``."""
+        return await self._rpc("send", action, payload)
 
     # ── Required abstract methods ────────────────────────────────────────
 
@@ -984,6 +1022,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             payload: dict[str, Any] = {"chat_id": chat_id, "audio_path": audio_path}
             if reply_to:
                 payload["reply_to"] = reply_to
+            if caption:
+                payload["caption"] = strip_markdown(caption)
             result = await self._request("send_voice", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
@@ -1027,6 +1067,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             payload: dict[str, Any] = {"chat_id": chat_id, "file_path": file_path}
             if file_name:
                 payload["filename"] = file_name
+            if reply_to:
+                payload["reply_to"] = reply_to
+            if caption:
+                payload["caption"] = strip_markdown(caption)
             result = await self._request("send_document", **payload)
             return _result_to_send_result(result)
         except Exception as exc:
@@ -1034,28 +1078,16 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             return SendResult(success=False, error=str(exc))
 
     async def _api_call(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        async with self._send_semaphore:
-            if not self._ws or self._ws.closed:
-                return {"success": False, "error": "adapter WS not connected"}
-            logger.debug("OneBot plugin api_call: action=%s", action)
-            logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
-            req_id = str(uuid.uuid4())
-            fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-            self._futures[req_id] = fut
-            await self._ws.send_json({
-                "type": "api_call",
-                "action": action,
-                "req_id": req_id,
-                "params": params,
-            })
-            try:
-                result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
-                logger.debug("OneBot plugin api_call result: action=%s success=%s data=%s",
-                             action, result.get("success"), json.dumps(result.get("data"), ensure_ascii=False)[:2000])
-                return result
-            except TimeoutError:
-                self._futures.pop(req_id, None)
-                return {"success": False, "error": f"timeout waiting for {action}"}
+        logger.debug("OneBot plugin api_call: action=%s", action)
+        logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
+        result = await self._rpc("api_call", action, params)
+        if result.get("success"):
+            logger.debug(
+                "OneBot plugin api_call result: action=%s success=%s data=%s",
+                action, result.get("success"),
+                json.dumps(result.get("data"), ensure_ascii=False)[:2000],
+            )
+        return result
 
     # ── Typing (no-op, OneBot has no typing indicator) ───────────────────
 
@@ -1104,11 +1136,12 @@ def validate_config(config) -> bool:
 def is_connected(config) -> bool:
     """Check whether the adapter URL and token are configured.
 
-    Note: this validates the *configuration* (is the adapter reachable in
-    principle), not the live WS connection status.  A configured-but-not-
-    running adapter will still return True.  The actual liveness is tracked
-    by ``_is_connected`` on the adapter instance and surfaced via the
-    ``ready`` frame's ``onebot_connected`` field.
+    Part of the Hermes plugin registration contract (``register_platform``).
+    Validates the *configuration* (is the adapter reachable in principle),
+    not the live WS connection status.  A configured-but-not-running adapter
+    will still return True.  Actual liveness is tracked by ``_is_connected``
+    on the adapter instance and surfaced via the ``ready`` frame's
+    ``onebot_connected`` field.
     """
     return validate_config(config)
 

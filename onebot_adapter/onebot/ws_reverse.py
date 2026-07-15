@@ -9,6 +9,8 @@ from typing import Any
 import aiohttp
 import aiohttp.web
 
+from onebot_adapter._async_utils import bearer_token
+from onebot_adapter._async_utils import log_task_exception as _log_task_exc
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot.handler import OneBotHandler
 from onebot_adapter.onebot.name_resolver import NameResolver
@@ -64,7 +66,7 @@ class OneBotReverseServer:
         app.router.add_get(self._config.onebot_reverse_ws_path, self._handler_endpoint)
 
     async def _handler_endpoint(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
-        token = request.query.get("token") or _bearer(request.headers.get("Authorization", ""))
+        token = request.query.get("token") or bearer_token(request.headers.get("Authorization", ""))
         if not self._config.onebot_ws_token or token != self._config.onebot_ws_token:
             return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         ws = aiohttp.web.WebSocketResponse()
@@ -110,17 +112,3 @@ class OneBotReverseServer:
         if self._text_tasks:
             await asyncio.gather(*self._text_tasks, return_exceptions=True)
         self._text_tasks.clear()
-
-
-def _bearer(header: str) -> str:
-    if header.lower().startswith("bearer "):
-        return header[7:].strip()
-    return ""
-
-
-def _log_task_exc(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("OneBot reverse background task crashed: %r", exc, exc_info=exc)

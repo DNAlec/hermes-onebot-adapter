@@ -115,9 +115,10 @@ def _login(store: ConfigStore, state: dict[str, Any]):
             ip = request.remote or "unknown"
         now = time.time()
         # Garbage-collect expired entries to keep the dict bounded.
+        # Clear any entry whose ban window has passed, regardless of fail count.
         for k in list(failures):
             fails, first_ts = failures[k]
-            if fails < _LOGIN_MAX_FAILS and now - first_ts > _LOGIN_BAN_SECONDS:
+            if now - first_ts > _LOGIN_BAN_SECONDS:
                 del failures[k]
         # Check ban
         entry = failures.get(ip)
@@ -288,8 +289,14 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             errors = new_cfg.validate()
             if errors:
                 return aiohttp.web.json_response({"error": "; ".join(errors)}, status=400)
+            # Persist to disk first so that a save failure doesn't leave
+            # in-memory state diverged from on-disk state (listeners would
+            # have already applied the new config but the file would be stale).
+            try:
+                save_config(new_cfg)
+            except Exception as exc:
+                return aiohttp.web.json_response({"error": f"failed to save config: {exc}"}, status=500)
             store.update(new_cfg)
-            save_config(new_cfg)
         except Exception as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
         return aiohttp.web.json_response(_public_config(new_cfg))
@@ -572,6 +579,12 @@ def _put_hermes_tools(store: ConfigStore):
         toolsets = data.get("toolsets", []) or []
         mcp_servers = data.get("mcp_servers", []) or []
         no_mcp = bool(data.get("no_mcp", False))
+
+        # no_mcp 与 mcp_servers 互斥:no_mcp 表示屏蔽全部 MCP,不应同时启用具体 MCP servers
+        if no_mcp and mcp_servers:
+            return aiohttp.web.json_response(
+                {"error": "no_mcp 与 mcp_servers 互斥,不能同时设置"}, status=400,
+            )
 
         # 校验:每个 key 必须在 configurable ∪ plugin_keys ∪ mcp_names 中
         available = list_available_toolsets(cfg.hermes_install_dir or None)

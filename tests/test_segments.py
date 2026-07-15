@@ -16,34 +16,6 @@ def test_extract_text_with_file():
     assert seg.extract_text(segs) == "[文件: doc.pdf]"
 
 
-def test_extract_image_urls():
-    segs = [
-        {"type": "image", "data": {"url": "http://a/1.jpg"}},
-        {"type": "image", "data": {"file": "http://a/2.png"}},
-        {"type": "text", "data": {"text": "skip"}},
-    ]
-    assert seg.extract_image_urls(segs) == ["http://a/1.jpg", "http://a/2.png"]
-
-
-def test_extract_record_url():
-    segs = [{"type": "record", "data": {"url": "http://a/v.silk"}}]
-    assert seg.extract_record_url(segs) == "http://a/v.silk"
-
-
-def test_extract_video_urls():
-    segs = [{"type": "video", "data": {"url": "http://a/v.mp4"}}]
-    assert seg.extract_video_urls(segs) == ["http://a/v.mp4"]
-
-
-def test_extract_files():
-    segs = [{"type": "file", "data": {"file": "f.txt", "file_id": "fid1", "url": "http://a/f", "file_size": 100}}]
-    files = seg.extract_files(segs)
-    assert len(files) == 1
-    assert files[0]["name"] == "f.txt"
-    assert files[0]["url"] == "http://a/f"
-    assert files[0]["file_id"] == "fid1"
-
-
 def test_extract_reply_id():
     assert seg.extract_reply_id([{"type": "reply", "data": {"id": 42}}]) == 42
     assert seg.extract_reply_id([{"type": "text", "data": {"text": "x"}}]) is None
@@ -72,7 +44,7 @@ def test_extract_forward_content():
     assert seg.extract_forward_content(segs_two) == [{"a": 1}]
 
 
-def test_has_and_strip_bot_mention():
+def test_has_bot_mention():
     segs = [
         {"type": "at", "data": {"qq": "111"}},
         {"type": "at", "data": {"qq": "999"}},
@@ -80,9 +52,6 @@ def test_has_and_strip_bot_mention():
     ]
     assert seg.has_bot_mention(segs, "999") is True
     assert seg.has_bot_mention(segs, "888") is False
-    stripped = seg.strip_bot_mention(segs, "999")
-    assert len(stripped) == 2
-    assert all(s.get("data", {}).get("qq") != "999" for s in stripped)
 
 
 def test_strip_first_bot_mention_leading():

@@ -122,7 +122,6 @@ class NormalizedEvent:
     chat_name: str = ""
     real_seq: str = ""
     media_items: list[MediaItem] = field(default_factory=list)
-    raw: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,7 +168,9 @@ class FilteredEvent:
 
     Carries enough context for the adapter service to send a reject message
     back to the originating chat via the OneBot HTTP API, without going
-    through the Hermes plugin.
+    through the Hermes plugin.  This is a process-internal Python object —
+    it is never serialised onto the wire (the adapter's ``on_filtered``
+    callback receives it directly).
     """
 
     chat_id: str
@@ -181,19 +182,6 @@ class FilteredEvent:
     message_id: str = ""
     reply_to_message_id: str | None = None
     timestamp: float = 0.0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "chat_id": self.chat_id,
-            "chat_type": self.chat_type,
-            "user_id": self.user_id,
-            "user_name": self.user_name,
-            "command_name": self.command_name,
-            "reject_message": self.reject_message,
-            "message_id": self.message_id,
-            "reply_to_message_id": self.reply_to_message_id,
-            "timestamp": self.timestamp,
-        }
 
 
 def ready_message(
@@ -261,13 +249,6 @@ def commands_refresh_message() -> dict[str, Any]:
     """A->P: adapter service → Hermes plugin.  Adapter asks the plugin to
     re-collect and push a fresh commands_snapshot (e.g. after plugin reload)."""
     return envelope("commands_refresh")
-
-
-def filtered_message(event: FilteredEvent) -> dict[str, Any]:
-    """OneBot event filtered by the command filter (adapter internal, not
-    forwarded to the Hermes plugin as a regular ``event``).  Delivered to the
-    adapter service's ``on_filtered`` callback so it can send a reject reply."""
-    return envelope("filtered", **event.to_dict())
 
 
 def idle_message(chat_id: str, group_id: str) -> dict[str, Any]:

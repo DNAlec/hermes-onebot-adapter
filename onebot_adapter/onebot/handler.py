@@ -16,8 +16,9 @@ from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot.log_format import log_recv_line
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.parser import parse_event
-from onebot_adapter.onebot.seq_map import SeqMap, _seq_map_add
+from onebot_adapter.onebot.seq_map import SeqMap, seq_map_add
 from onebot_adapter.onebot.ws_api import WsApiTransport
+from onebot_adapter.relay.protocol import FilteredEvent
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class OneBotHandler:
         # 在 parser 之前存 real_seq → message_id 映射(与 NapCat 的 onRecvMsg 对齐,
         # 所有消息都进 FIFO,不论是否触发 bot)
         if self._seq_map is not None and data.get("post_type") == "message":
-            _seq_map_add(self._seq_map, data)
+            seq_map_add(self._seq_map, data)
         parsed = await parse_event(
             data,
             self_id=self._config.self_id,
@@ -89,8 +90,6 @@ class OneBotHandler:
             logger.debug("OneBot %s event ignored (post_type=%s)", self.label, data.get("post_type"))
             return
         # FilteredEvent → reject message via callback, don't forward to Hermes
-        from onebot_adapter.relay.protocol import FilteredEvent
-
         if isinstance(parsed, FilteredEvent):
             logger.debug(
                 "OneBot %s command filtered: chat_id=%s cmd=%s",
