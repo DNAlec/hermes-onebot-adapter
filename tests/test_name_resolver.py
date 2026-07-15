@@ -328,3 +328,40 @@ async def test_resolve_group_name_concurrent_deduplicated():
     results = await asyncio.gather(*[resolver.resolve_group_name("42") for _ in range(5)])
     assert all(r == "Concurrent群" for r in results)
     assert call_count == 1
+
+
+async def test_eviction_skips_in_flight_locks():
+    """_evict_if_needed should not evict a key whose lock is currently held,
+    preserving the per-key dedup guarantee even at high cache churn."""
+    from unittest.mock import AsyncMock
+
+    from onebot_adapter.onebot.name_resolver import _CACHE_MAX
+
+    api = MagicMock()
+
+    async def _gmi(group_id, user_id, no_cache=False):
+        return {"card": f"user{user_id}", "nickname": "n"}
+
+    api.get_group_member_info = _gmi
+    api.get_stranger_info = AsyncMock(return_value={"nickname": "s"})
+    resolver = NameResolver(api)
+
+    # Pre-populate the cache with one entry, then acquire its lock to simulate
+    # an in-flight lookup. This entry is in _keys_order so _evict_if_needed
+    # will check it.
+    await resolver.resolve("0", "1")  # stores key "1:0" in cache
+    locked_key = "1:0"
+    lock = resolver._get_lock(locked_key)
+    await lock.acquire()
+    assert lock.locked()
+
+    # Fill the cache past _CACHE_MAX to trigger eviction. The locked key
+    # "1:0" should NOT be evicted (its lock is held). We use user_ids
+    # starting from 1 to avoid touching "1:0".
+    for i in range(1, _CACHE_MAX + 2):
+        await resolver.resolve(str(i), "1")
+
+    # The locked key should still be in _cache and _locks (skipped by eviction)
+    assert locked_key in resolver._cache, "locked key was evicted despite held lock"
+    assert locked_key in resolver._locks
+    lock.release()

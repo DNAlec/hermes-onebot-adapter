@@ -102,12 +102,17 @@ def _ext_from_url(url: str, fallback: str = "") -> str:
     return fallback
 
 
+_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB hard cap on media downloads
+
+
 async def _download_url_bytes(url: str) -> bytes:
-    """Download bytes from a URL with SSRF protection.
+    """Download bytes from a URL with SSRF protection + size limit.
 
     Uses aiohttp with a 30s timeout and follows redirects.  Raises
     ValueError if the URL targets a private/internal network (delegates to
     the host's ``is_safe_url`` check when available, else a minimal guard).
+    Raises ``ValueError`` if the response exceeds ``_DOWNLOAD_MAX_BYTES``
+    to prevent OOM from malicious or misconfigured media URLs.
     """
     # Try the host's SSRF guard first — it knows the full private-range list.
     try:
@@ -129,7 +134,25 @@ async def _download_url_bytes(url: str) -> bytes:
             allow_redirects=True,
         ) as response:
             response.raise_for_status()
-            return await response.read()
+            # Reject oversized responses early via Content-Length when available
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > _DOWNLOAD_MAX_BYTES:
+                raise ValueError(
+                    f"Response too large: Content-Length={content_length} "
+                    f"(limit={_DOWNLOAD_MAX_BYTES})"
+                )
+            # Stream-read with a running total to guard against missing or
+            # spoofed Content-Length headers.
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                total += len(chunk)
+                if total > _DOWNLOAD_MAX_BYTES:
+                    raise ValueError(
+                        f"Response exceeded size limit {total}/{_DOWNLOAD_MAX_BYTES} bytes"
+                    )
+                chunks.append(chunk)
+            return b"".join(chunks)
 
 
 def _basic_ssrf_guard(url: str) -> None:

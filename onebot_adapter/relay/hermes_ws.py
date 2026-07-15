@@ -184,14 +184,17 @@ class HermesRelayServer:
             self._busy_groups.clear()
             self._queues.clear()
         # 媒体投递模式变化:广播 fresh ready 让插件实时切换缓存策略。
-        # broadcast_self_id 复用 ready 帧机制,这里用新参数广播即可。
+        # broadcast_self_id 复用 ready 帧机制,这里用新 config 广播。
         if old.media_delivery_mode != config.media_delivery_mode:
             logger.info(
                 "relay: media_delivery_mode changed %s -> %s, broadcasting fresh ready",
                 old.media_delivery_mode, config.media_delivery_mode,
             )
-            asyncio.create_task(self.broadcast_self_id(self._config.self_id))
-        self._config = config
+            # Use the *new* config's self_id (set self._config before broadcasting)
+            self._config = config
+            asyncio.create_task(self.broadcast_self_id(config.self_id))
+        else:
+            self._config = config
 
     def _maybe_evict_send_cache(self) -> None:
         """Opportunistic cap on the send-dedup cache.

@@ -51,11 +51,27 @@ class NameResolver:
         return lock
 
     def _evict_if_needed(self) -> None:
-        """FIFO-evict oldest entries when the cache exceeds _CACHE_MAX."""
-        while len(self._cache) > _CACHE_MAX and self._keys_order:
-            old_key = self._keys_order.popleft()
+        """FIFO-evict oldest entries when the cache exceeds _CACHE_MAX.
+
+        Skips keys whose lock is currently held (in-flight lookup) so that
+        a concurrent ``resolve()`` for the same key doesn't create a new lock
+        and bypass the per-key dedup. If all keys are locked (extremely
+        unlikely), gives up to avoid an infinite loop.
+        """
+        skipped = 0
+        while len(self._cache) > _CACHE_MAX and self._keys_order and skipped < len(self._keys_order):
+            old_key = self._keys_order[0]
+            lock = self._locks.get(old_key)
+            if lock is not None and lock.locked():
+                # This key has an in-flight lookup; skip eviction to preserve
+                # the dedup guarantee. Rotate to the back and try the next key.
+                self._keys_order.rotate(-1)
+                skipped += 1
+                continue
+            self._keys_order.popleft()
             self._cache.pop(old_key, None)
             self._locks.pop(old_key, None)
+            skipped = 0  # reset after a successful eviction
 
     def _store(self, key: str, name: str) -> None:
         """Cache a successful lookup with TTL."""
