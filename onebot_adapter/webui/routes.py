@@ -542,7 +542,11 @@ def _get_hermes_tools(store: ConfigStore):
         available = list_available_toolsets(cfg.hermes_install_dir or None)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
-        current = read_current_enabled(cfg.hermes_install_dir or None)
+        try:
+            current = read_current_enabled(cfg.hermes_install_dir or None)
+        except Exception as exc:
+            logger.warning("read_current_enabled failed: %s", exc)
+            current = []
         return aiohttp.web.json_response({
             "configurable": available.get("configurable", []),
             "mcp_servers": available.get("mcp_servers", []),
