@@ -121,9 +121,13 @@ class WsApiTransport:
         except Exception as exc:
             self._pending.pop(echo, None)
             self._echo_ws.pop(echo, None)
+            # If unregister() already set a ConnectionError on the future (WS
+            # closed between _pick_ws and send_json), re-raise that — it's the
+            # more informative and documented error for this condition.
             if not fut.done():
                 fut.cancel()
-            raise RuntimeError(f"failed to send WS API frame for {action!r}: {exc}") from exc
+                raise RuntimeError(f"failed to send WS API frame for {action!r}: {exc}") from exc
+            raise fut.exception() from exc
 
         wait_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT
         try:

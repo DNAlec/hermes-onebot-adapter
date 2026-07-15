@@ -294,7 +294,9 @@ async def test_changing_lifetime_invalidates_old_sessions(tmp_path, monkeypatch)
     # Change lifetime → epoch should bump → old token invalid
     resp = await client.put("/api/config", json={"webui_token_lifetime_hours": 48}, headers=auth)
     assert resp.status == 200
-    assert (await resp.json())["webui_token_epoch"] == 1
+    # webui_token_epoch is internal state, not exposed in the API response;
+    # verify it bumped by reading the store directly.
+    assert store.config.webui_token_epoch == _EPOCH + 1
 
     # Old session token no longer works
     assert (await client.get("/api/status", headers=auth)).status == 401

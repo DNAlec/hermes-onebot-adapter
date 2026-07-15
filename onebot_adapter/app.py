@@ -8,6 +8,7 @@ Three Applications share service state but bind to separate ports:
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import signal
@@ -64,7 +65,6 @@ class AdapterService:
         self._relay: HermesRelayServer | None = None
         self._seq_map: SeqMap | None = None
         self._runners: list[aiohttp.web.AppRunner] = []
-        self._forward_task: asyncio.Task[None] | None = None
         self._self_id_probed = False
         self._file_handler: logging.Handler | None = None
         self._webui_log_handler: logging.Handler | None = None
@@ -78,9 +78,7 @@ class AdapterService:
         self._api = OneBotApi(ws_transport=self._ws_api_transport)
         self._state["api"] = self._api
         self._name_resolver = NameResolver(self._api)
-        self._state["name_resolver"] = self._name_resolver
         self._seq_map = SeqMap(maxlen=cfg.seq_map_size)
-        self._state["seq_map"] = self._seq_map
         self._relay = HermesRelayServer(
             cfg,
             self._api,
@@ -180,9 +178,8 @@ class AdapterService:
     def _apply_log_level(self, level_str: str) -> None:
         """Apply a log level string (e.g. "DEBUG") to root logger and all
         owned handlers (WebUI + file).  Called on startup and hot-reload."""
-        import logging as _logging
-        level = getattr(_logging, level_str.upper(), _logging.INFO)
-        _logging.getLogger().setLevel(level)
+        level = getattr(logging, level_str.upper(), logging.INFO)
+        logging.getLogger().setLevel(level)
         if self._webui_log_handler is not None:
             self._webui_log_handler.setLevel(level)
         if self._file_handler is not None:
@@ -227,8 +224,6 @@ class AdapterService:
 
     async def _probe_self_id_guarded(self) -> None:
         """Concurrent-safe wrapper: only one probe at a time."""
-        if self._probe_lock.locked():
-            return  # another probe is in flight
         async with self._probe_lock:
             if self._self_id_probed or self.store.config.self_id != "":
                 return
@@ -315,15 +310,13 @@ class AdapterService:
         """
         logger.debug(
             "app _on_filtered_command: chat_id=%s cmd=%s user=%s",
-            getattr(filtered, "chat_id", ""),
-            getattr(filtered, "command_name", ""),
-            getattr(filtered, "user_id", ""),
+            filtered.chat_id, filtered.command_name, filtered.user_id,
         )
         if self._relay:
             await self._relay.send_reject_message(
-                chat_id=getattr(filtered, "chat_id", ""),
-                message=getattr(filtered, "reject_message", "") or "⛔ 指令被过滤",
-                reply_to=getattr(filtered, "reply_to_message_id", None),
+                chat_id=filtered.chat_id,
+                message=filtered.reject_message or "⛔ 指令被过滤",
+                reply_to=filtered.reply_to_message_id,
             )
 
     async def _on_hermes_startup(self, app: aiohttp.web.Application) -> None:
@@ -334,7 +327,7 @@ class AdapterService:
         )
         if cfg.onebot_mode == "forward":
             assert self._onebot_forward is not None
-            self._forward_task = self._onebot_forward.start()
+            self._onebot_forward.start()
 
     async def _on_hermes_cleanup(self, app: aiohttp.web.Application) -> None:
         if self._cleaning_up:
@@ -348,6 +341,17 @@ class AdapterService:
             await self._relay.stop()
         if self._session and not self._session.closed:
             await self._session.close()
+        # Detach + close log handlers so the file handle is released and a
+        # subsequent serve() in the same process doesn't double-attach them.
+        if self._webui_log_handler is not None:
+            logging.getLogger().removeHandler(self._webui_log_handler)
+            self._webui_log_handler.close()
+            self._webui_log_handler = None
+        if self._file_handler is not None:
+            logging.getLogger("onebot_adapter").removeHandler(self._file_handler)
+            logging.getLogger("onebot_adapter.file").removeHandler(self._file_handler)
+            self._file_handler.close()
+            self._file_handler = None
         for runner in self._runners:
             await runner.cleanup()
         logger.info("OneBot adapter stopped")
@@ -386,7 +390,7 @@ class AdapterService:
                 await self._onebot_forward.stop()
                 logger.info("Forward WS client stopped due to mode switch")
             if new.onebot_mode == "forward" and self._onebot_forward:
-                self._forward_task = self._onebot_forward.start()
+                self._onebot_forward.start()
                 logger.info("Forward WS client started due to mode switch")
         elif new.onebot_mode == "forward" and self._onebot_forward:
             # Mode unchanged but connection-affecting fields changed: force a
@@ -404,7 +408,7 @@ class AdapterService:
                     new.onebot_forward_ws_url,
                 )
                 await self._onebot_forward.stop()
-                self._forward_task = self._onebot_forward.start()
+                self._onebot_forward.start()
 
         # Warn about path changes that require a restart to take effect
         # (routes are bound at startup and can't be hot-swapped).
@@ -443,8 +447,6 @@ class AdapterService:
         runner: aiohttp.web.AppRunner, host: str, port: int, label: str, max_retries: int = 50,
     ) -> aiohttp.web.TCPSite:
         """Bind *runner* to *port*; if busy try the next port up to *max_retries* times."""
-        import errno
-
         for attempt in range(max_retries):
             try:
                 site = aiohttp.web.TCPSite(runner, host, port + attempt)
@@ -457,7 +459,6 @@ class AdapterService:
                 if attempt == max_retries - 1:
                     raise
                 logger.debug("%s port %d busy, trying %d", label, port + attempt, port + attempt + 1)
-        raise RuntimeError("unreachable")
 
     async def serve(self, host: str = "127.0.0.1", no_webui: bool = False) -> None:
         self._session = aiohttp.ClientSession(

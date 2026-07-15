@@ -60,7 +60,7 @@ class OneBotReverseServer:
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the server (route stays bound)."""
         self._config = config
-        self._handler._config = config
+        self._handler.update_config(config)
 
     def add_routes(self, app: aiohttp.web.Application) -> None:
         app.router.add_get(self._config.onebot_reverse_ws_path, self._handler_endpoint)

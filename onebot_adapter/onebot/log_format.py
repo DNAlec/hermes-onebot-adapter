@@ -160,25 +160,16 @@ async def log_send_line(
 ) -> None:
     """Log a send-side line to both console (truncated) and file (full).
 
-    Calls ``format_send_line`` twice: once with the configured preview length
-    for the truncated console line, then again with ``preview=0`` for the
-    full untruncated file line.  The second pass re-runs ``name_resolver.resolve``
-    for each @-mention, but the first pass already populated the cache so the
-    second pass only hits the fast path (no API calls, just lock + dict lookup).
+    Renders the full line once with ``preview=0`` (no truncation) so name
+    resolution runs exactly once per call.  The console line is produced by
+    truncating the already-rendered full string, avoiding a second pass that
+    could re-issue API calls when the first pass had a cache *miss* (failed
+    lookups are not cached, so a second pass would hit the API again).
     """
-    line = await format_send_line(
-        chat_id=chat_id, segs=segs, is_group=is_group,
-        group_name=group_name, reply_to=reply_to,
-        preview=preview, name_resolver=name_resolver,
-    )
-    logger.info("发送 -> %s", line)
-    # Derive the full (untruncated) version without re-running name resolution:
-    # render the same body with preview=0.  name_resolver.resolve is cached so
-    # the second pass is cheap, but the first pass already populated the cache
-    # so the second pass only hits the fast path (no API calls).
     full = await format_send_line(
         chat_id=chat_id, segs=segs, is_group=is_group,
         group_name=group_name, reply_to=reply_to,
         preview=0, name_resolver=name_resolver,
     )
+    logger.info("发送 -> %s", truncate(full, preview))
     _file_logger.info("发送 -> %s", full)

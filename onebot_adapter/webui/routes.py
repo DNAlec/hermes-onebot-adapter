@@ -57,7 +57,7 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_put("/api/config", _put_config(store, state))
     app.router.add_get("/api/hermes_dir_status", _hermes_dir_status(store))
     app.router.add_post("/api/install_plugin", _install_plugin(store, state))
-    app.router.add_post("/api/uninstall_plugin", _uninstall_plugin(state))
+    app.router.add_post("/api/uninstall_plugin", _uninstall_plugin(store, state))
     app.router.add_post("/api/send", _send(store, state))
     app.router.add_get("/api/logs", _logs(state))
     # Group management
@@ -140,7 +140,7 @@ def _login(store: ConfigStore, state: dict[str, Any]):
                 {"error": "webui_token not configured — restart the adapter service to regenerate it"},
                 status=401,
             )
-        if token != cfg.webui_token:
+        if not hmac.compare_digest(token, cfg.webui_token):
             fails, first_ts = failures.get(ip, (0, now))
             failures[ip] = (fails + 1, first_ts)
             return aiohttp.web.json_response({"error": "invalid token"}, status=401)
@@ -180,7 +180,11 @@ def _verify_session_token(token: str, secret: str, epoch: int, lifetime_hours: i
         issued_at = int(issued_str)
     except Exception:
         return False
-    if time.time() - issued_at > lifetime_hours * 3600:
+    now = time.time()
+    if now - issued_at > lifetime_hours * 3600:
+        return False
+    # Reject tokens issued too far in the future (clock skew / forgery guard).
+    if issued_at - now > 60:
         return False
     msg = f"{epoch}:{issued_at}".encode()
     expected = hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
@@ -260,9 +264,14 @@ def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
     readable over the API — verify it through ``POST /api/login`` instead.
     Other tokens (onebot_ws_token, hermes_ws_token) are operational values
     the user needs to see/copy in the WebUI and are returned as-is.
+
+    ``webui_token_epoch`` is internal state used for session invalidation
+    and must not be exposed or client-settable; it is stripped here and in
+    ``_put_config`` so a PUT body cannot override the internally-bumped value.
     """
     d = cfg.to_dict()
     d.pop("webui_token", None)
+    d.pop("webui_token_epoch", None)
     return d
 
 
@@ -282,6 +291,9 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
         try:
             # Bump the token epoch when the lifetime changes so that every
             # already-issued HMAC session token becomes invalid immediately.
+            # Strip client-supplied epoch first so a PUT body can't override
+            # the internal counter (see _public_config for rationale).
+            data.pop("webui_token_epoch", None)
             if "webui_token_lifetime_hours" in data and \
                     data["webui_token_lifetime_hours"] != store.config.webui_token_lifetime_hours:
                 data["webui_token_epoch"] = store.config.webui_token_epoch + 1
@@ -325,6 +337,11 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
                 adapter_url=adapter_url,
                 adapter_token=adapter_token,
             )
+            # Persist the install dir so subsequent toolset reads / uninstalls
+            # use the same path without the user re-entering it in the config page.
+            if install_dir and str(target) != cfg.hermes_install_dir:
+                store.patch(hermes_install_dir=str(target))
+                save_config(store.config)
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin install failed")
@@ -333,7 +350,7 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
-def _uninstall_plugin(state: dict[str, Any]):
+def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
             data = await request.json()
@@ -347,6 +364,11 @@ def _uninstall_plugin(state: dict[str, Any]):
 
         try:
             result = installer.uninstall(str(target))
+            # Persist the resolved install dir so the config reflects where
+            # the plugin was managed, matching _install_plugin's behavior.
+            if install_dir and str(target) != store.config.hermes_install_dir:
+                store.patch(hermes_install_dir=str(target))
+                save_config(store.config)
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin uninstall failed")
@@ -751,11 +773,12 @@ async def _index(_: aiohttp.web.Request) -> aiohttp.web.Response:
 async def _spa_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
     tail = request.match_info.get("tail", "")
     clean = tail.lstrip("/")
-    file_path = _STATIC_DIR / clean
-    # ``is_relative_to`` is the real path-traversal guard; it rejects any
-    # ``..``-based escape (decoded by aiohttp's match_info) that would land
-    # outside the static dir. No extra ``".." in clean`` check is needed.
-    if file_path.exists() and file_path.is_file() and file_path.is_relative_to(_STATIC_DIR):
+    # Resolve real path before checking containment — ``Path.is_relative_to``
+    # only compares string prefixes and does NOT resolve ``..`` segments, so
+    # ``static/../secret.txt`` would pass a raw ``is_relative_to(static)`` check.
+    static_resolved = _STATIC_DIR.resolve()
+    file_path = (static_resolved / clean).resolve()
+    if file_path.is_file() and file_path.is_relative_to(static_resolved):
         return aiohttp.web.FileResponse(file_path)
     return await _index(request)
 

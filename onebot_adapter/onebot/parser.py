@@ -488,7 +488,7 @@ async def parse_event(
         )
         counter.counter += 1
         rendered = _render_url_placeholder(marker, include_url=include_url)
-        text = text.replace(marker["marker"], rendered)
+        text = text.replace(marker["marker"], rendered, 1)
         if not include_url and _marker_has_url(marker):
             media_items.append(_marker_to_media_item(marker))
 
@@ -606,7 +606,7 @@ async def _build_reply_context(
     for marker in markers:
         counter.counter += 1
         rendered = _render_url_placeholder(marker, include_url=include_url)
-        q_text = q_text.replace(marker["marker"], rendered)
+        q_text = q_text.replace(marker["marker"], rendered, 1)
         if not include_url and media_items is not None and _marker_has_url(marker):
             media_items.append(_marker_to_media_item(marker))
 
@@ -720,7 +720,7 @@ async def _expand_messages(
         for marker in markers:
             counter.counter += 1
             rendered = _render_url_placeholder(marker, include_url=include_url)
-            msg_text = msg_text.replace(marker["marker"], rendered)
+            msg_text = msg_text.replace(marker["marker"], rendered, 1)
             if not include_url and media_items is not None and _marker_has_url(marker):
                 media_items.append(_marker_to_media_item(marker))
 

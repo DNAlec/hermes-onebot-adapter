@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 _INITIAL_DELAY = 1.0
 _MAX_DELAY = 30.0
+# Minimum connection uptime (seconds) before backoff resets on disconnect.
+# Below this, a server-side close is treated as flapping and backoff continues.
+_UPTIME_RESET_THRESHOLD = 5.0
 
 
 class OneBotForwardClient:
@@ -73,7 +76,7 @@ class OneBotForwardClient:
         an immediate reconnect with the fresh handshake token.
         """
         self._config = config
-        self._handler._config = config
+        self._handler.update_config(config)
 
     def start(self) -> asyncio.Task[None]:
         self._stop.clear()
@@ -105,8 +108,12 @@ class OneBotForwardClient:
         while not self._stop.is_set():
             self._connect_attempts += 1
             try:
-                await self._connect_once()
-                delay = _INITIAL_DELAY  # reset on clean disconnect
+                uptime = await self._connect_once()
+                # Only reset backoff if the connection stayed up for a while.
+                # A rapid close (flapping server / auth reject) returns a small
+                # uptime — keep the current backoff to avoid a reconnect storm.
+                if uptime >= _UPTIME_RESET_THRESHOLD:
+                    delay = _INITIAL_DELAY
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -131,7 +138,10 @@ class OneBotForwardClient:
                 pass
             delay = min(_MAX_DELAY, delay * 2)
 
-    async def _connect_once(self) -> None:
+    async def _connect_once(self) -> float:
+        """Connect and serve until the WS closes. Returns uptime in seconds."""
+        import time
+
         if not self._config.onebot_forward_ws_url:
             raise ValueError("onebot_forward_ws_url is not configured")
 
@@ -140,6 +150,7 @@ class OneBotForwardClient:
             raise ValueError("onebot_ws_token must not be empty")
         headers["Authorization"] = f"Bearer {self._config.onebot_ws_token}"
 
+        start = time.monotonic()
         # Use shared session if available, otherwise create a temporary one
         if self._session and not self._session.closed:
             ws = await self._session.ws_connect(
@@ -155,6 +166,7 @@ class OneBotForwardClient:
                     self._config.onebot_forward_ws_url, heartbeat=30,
                 ) as ws:
                     await self._serve_ws(ws)
+        return time.monotonic() - start
 
     async def _serve_ws(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         self.connected = True

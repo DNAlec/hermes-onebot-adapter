@@ -377,25 +377,32 @@ async def _send_forward_msg(args: dict, **_) -> str:
 
 
 async def _forward_single_msg(args: dict, **_) -> str:
-    """单条消息转发(群聊或私聊)。action 由 group_id/user_id 决定。"""
+    """单条消息转发(群聊或私聊)。action 由 group_id/user_id 决定。
+
+    Explicit ``group_id``/``user_id`` args take precedence over the current
+    chat context, allowing the LLM to forward to a *different* group/user.
+    """
     try:
         params: dict = {"real_seq": int(args["real_seq"])}
-        gid = _current_group_id()
-        uid = _current_user_id()
-        if gid:
-            params["group_id"] = int(gid)
-            action = "forward_group_single_msg"
-        elif uid:
-            params["user_id"] = int(uid)
-            action = "forward_friend_single_msg"
-        elif args.get("group_id"):
+        # Explicit args first so the LLM can target a different chat.
+        if args.get("group_id"):
             params["group_id"] = int(args["group_id"])
             action = "forward_group_single_msg"
         elif args.get("user_id"):
             params["user_id"] = int(args["user_id"])
             action = "forward_friend_single_msg"
         else:
-            return tool_error("无法确定转发目标:需要 group_id 或 user_id")
+            # Fall back to the current chat context.
+            gid = _current_group_id()
+            uid = _current_user_id()
+            if gid:
+                params["group_id"] = int(gid)
+                action = "forward_group_single_msg"
+            elif uid:
+                params["user_id"] = int(uid)
+                action = "forward_friend_single_msg"
+            else:
+                return tool_error("无法确定转发目标:需要 group_id 或 user_id")
         await _api_call(action, **params)
         return tool_result({"forwarded": True})
     except Exception as e:
