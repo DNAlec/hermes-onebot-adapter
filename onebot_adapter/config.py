@@ -11,24 +11,13 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from onebot_adapter._async_utils import log_task_exception
+
 logger = logging.getLogger(__name__)
 
 
-def _log_listener_exception(task: asyncio.Task) -> None:
-    """Done-callback: log unhandled exceptions from async config-change
-    listener tasks instead of letting them surface as "Task exception was
-    never retrieved" warnings.
-    """
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("config change listener task crashed: %r", exc, exc_info=exc)
-
-
 CONFIG_ENV = "ONEBOT_ADAPTER_CONFIG"
-DEFAULT_CONFIG_DIR = Path.home() / ".onebot_adapter"
-DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
+DEFAULT_CONFIG_PATH = Path.home() / ".onebot_adapter" / "config.json"
 
 NAPCAT_MODE_REVERSE = "reverse"
 NAPCAT_MODE_FORWARD = "forward"
@@ -46,6 +35,7 @@ COMMAND_PERM_EVERYONE = "everyone"
 COMMAND_PERM_ADMIN = "admin"
 COMMAND_PERM_DISABLED = "disabled"
 _VALID_COMMAND_PERM_LEVELS = {COMMAND_PERM_EVERYONE, COMMAND_PERM_ADMIN, COMMAND_PERM_DISABLED}
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 DEFAULT_PLATFORM_HINT = (
     "# 平台特性\n"
@@ -212,6 +202,10 @@ class AdapterConfig:
             errors.append("log_message_preview must be non-negative")
         if self.log_retention_days < 1:
             errors.append("log_retention_days must be at least 1")
+        for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port"):
+            port_val = getattr(self, port_field)
+            if not isinstance(port_val, int) or port_val < 1 or port_val > 65535:
+                errors.append(f"{port_field} must be an integer in [1, 65535]")
         if not self.onebot_ws_token:
             errors.append("onebot_ws_token must not be empty")
         if not self.hermes_ws_token:
@@ -232,7 +226,6 @@ class AdapterConfig:
             errors.append("reaction_emoji_id must not be empty")
         if self.dm_user_filter_mode not in _VALID_USER_FILTER_MODES:
             errors.append(f"dm_user_filter_mode must be one of {sorted(_VALID_USER_FILTER_MODES)}")
-        _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         if self.log_level.upper() not in _VALID_LOG_LEVELS:
             errors.append(f"log_level must be one of {sorted(_VALID_LOG_LEVELS)}")
         for cmd, perm in self.command_permissions.items():
@@ -255,6 +248,12 @@ class AdapterConfig:
                 errors.append(f"group {gid} strip_first_mention must be bool or null")
             if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
                 errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
+            if gc.command_filter_enabled is not None and not isinstance(gc.command_filter_enabled, bool):
+                errors.append(f"group {gid} command_filter_enabled must be bool or null")
+            if gc.command_filter_unknown is not None and not isinstance(gc.command_filter_unknown, bool):
+                errors.append(f"group {gid} command_filter_unknown must be bool or null")
+            if gc.message_show_group_id is not None and not isinstance(gc.message_show_group_id, bool):
+                errors.append(f"group {gid} message_show_group_id must be bool or null")
             if gc.command_permissions is not None:
                 for cmd, perm in gc.command_permissions.items():
                     if perm not in _VALID_COMMAND_PERM_LEVELS:
@@ -267,7 +266,7 @@ class AdapterConfig:
     def get_group_config(self, group_id: str) -> GroupConfig:
         """Return GroupConfig for a group, or a default if not configured."""
         raw = self.groups.get(str(group_id))
-        if raw:
+        if raw is not None:
             return GroupConfig.from_dict(raw)
         return GroupConfig(group_id=str(group_id))
 
@@ -292,7 +291,7 @@ class AdapterConfig:
         uid = str(user_id)
         if uid in self.global_admins:
             return True
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if uid in gc.admins:
                 return True
@@ -340,7 +339,7 @@ class AdapterConfig:
 
     def resolve_reaction_emoji_enabled(self, group_id: str | None = None) -> bool:
         """消息送达贴表情开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.reaction_emoji_enabled is not None:
                 return gc.reaction_emoji_enabled
@@ -350,7 +349,7 @@ class AdapterConfig:
 
     def resolve_command_filter_enabled(self, group_id: str | None = None) -> bool:
         """指令过滤总开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.command_filter_enabled is not None:
                 return gc.command_filter_enabled
@@ -358,7 +357,7 @@ class AdapterConfig:
 
     def resolve_command_filter_unknown(self, group_id: str | None = None) -> bool:
         """未知指令处理：True=过滤，False=放行(默认)。群配置非 None 时覆盖全局。"""
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.command_filter_unknown is not None:
                 return gc.command_filter_unknown
@@ -374,7 +373,7 @@ class AdapterConfig:
         清空所有指令配置(均视为未配置)；群配置非空 dict 时按 key 覆盖，其余
         指令回落到全局 ``command_permissions``。
         """
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.command_permissions is not None:
                 # 群级显式配置：直接查；未在群配置中的指令视为 None(不回落全局)
@@ -543,7 +542,7 @@ class ConfigStore:
                     try:
                         loop = asyncio.get_running_loop()
                         task = loop.create_task(result)
-                        task.add_done_callback(_log_listener_exception)
+                        task.add_done_callback(log_task_exception)
                     except RuntimeError:
                         result.close()
             except Exception:

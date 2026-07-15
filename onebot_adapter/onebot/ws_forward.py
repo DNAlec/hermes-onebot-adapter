@@ -13,6 +13,7 @@ from typing import Any
 
 import aiohttp
 
+from onebot_adapter._async_utils import log_task_exception as _log_task_exc
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot.handler import OneBotHandler
 from onebot_adapter.onebot.name_resolver import NameResolver
@@ -187,11 +188,3 @@ class OneBotForwardClient:
             if self._on_disconnect:
                 self._on_disconnect()
             logger.info("OneBot forward WS disconnected")
-
-
-def _log_task_exc(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("OneBot forward background task crashed: %r", exc, exc_info=exc)

@@ -86,10 +86,13 @@ class WsApiTransport:
         self._echo_ws.pop(echo, None)
         if not fut.done():
             fut.set_result(data)
+        try:
+            data_preview = json.dumps(data.get("data"), ensure_ascii=False)[:500]
+        except (TypeError, ValueError):
+            data_preview = "<unserializable>"
         logger.debug(
             "WsApiTransport: resolved echo=%s retcode=%s data=%s",
-            echo, data.get("retcode"),
-            json.dumps(data.get("data"), ensure_ascii=False)[:500],
+            echo, data.get("retcode"), data_preview,
         )
         return True
 

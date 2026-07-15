@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -202,7 +203,7 @@ def _extract_command_name(segments: list[dict]) -> str | None:
     lowercased, with any ``@botname`` suffix stripped (Telegram-style).  A
     bare ``/`` or a token containing ``/`` (file path) returns None.
     """
-    text = seg.extract_text(segments).lstrip()
+    text = seg.extract_text(segments)
     if not text.startswith("/"):
         return None
     parts = text.split(maxsplit=1)
@@ -225,8 +226,8 @@ def _check_command_filter(
     sender_id: str,
     sender_name: str,
     chat_id: str,
-    is_known_command_fn: Any,
-    canonical_command_name_fn: Any,
+    is_known_command_fn: Callable[[str], bool] | None,
+    canonical_command_name_fn: Callable[[str], str] | None,
 ) -> FilteredEvent | None:
     """Check the /command filter against *segments*.
 
@@ -290,8 +291,8 @@ async def parse_event(
     trigger_keywords: list[str] | None = None,
     keyword_first_only: bool = False,
     strip_first_mention: bool = True,
-    is_known_command_fn: Any = None,
-    canonical_command_name_fn: Any = None,
+    is_known_command_fn: Callable[[str], bool] | None = None,
+    canonical_command_name_fn: Callable[[str], str] | None = None,
     media_delivery_mode: str = "passthrough",
 ) -> NormalizedEvent | FilteredEvent | None:
     """Parse a OneBot 11 message event.
@@ -316,9 +317,13 @@ async def parse_event(
         without URLs (``[图1]``). No media is downloaded by the adapter and
         no binary WS frames are produced in either mode.
 
-    When *config* is provided, it overrides *group_require_mention* with
-    per-group resolved values, and applies group allowlist/blocklist,
-    session-mode chat_id, custom prompts, and admin computation.
+    When *config* is provided, the per-group trigger settings
+    (*group_require_mention*, *mention_first_only*, *trigger_keywords*,
+    *keyword_first_only*, *strip_first_mention*) and *media_delivery_mode*
+    are **overridden** by the config's resolved values — the standalone
+    keyword arguments are only used when *config* is ``None`` (e.g. in tests).
+    The config also applies group allowlist/blocklist, session-mode chat_id,
+    custom prompts, and admin computation.
 
     *is_known_command_fn* / *canonical_command_name_fn* are optional callables
     provided by the relay layer to check whether a command name is registered
@@ -493,8 +498,8 @@ async def parse_event(
 
     # Group chat: prefix sender name + QQ号 (except slash commands)
     if is_group and text:
-        if text.lstrip().startswith("/"):
-            text = text.lstrip()
+        if text.startswith("/"):
+            pass  # slash command — no sender prefix
         else:
             admin_suffix = "(管理员)" if is_admin else ""
             # 群聊前缀展示 real_seq(群内递增序号),拿不到时回退 message_id
@@ -532,7 +537,6 @@ async def parse_event(
         chat_name=chat_name,
         real_seq=str(event.get("real_seq", "") or ""),
         media_items=media_items,
-        raw=event,
     )
     logger.debug(
         "parse_event: normalized chat_id=%s text_preview=%r",

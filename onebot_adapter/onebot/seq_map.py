@@ -90,7 +90,7 @@ class SeqMap:
                      new_maxlen, len(self._buf))
 
 
-def _seq_map_add(seq_map: SeqMap, data: dict) -> None:
+def seq_map_add(seq_map: SeqMap, data: dict) -> None:
     """从原始 OneBot 事件提取 real_seq/message_id/scope_id 并存入 SeqMap。
 
     在 ws_reverse/ws_forward 的 ``_handle_text`` 里、``parse_event`` 之前调用,

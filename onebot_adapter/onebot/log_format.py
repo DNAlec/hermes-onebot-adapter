@@ -160,10 +160,12 @@ async def log_send_line(
 ) -> None:
     """Log a send-side line to both console (truncated) and file (full).
 
-    Calls ``format_send_line`` once for the truncated version then derives the
-    full version by re-rendering the already-resolved body — avoids a second
-    pass of ``name_resolver.resolve`` calls (which hit the cache but still take
-    a lock + dict lookup per @-mention)."""
+    Calls ``format_send_line`` twice: once with the configured preview length
+    for the truncated console line, then again with ``preview=0`` for the
+    full untruncated file line.  The second pass re-runs ``name_resolver.resolve``
+    for each @-mention, but the first pass already populated the cache so the
+    second pass only hits the fast path (no API calls, just lock + dict lookup).
+    """
     line = await format_send_line(
         chat_id=chat_id, segs=segs, is_group=is_group,
         group_name=group_name, reply_to=reply_to,

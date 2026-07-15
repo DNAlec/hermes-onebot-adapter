@@ -99,9 +99,10 @@ def _write_env(env_path: Path, updates: dict[str, str]) -> dict[str, str]:
         # Quote values that contain spaces or special shell characters to
         # ensure correct dotenv parsing. Values without special chars are
         # written bare for readability.
-        if v and any(c in v for c in (" ", "\t", "'", '"', "#", "$")):
-            # Escape any embedded double quotes
-            escaped = v.replace('"', '\\"')
+        if v and any(c in v for c in (" ", "\t", "'", '"', "#", "$", "\\")):
+            # Escape backslashes first (dotenv interprets \ as escape in
+            # double-quoted strings), then escape any embedded double quotes.
+            escaped = v.replace("\\", "\\\\").replace('"', '\\"')
             lines.append(f'{k}="{escaped}"')
         else:
             lines.append(f"{k}={v}")
@@ -143,7 +144,9 @@ def install(
 
     # Copy plugin files
     dest.mkdir(parents=True, exist_ok=True)
-    _yaml = YAML()
+    # Use round-trip YAML to preserve string quoting (e.g. version: "0.0.0"
+    # stays quoted so it isn't parsed as float 0.0).
+    _yaml = YAML(typ="rt")
     for fname in _PLUGIN_FILES:
         src_file = PLUGIN_SRC / fname
         if not src_file.exists():

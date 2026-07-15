@@ -86,7 +86,9 @@ class NameResolver:
         Returns the name string, or empty string if all API calls fail.
         Cached results have a 10-minute TTL; concurrent lookups for the
         same key are deduplicated via a per-key lock. Failed lookups are
-        NOT cached so a transient error doesn't blacklist a user.
+        NOT cached so a transient error doesn't blacklist a user.  The
+        per-key lock created for a failed lookup is cleaned up afterwards
+        so the ``_locks`` dict doesn't grow unbounded from transient errors.
         """
         if not user_id:
             return ""
@@ -109,7 +111,16 @@ class NameResolver:
             # without caching so the next call retries immediately.
             if name:
                 self._store(cache_key, name)
-            return name
+
+        # Clean up the lock for failed lookups so _locks doesn't leak:
+        # a failed key is never stored in _cache/_keys_order, so the
+        # eviction loop can't reach it.  Only clean up when no other
+        # coroutine is waiting on the same lock (locked() is False).
+        if not name:
+            lock = self._locks.get(cache_key)
+            if lock is not None and not lock.locked():
+                self._locks.pop(cache_key, None)
+        return name
 
     async def resolve_group_name(self, group_id: str) -> str:
         """Resolve a QQ group ID to its group name (群名).
@@ -117,7 +128,8 @@ class NameResolver:
         Returns the group name string, or empty string if the API call
         fails.  Cached under ``grp:<group_id>`` with a 10-minute TTL;
         concurrent lookups are deduplicated via a per-key lock.  Failed
-        lookups are NOT cached.
+        lookups are NOT cached.  The per-key lock for a failed lookup is
+        cleaned up afterwards so ``_locks`` doesn't leak.
         """
         if not group_id:
             return ""
@@ -136,7 +148,13 @@ class NameResolver:
             name = await self._fetch_group_name(group_id)
             if name:
                 self._store(cache_key, name)
-            return name
+
+        # Clean up the lock for failed lookups (see resolve() for details).
+        if not name:
+            lock = self._locks.get(cache_key)
+            if lock is not None and not lock.locked():
+                self._locks.pop(cache_key, None)
+        return name
 
     async def _fetch_group_name(self, group_id: str) -> str:
         """Fetch group name from OneBot API."""
