@@ -552,6 +552,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         group_id = ""
         if chat_id.startswith("group:"):
             group_id = chat_id.split(":")[1]
+        # Snapshot the per-message context as a local tuple so _dispatch_event
+        # receives it as a parameter rather than reading instance attributes
+        # that could be overwritten by a concurrent _handle_event call.
+        msg_ctx = (is_admin, group_id, user_id)
+        # Also set instance attributes for backward compat with code that
+        # reads them directly (e.g. outside the _dispatch_event task).
         self._current_is_admin = is_admin
         self._current_group_id = group_id
         self._current_user_id = user_id
@@ -618,14 +624,15 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # the self-deadlock.  This mirrors the normal-message path
         # (``_start_session_processing`` → ``create_task``) which was never
         # affected.
-        task = asyncio.create_task(self._dispatch_event(message_event))
+        task = asyncio.create_task(self._dispatch_event(message_event, msg_ctx))
         self._event_tasks.add(task)
         task.add_done_callback(self._event_tasks.discard)
 
-    async def _dispatch_event(self, message_event: Any) -> None:
+    async def _dispatch_event(self, message_event: Any, msg_ctx: tuple[bool, str, str]) -> None:
         """Run ``handle_message`` off the receive loop.
 
-        Sets the per-message contextvar so tool handlers read the correct
+        Sets the per-message contextvar from *msg_ctx* (passed as a parameter,
+        not read from instance attributes) so tool handlers read the correct
         admin/group/user context for *this* message, even when multiple
         messages are being processed concurrently (each gets its own
         ``_dispatch_event`` task with its own contextvar value).
@@ -635,7 +642,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         raises would otherwise surface as "Task exception was never
         retrieved".
         """
-        token = _msg_context.set((self._current_is_admin, self._current_group_id, self._current_user_id))
+        token = _msg_context.set(msg_ctx)
         try:
             await self.handle_message(message_event)
         except Exception:

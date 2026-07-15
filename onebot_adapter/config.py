@@ -113,6 +113,9 @@ class GroupConfig:
     def from_dict(cls, data: dict[str, Any]) -> GroupConfig:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
+        # group_id is a required field — default to "" if absent in the dict
+        # so empty group config dicts ({}) don't raise TypeError.
+        filtered.setdefault("group_id", "")
         return cls(**filtered)
 
     def is_user_allowed(self, user_id: str) -> bool:
@@ -267,7 +270,11 @@ class AdapterConfig:
         """Return GroupConfig for a group, or a default if not configured."""
         raw = self.groups.get(str(group_id))
         if raw is not None:
-            return GroupConfig.from_dict(raw)
+            gc = GroupConfig.from_dict(raw)
+            # Ensure group_id is set even if the stored dict omitted it
+            if not gc.group_id:
+                gc.group_id = str(group_id)
+            return gc
         return GroupConfig(group_id=str(group_id))
 
     def is_group_user_allowed(self, group_id: str, user_id: str) -> bool:

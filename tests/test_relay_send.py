@@ -139,6 +139,110 @@ async def test_send_document_via_file_path():
         await server.close()
 
 
+async def test_send_image_with_reply_to():
+    """send_image with reply_to — prepends a reply segment before the image."""
+    app, mock_api, _ = _make_relay_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(
+                    send_message("send_image", "r3c", "group:42",
+                                  image_url="http://x/1.jpg", caption="cap", reply_to="99")
+                )
+                result = await ws.receive_json(timeout=2)
+                assert result["success"] is True
+            segs = mock_api.send_group_msg.await_args.args[1]
+            assert segs[0]["type"] == "reply"
+            assert segs[0]["data"]["id"] == "99"
+            assert segs[1]["type"] == "image"
+            assert segs[2]["type"] == "text"
+    finally:
+        await server.close()
+
+
+async def test_send_voice_with_caption_and_reply_to():
+    """send_voice with caption and reply_to — prepends reply, appends caption text."""
+    app, mock_api, _ = _make_relay_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(
+                    send_message("send_voice", "r4", "group:42",
+                                  audio_path="/tmp/a.ogg", caption="voice caption",
+                                  reply_to="55")
+                )
+                result = await ws.receive_json(timeout=2)
+                assert result["success"] is True
+            segs = mock_api.send_group_msg.await_args.args[1]
+            assert segs[0]["type"] == "reply"
+            assert segs[0]["data"]["id"] == "55"
+            assert segs[1]["type"] == "record"
+            assert segs[1]["data"]["file"] == "/tmp/a.ogg"
+            assert segs[2]["type"] == "text"
+            assert segs[2]["data"]["text"] == "voice caption"
+    finally:
+        await server.close()
+
+
+async def test_send_video_with_reply_to():
+    """send_video with reply_to — prepends a reply segment before the video."""
+    app, mock_api, _ = _make_relay_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(
+                    send_message("send_video", "r4b", "group:42",
+                                  video_path="/tmp/v.mp4", caption="vid cap", reply_to="77")
+                )
+                result = await ws.receive_json(timeout=2)
+                assert result["success"] is True
+            segs = mock_api.send_group_msg.await_args.args[1]
+            assert segs[0]["type"] == "reply"
+            assert segs[0]["data"]["id"] == "77"
+            assert segs[1]["type"] == "video"
+            assert segs[2]["type"] == "text"
+    finally:
+        await server.close()
+
+
+async def test_send_document_with_caption_and_reply_to():
+    """send_document with caption+reply_to — uploads file then sends follow-up text."""
+    app, mock_api, _ = _make_relay_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(
+                    send_message("send_document", "r5b", "group:42",
+                                  file_path="/tmp/report.pdf", filename="report.pdf",
+                                  caption="doc caption", reply_to="88")
+                )
+                result = await ws.receive_json(timeout=5)
+                assert result["success"] is True
+            # File upload
+            mock_api.upload_group_file.assert_awaited_once()
+            # Follow-up caption text with reply segment
+            assert mock_api.send_group_msg.await_count == 1
+            segs = mock_api.send_group_msg.await_args.args[1]
+            assert segs[0]["type"] == "reply"
+            assert segs[0]["data"]["id"] == "88"
+            assert segs[1]["type"] == "text"
+            assert segs[1]["data"]["text"] == "doc caption"
+    finally:
+        await server.close()
+
+
 async def test_api_call_passthrough():
     app, mock_api, _ = _make_relay_app()
     mock_api.call = AsyncMock(return_value={"data": {"group_name": "Test"}})

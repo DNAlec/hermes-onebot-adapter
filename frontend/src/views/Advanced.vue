@@ -202,7 +202,7 @@ async function changeToken() {
       <label>
         去重 TTL(秒)
         <input type="number" v-model.number="cfg.send_dedup_ttl_seconds" min="1" step="1" />
-        <span class="hint">相同内容在此时间内被重复发送时直接返回缓存结果(默认 90 秒,需覆盖 Gateway _send_with_retry 的完整重试窗口:30s 超时 + 2.7s 退避 + 30s 超时 + 4.6s 退避 ≈ 67s)。值越小误去重风险越低,但可能漏掉间隔较长的重试。</span>
+        <span class="hint">相同内容在此时间内被重复发送时直接返回缓存结果(默认 10 秒)。建议覆盖 Gateway _send_with_retry 的完整重试窗口(30s 超时 + 2.7s 退避 + 30s 超时 + 4.6s 退避 ≈ 67s),否则间隔较长的重试可能漏掉去重导致重复发送。值越小误去重风险越低,但可能漏掉间隔较长的重试。</span>
       </label>
     </div>
 
