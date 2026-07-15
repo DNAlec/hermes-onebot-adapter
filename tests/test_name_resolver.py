@@ -365,3 +365,46 @@ async def test_eviction_skips_in_flight_locks():
     assert locked_key in resolver._cache, "locked key was evicted despite held lock"
     assert locked_key in resolver._locks
     lock.release()
+
+
+async def test_eviction_force_evicts_oldest_when_all_keys_locked():
+    """When every key's lock is held, _evict_if_needed must still bound the
+    cache size by force-evicting the oldest entry (rather than giving up and
+    letting the cache grow unbounded).
+    """
+    from onebot_adapter.onebot.name_resolver import _CACHE_MAX
+
+    api = MagicMock()
+
+    async def _gmi(group_id, user_id, no_cache=False):
+        return {"card": f"user{user_id}", "nickname": "n"}
+
+    api.get_group_member_info = _gmi
+    api.get_stranger_info = AsyncMock(return_value={"nickname": "s"})
+    resolver = NameResolver(api)
+
+    # Fill the cache exactly to _CACHE_MAX.
+    for i in range(_CACHE_MAX):
+        await resolver.resolve(str(i), "1")
+
+    assert len(resolver._cache) == _CACHE_MAX
+
+    # Acquire every lock so _evict_if_needed can't find an unlocked key.
+    held_locks = []
+    for key in list(resolver._keys_order):
+        lock = resolver._get_lock(key)
+        await lock.acquire()
+        held_locks.append(lock)
+
+    # Now call _store with a new key — this exceeds _CACHE_MAX and triggers
+    # _evict_if_needed, which should force-evict the oldest locked entry.
+    resolver._store("1:new", "newuser")
+
+    # Cache must stay bounded (not exceed _CACHE_MAX + 1).
+    assert len(resolver._cache) <= _CACHE_MAX, (
+        f"cache grew to {len(resolver._cache)} > {_CACHE_MAX} when all keys locked"
+    )
+
+    # Release all locks.
+    for lock in held_locks:
+        lock.release()

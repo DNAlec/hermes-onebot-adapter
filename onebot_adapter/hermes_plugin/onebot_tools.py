@@ -801,7 +801,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
     ("onebot_forward_single_msg", _forward_single_msg, _schema(
         "onebot_forward_single_msg",
         "单条消息转发到群聊或私聊(无需构造 node 数组,比合并转发更轻量)。"
-        "默认转发到当前会话;无当前会话时通过 group_id 或 user_id 指定目标。",
+        "显式传入 group_id/user_id 时优先使用指定目标,否则转发到当前会话;两者皆无则报错。",
         {
             "real_seq": _int("要转发的消息序号(群聊为前缀#后的群内序号,私聊为全局消息ID)"),
             "group_id": _int("目标群号(转发到群聊时填写)"),
