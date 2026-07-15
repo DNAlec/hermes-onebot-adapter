@@ -210,6 +210,7 @@ async def test_send_video_with_reply_to():
             assert segs[0]["data"]["id"] == "77"
             assert segs[1]["type"] == "video"
             assert segs[2]["type"] == "text"
+            assert segs[2]["data"]["text"] == "vid cap"
     finally:
         await server.close()
 
@@ -421,6 +422,30 @@ async def test_send_text_dedup_different_content():
                 await ws.send_json(send_message("send_text", "r1", "group:42", content="hello"))
                 await ws.receive_json(timeout=2)
                 await ws.send_json(send_message("send_text", "r2", "group:42", content="world"))
+                await ws.receive_json(timeout=2)
+            assert mock_api.send_group_msg.await_count == 2
+    finally:
+        await server.close()
+
+
+async def test_send_voice_dedup_different_caption():
+    """send_voice with same audio_path but different caption should NOT be deduped."""
+    app, mock_api, _ = _make_relay_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(
+                    send_message("send_voice", "r1", "group:42",
+                                  audio_path="/tmp/a.ogg", caption="cap1")
+                )
+                await ws.receive_json(timeout=2)
+                await ws.send_json(
+                    send_message("send_voice", "r2", "group:42",
+                                  audio_path="/tmp/a.ogg", caption="cap2")
+                )
                 await ws.receive_json(timeout=2)
             assert mock_api.send_group_msg.await_count == 2
     finally:

@@ -63,7 +63,7 @@ def _send_fingerprint(action: str, data: dict[str, Any]) -> str:
     elif action == "send_image":
         raw = f"{data.get('image_url', '')}|{data.get('caption', '')}"
     elif action == "send_voice":
-        raw = f"{data.get('audio_path', '')}"
+        raw = f"{data.get('audio_path', '')}|{data.get('caption', '')}"
     elif action == "send_video":
         raw = f"{data.get('video_path', '')}|{data.get('caption', '')}"
     elif action == "send_document":
@@ -661,14 +661,10 @@ class HermesRelayServer:
         self._ensure_watchdog()
         # Schedule the broadcast + on_dispatch as a single tracked task so
         # stop() can cancel it and _on_dispatch only fires when the event
-        # was actually delivered (not dropped due to 0 clients).
+        # was actually delivered (at least one client received it).
         async def _dispatch_nxt() -> None:
-            if not self._clients:
-                # No plugin connected — skip broadcast and on_dispatch
-                # (the event is in the ring buffer for replay).
-                return
-            await self._broadcast_event(nxt)
-            if self._on_dispatch is not None:
+            delivered = await self._broadcast_event(nxt)
+            if delivered and self._on_dispatch is not None:
                 await self._on_dispatch(nxt)
 
         task = asyncio.create_task(_dispatch_nxt())
@@ -738,23 +734,31 @@ class HermesRelayServer:
             logger.info("relay idle: gid=%s — dispatching next queued", gid)
             self._dequeue_and_dispatch(gid)
 
-    async def _broadcast_event(self, event: NormalizedEvent) -> None:
+    async def _broadcast_event(self, event: NormalizedEvent) -> bool:
+        """Broadcast *event* to all connected plugin clients.
+
+        Returns ``True`` if at least one client received the event,
+        ``False`` if there were zero clients or all sends failed.
+        """
         n_clients = len(self._clients)
         if n_clients == 0:
             logger.warning(
                 "relay broadcast: 0 plugin clients connected — event dropped (chat_id=%s text_preview=%r)",
                 event.chat_id, (event.text or "")[:120],
             )
-            return
+            return False
         logger.debug("relay broadcast: sending to %d client(s)", n_clients)
         frame = event_message(event)
         logger.debug("relay broadcast event frame: %s", json.dumps(frame, ensure_ascii=False)[:2000])
+        delivered = False
         for ws in list(self._clients):
             try:
                 await ws.send_json(frame)
+                delivered = True
             except Exception:
                 logger.exception("push_event failed; dropping client")
                 self._clients.discard(ws)
+        return delivered
 
     async def _replay_ring_buffer(self, ws: aiohttp.web.WebSocketResponse) -> bool:
         """Send buffered events to a newly-connected plugin.
