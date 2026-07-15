@@ -68,11 +68,11 @@ def strip_markdown(text: str) -> str:
             continue
 
         # ── ordered lists ─────────────────────────────────────────────────
-        ol = re.match(r"^(\s*)\d+[.)]\s+(.*)", line)
+        ol = re.match(r"^(\s*)(\d+)[.)]\s+(.*)", line)
         if ol:
             indent = len(ol.group(1)) // 2
-            num = re.match(r"^\s*(\d+)", line).group(1)
-            out.append("  " * indent + num + ". " + _inline(ol.group(2)))
+            num = ol.group(2)
+            out.append("  " * indent + num + ". " + _inline(ol.group(3)))
             continue
 
         # ── table rows ────────────────────────────────────────────────────

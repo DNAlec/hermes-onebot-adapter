@@ -157,3 +157,45 @@ def test_load_config_ignores_comment_fields(tmp_path):
     loaded = load_config(p)
     assert not hasattr(loaded, "_comment_onebot_mode")
     assert loaded.onebot_ws_token == "t1"
+
+
+def test_config_validate_rejects_invalid_ports():
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", onebot_reverse_ws_port=0)
+    errors = cfg.validate()
+    assert any("onebot_reverse_ws_port" in e for e in errors)
+
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", hermes_ws_port=99999)
+    errors = cfg.validate()
+    assert any("hermes_ws_port" in e for e in errors)
+
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", webui_port=65535)
+    errors = cfg.validate()
+    assert not any("webui_port" in e for e in errors)  # 65535 is valid
+
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", webui_port=1)
+    errors = cfg.validate()
+    assert not any("webui_port" in e for e in errors)  # 1 is valid
+
+
+def test_config_get_group_config_empty_dict():
+    """get_group_config should return config for explicit empty dict (not default)."""
+    from onebot_adapter.config import GroupConfig
+
+    cfg = AdapterConfig(groups={"42": {}})
+    gc = cfg.get_group_config("42")
+    # Should return a GroupConfig from the empty dict, with group_id injected
+    assert isinstance(gc, GroupConfig)
+    assert gc.group_id == "42"
+
+
+def test_config_is_admin_with_empty_string_group_id():
+    """is_admin should handle group_id='' without treating it as 'no group'."""
+    cfg = AdapterConfig(global_admins=["100"], groups={"42": {"group_id": "42", "admins": ["200"]}})
+    # group_id="" should not match any group (is not None → checks groups[""] → not found → default)
+    assert cfg.is_admin("200", group_id="") is False
+    # group_id=None should skip group check
+    assert cfg.is_admin("200") is False
+    # global admin should always pass
+    assert cfg.is_admin("100") is True
+    # Valid group admin
+    assert cfg.is_admin("200", group_id="42") is True

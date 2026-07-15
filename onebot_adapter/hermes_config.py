@@ -73,11 +73,17 @@ def _locked(config_path: Path):
     lock_path = config_path.with_suffix(config_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(lock_path, "w")
+    locked = False
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        locked = True
         yield
     finally:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        if locked:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
         fh.close()
 
 
@@ -213,13 +219,19 @@ def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
 def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
     """读取 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
 
-    返回 ``True`` / ``False``;字段不存在时返回 ``None``(调用方按 Hermes
-    默认值 ``True`` 处理,即每用户独立 session)。
+    返回 ``True`` / ``False``;字段不存在或文件/目录不存在时返回 ``None``
+    (调用方按 Hermes 默认值 ``True`` 处理,即每用户独立 session)。
+    YAML 解析失败时也返回 ``None`` 并记 warning,不抛异常,与
+    ``_read_mcp_servers`` 的错误处理策略一致。
     """
     config_path = resolve_hermes_config_path(hermes_install_dir)
     if config_path is None or not config_path.exists():
         return None
-    data = read_config(hermes_install_dir)
+    try:
+        data = read_config(hermes_install_dir)
+    except HermesConfigParseError as exc:
+        logger.warning("read_group_sessions_per_user: config parse failed: %s", exc)
+        return None
     if "group_sessions_per_user" not in data:
         return None
     value = data.get("group_sessions_per_user")
@@ -495,8 +507,12 @@ def default_onebot_toolsets(hermes_install_dir: str | None) -> list[str]:
 
 
 def read_current_enabled(hermes_install_dir: str | None) -> list[str]:
-    """读取 ``platform_toolsets.onebot``;不存在返回空列表。"""
-    data = read_config(hermes_install_dir)
+    """读取 ``platform_toolsets.onebot``;不存在或解析失败返回空列表。"""
+    try:
+        data = read_config(hermes_install_dir)
+    except HermesConfigParseError as exc:
+        logger.warning("read_current_enabled: config parse failed: %s", exc)
+        return []
     platform_toolsets = data.get("platform_toolsets") or {}
     if hasattr(platform_toolsets, "get"):
         val = platform_toolsets.get(PLATFORM, [])

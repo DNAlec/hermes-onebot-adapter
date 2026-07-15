@@ -659,18 +659,22 @@ class HermesRelayServer:
             self._queues.pop(gid, None)
         self._busy_groups[gid] = (nxt.user_id, time.monotonic())
         self._ensure_watchdog()
-        # Schedule the broadcast + on_dispatch as tracked tasks so stop() can
-        # cancel them and exceptions surface via the done-callback instead of
-        # being silently swallowed ("Task exception was never retrieved").
-        task = asyncio.create_task(self._broadcast_event(nxt))
+        # Schedule the broadcast + on_dispatch as a single tracked task so
+        # stop() can cancel it and _on_dispatch only fires when the event
+        # was actually delivered (not dropped due to 0 clients).
+        async def _dispatch_nxt() -> None:
+            if not self._clients:
+                # No plugin connected — skip broadcast and on_dispatch
+                # (the event is in the ring buffer for replay).
+                return
+            await self._broadcast_event(nxt)
+            if self._on_dispatch is not None:
+                await self._on_dispatch(nxt)
+
+        task = asyncio.create_task(_dispatch_nxt())
         self._text_tasks.add(task)
         task.add_done_callback(self._text_tasks.discard)
         task.add_done_callback(_log_task_exception)
-        if self._on_dispatch is not None:
-            task = asyncio.create_task(self._on_dispatch(nxt))
-            self._text_tasks.add(task)
-            task.add_done_callback(self._text_tasks.discard)
-            task.add_done_callback(_log_task_exception)
         logger.info(
             "relay dequeue: gid=%s remaining=%d new_busy_user=%s merged=%d text_preview=%r",
             gid, len(self._queues.get(gid, ())), nxt.user_id, merged_count,
@@ -898,6 +902,11 @@ class HermesRelayServer:
                 file_ref = str(data.get("image_url", ""))
                 if not file_ref:
                     raise ValueError("no image_url provided")
+                if data.get("reply_to"):
+                    try:
+                        segs.append(ob.reply_segment(int(data["reply_to"])))
+                    except (ValueError, TypeError):
+                        pass
                 segs.append(ob.image_segment(file_ref))
                 if data.get("caption"):
                     segs.append(ob.text_segment(data["caption"]))
@@ -906,12 +915,24 @@ class HermesRelayServer:
                 file_ref = str(data.get("audio_path", ""))
                 if not file_ref:
                     raise ValueError("no audio_path provided")
+                if data.get("reply_to"):
+                    try:
+                        segs.append(ob.reply_segment(int(data["reply_to"])))
+                    except (ValueError, TypeError):
+                        pass
                 segs.append(ob.record_segment(file_ref))
+                if data.get("caption"):
+                    segs.append(ob.text_segment(data["caption"]))
 
             elif action == "send_video":
                 file_ref = str(data.get("video_path", ""))
                 if not file_ref:
                     raise ValueError("no video_path provided")
+                if data.get("reply_to"):
+                    try:
+                        segs.append(ob.reply_segment(int(data["reply_to"])))
+                    except (ValueError, TypeError):
+                        pass
                 segs.append(ob.video_segment(file_ref))
                 if data.get("caption"):
                     segs.append(ob.text_segment(data["caption"]))

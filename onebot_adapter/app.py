@@ -406,6 +406,18 @@ class AdapterService:
                 await self._onebot_forward.stop()
                 self._forward_task = self._onebot_forward.start()
 
+        # Warn about path changes that require a restart to take effect
+        # (routes are bound at startup and can't be hot-swapped).
+        for old_val, new_val, label in [
+            (old.onebot_reverse_ws_path, new.onebot_reverse_ws_path, "onebot_reverse_ws_path"),
+            (old.hermes_ws_path, new.hermes_ws_path, "hermes_ws_path"),
+        ]:
+            if old_val != new_val:
+                logger.warning(
+                    "%s changed (%s -> %s) — requires restart to take effect",
+                    label, old_val, new_val,
+                )
+
         self._update_status()
 
     async def _probe_self_id(self) -> None:
