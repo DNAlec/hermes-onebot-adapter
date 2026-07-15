@@ -55,11 +55,22 @@ class NameResolver:
 
         Skips keys whose lock is currently held (in-flight lookup) so that
         a concurrent ``resolve()`` for the same key doesn't create a new lock
-        and bypass the per-key dedup. If all keys are locked (extremely
-        unlikely), gives up to avoid an infinite loop.
+        and bypass the per-key dedup. If all keys are locked, evicts the
+        oldest anyway to prevent unbounded growth — the in-flight lookup for
+        that key will simply re-fetch on its next call (it hasn't stored yet).
         """
         skipped = 0
-        while len(self._cache) > _CACHE_MAX and self._keys_order and skipped < len(self._keys_order):
+        while len(self._cache) > _CACHE_MAX and self._keys_order:
+            if skipped >= len(self._keys_order):
+                # Every key is locked — evict the oldest to bound memory.
+                # Its in-flight lookup hasn't stored a result yet, so removing
+                # the (non-existent) cache entry is harmless; the lock stays.
+                old_key = self._keys_order[0]
+                self._keys_order.popleft()
+                self._cache.pop(old_key, None)
+                # Don't pop the lock — it's still held by an in-flight lookup.
+                skipped = 0
+                continue
             old_key = self._keys_order[0]
             lock = self._locks.get(old_key)
             if lock is not None and lock.locked():
@@ -214,9 +225,3 @@ class NameResolver:
         cache_key = f"{group_id}:{user_id}" if group_id else f"dm:{user_id}"
         self._cache.pop(cache_key, None)
         self._locks.pop(cache_key, None)
-
-    def clear(self) -> None:
-        """Clear all cached names."""
-        self._cache.clear()
-        self._keys_order.clear()
-        self._locks.clear()

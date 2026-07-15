@@ -11,6 +11,7 @@ import shutil
 from pathlib import Path
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 from onebot_adapter import __version__
 
@@ -27,7 +28,8 @@ def _is_safe_install_path(target: Path) -> bool:
 
     Only allow writes under the user's home directory, /home, or /tmp.
     Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
-    writes via the CLI or WebUI.
+    writes via the CLI or WebUI.  Symlink-based attacks on /tmp are
+    mitigated by the per-file ``is_symlink()`` guard in :func:`install`.
     """
     allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
     resolved = target.resolve(strict=False)
@@ -144,6 +146,11 @@ def install(
 
     # Copy plugin files
     dest.mkdir(parents=True, exist_ok=True)
+    # Refuse to write through a pre-planted symlink — a symlinked dest or
+    # dest/<file> could redirect writes to arbitrary files (TOCTOU race).
+    if dest.is_symlink():
+        result["error"] = f"install target is a symlink, refusing to overwrite: {dest}"
+        return result
     # Use round-trip YAML to preserve string quoting (e.g. version: "0.0.0"
     # stays quoted so it isn't parsed as float 0.0).
     _yaml = YAML(typ="rt")
@@ -153,11 +160,20 @@ def install(
             continue
         if fname == "plugin.yaml":
             data = _yaml.load(src_file.read_text(encoding="utf-8"))
+            if data is None:
+                data = CommentedMap()
             data["version"] = __version__
             out_path = dest / fname
+            if out_path.is_symlink():
+                result["error"] = f"output path is a symlink, refusing to overwrite: {out_path}"
+                return result
             _yaml.dump(data, out_path)
         else:
-            shutil.copy2(src_file, dest / fname)
+            out_path = dest / fname
+            if out_path.is_symlink():
+                result["error"] = f"output path is a symlink, refusing to overwrite: {out_path}"
+                return result
+            shutil.copy2(src_file, out_path)
         result["copied"].append(fname)
 
     # Clean stale .pyc

@@ -86,6 +86,14 @@ def strip_markdown(text: str) -> str:
         # ── normal line ───────────────────────────────────────────────────
         out.append(_inline(line))
 
+    # Flush an unclosed fenced code block (LLM output truncated mid-block).
+    if in_code:
+        label = f"[{code_lang}]" if code_lang else "[代码]"
+        out.append(f"┌─{label}─")
+        for cl in code_lines:
+            out.append("│ " + cl)
+        out.append("└──────")
+
     return "\n".join(out).strip()
 
 

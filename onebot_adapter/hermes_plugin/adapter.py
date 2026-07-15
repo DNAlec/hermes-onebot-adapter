@@ -20,7 +20,7 @@ import os
 import random
 import re
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -266,6 +266,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # the receive loop (avoids the bypass-command self-deadlock).  Tracked
         # so disconnect() can cancel them cleanly.
         self._event_tasks: set[asyncio.Task[None]] = set()
+        # Background push tasks (commands snapshot, mode report, plugin info)
+        # spawned on connect/reconnect.  Tracked so disconnect()/reconnect can
+        # cancel them cleanly instead of leaving them to send on a closing WS.
+        self._push_tasks: set[asyncio.Task[None]] = set()
         # Limit concurrent in-flight send requests to prevent retry storms
         # from overwhelming the serial OneBot WS API.  See _MAX_INFLIGHT_SENDS.
         self._send_semaphore = asyncio.Semaphore(_MAX_INFLIGHT_SENDS)
@@ -324,12 +328,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # can filter /commands before forwarding messages.  Sent after the
         # receive loop is started so any commands_refresh request from the
         # adapter can also be handled.
-        asyncio.create_task(self._push_commands_snapshot())
+        self._spawn_push(self._push_commands_snapshot())
         # Push Hermes' group_sessions_per_user so the adapter can decide
         # whether shared-group queueing is needed.
-        asyncio.create_task(self._push_hermes_mode_report())
+        self._spawn_push(self._push_hermes_mode_report())
         # Push installed plugin version so the adapter can detect mismatches.
-        asyncio.create_task(self._push_plugin_info())
+        self._spawn_push(self._push_plugin_info())
         return True
 
     async def _ws_connect(self) -> None:
@@ -346,6 +350,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # undetected until the next send attempt, at which point the watchdog
         # kicks off a 1→30s exponential backoff reconnect (~2-3 min total).
         self._ws = await self._session.ws_connect(url, heartbeat=30)
+
+    def _spawn_push(self, coro: Any) -> None:
+        """Schedule a fire-and-forget push task, tracked for clean cancel."""
+        task = asyncio.create_task(coro)
+        self._push_tasks.add(task)
+        task.add_done_callback(self._push_tasks.discard)
 
     async def disconnect(self) -> None:
         self._is_connected = False
@@ -375,6 +385,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if self._event_tasks:
             await asyncio.gather(*self._event_tasks, return_exceptions=True)
         self._event_tasks.clear()
+        # Cancel in-flight push tasks (commands snapshot / mode report / plugin info)
+        for task in list(self._push_tasks):
+            task.cancel()
+        if self._push_tasks:
+            await asyncio.gather(*self._push_tasks, return_exceptions=True)
+        self._push_tasks.clear()
         if self._ws and not self._ws.closed:
             await self._ws.close()
         if self._session and not self._session.closed:
@@ -434,6 +450,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 if self._event_tasks:
                     await asyncio.gather(*self._event_tasks, return_exceptions=True)
                 self._event_tasks.clear()
+                # Cancel stale push tasks from the dead session.
+                for task in list(self._push_tasks):
+                    task.cancel()
+                if self._push_tasks:
+                    await asyncio.gather(*self._push_tasks, return_exceptions=True)
+                self._push_tasks.clear()
                 # Recreate the session if it was closed.
                 if not self._session or self._session.closed:
                     self._session = aiohttp.ClientSession()
@@ -449,12 +471,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 logger.info("OneBot: reconnected to adapter service at %s", self._adapter_url)
                 # Re-push commands snapshot after reconnect so the adapter has
                 # the latest registry even across WS drops.
-                asyncio.create_task(self._push_commands_snapshot())
+                self._spawn_push(self._push_commands_snapshot())
                 # Re-push Hermes mode so the adapter has the current
                 # group_sessions_per_user value.
-                asyncio.create_task(self._push_hermes_mode_report())
+                self._spawn_push(self._push_hermes_mode_report())
                 # Re-push plugin version.
-                asyncio.create_task(self._push_plugin_info())
+                self._spawn_push(self._push_plugin_info())
                 delay = _RECONNECT_INITIAL_DELAY  # reset backoff on success
             except Exception as exc:
                 logger.warning("OneBot: reconnect failed: %s", exc)
@@ -562,7 +584,11 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._current_group_id = group_id
         self._current_user_id = user_id
 
-        timestamp = datetime.fromtimestamp(data["timestamp"]) if data.get("timestamp") else datetime.now()
+        timestamp = (
+            datetime.fromtimestamp(float(data["timestamp"]), tz=UTC)
+            if data.get("timestamp")
+            else datetime.now(tz=UTC)
+        )
 
         source = self.build_source(
             chat_id=data.get("chat_id", ""),

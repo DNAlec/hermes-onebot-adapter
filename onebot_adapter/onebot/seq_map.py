@@ -62,11 +62,6 @@ class SeqMap:
             return None
         return self._lut.get((scope_id, real_seq))
 
-    def clear(self) -> None:
-        """清空全部映射。"""
-        self._buf.clear()
-        self._lut.clear()
-
     def update_maxlen(self, new_maxlen: int) -> None:
         """热重载:重建 deque(因 ``deque.maxlen`` 创建后不可变)。
 

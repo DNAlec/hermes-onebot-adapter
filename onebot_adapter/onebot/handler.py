@@ -56,6 +56,10 @@ class OneBotHandler:
         self._name_resolver = name_resolver or NameResolver(api)
         self._ws_api_transport = ws_api_transport
 
+    def update_config(self, config: AdapterConfig) -> None:
+        """Hot-reload config without rebuilding the handler."""
+        self._config = config
+
     async def handle_text(self, raw: str) -> None:
         """Process a single OneBot text frame end-to-end."""
         # 先检查是否是 WS API 的响应帧（命中 echo 的 pending 请求），若是则
