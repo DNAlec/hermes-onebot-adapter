@@ -194,7 +194,7 @@ class AdapterConfig:
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
 
     # ── 媒体投递 ──
-    media_delivery_mode: str = MEDIA_DELIVERY_PASSTHROUGH  # "passthrough"(默认,URL 占位符) | "cache"(插件侧下载落盘)
+    media_delivery_mode: str = MEDIA_DELIVERY_CACHE  # "passthrough"(URL 占位符) | "cache"(默认,插件侧下载落盘)
 
     # ── /指令过滤 ──
     command_filter_enabled: bool = False                # 总开关：是否对 /指令 做权限过滤
@@ -516,7 +516,7 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
         "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
-        "media_delivery_mode": "可选值: passthrough(URL 占位符直传,默认) | cache(插件侧下载落盘到 ~/.hermes/cache/)",
+        "media_delivery_mode": "可选值: passthrough(URL 占位符直传) | cache(插件侧下载落盘到 ~/.hermes/cache/,默认)",
         "global_channel_prompt": "全局提示词;保存时物化写入 Hermes config.yaml 的"
                                  " platforms.onebot.channel_prompts,需重启 Hermes 网关生效",
         "notify_poke_enabled": "戳一戳(bot 被戳)推送开关;开启后 bot 被戳会合成系统事件转发给 agent",

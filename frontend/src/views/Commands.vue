@@ -287,7 +287,7 @@ function clearAllVisible() {
       </div>
 
       <button @click="save" :disabled="saving" class="save-btn">
-        {{ saving ? "保存中..." : "保存设置" }}
+        {{ saving ? "保存中..." : "保存配置" }}
       </button>
     </div>
   </div>
@@ -335,8 +335,6 @@ input[type="checkbox"] { width: auto; }
 .source-badge.plugin { background: rgba(255, 193, 7, 0.15); color: #856404; }
 .perm-select { width: auto; margin: 0; min-width: 120px; }
 
-.save-btn { background: var(--primary); color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem; }
-.save-btn:disabled { background: #ccc; cursor: not-allowed; }
 .sync-btn { background: var(--bg); border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
 .sync-btn:disabled { cursor: not-allowed; opacity: 0.6; }
 .empty { color: var(--text-muted); text-align: center; padding: 2rem; }

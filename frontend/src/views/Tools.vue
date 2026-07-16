@@ -301,8 +301,6 @@ const stats = computed(() => ({
 .no-mcp-row { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px dashed var(--border); }
 
 .action-row { display: flex; gap: 0.75rem; margin-top: 1rem; }
-.save-btn { background: var(--primary); color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem; }
-.save-btn:disabled { background: #ccc; cursor: not-allowed; }
 .reset-btn { background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--border); padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem; }
 .reset-btn:hover { background: var(--bg); }
 .reset-btn:disabled { cursor: not-allowed; opacity: 0.6; }
