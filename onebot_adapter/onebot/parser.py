@@ -355,7 +355,6 @@ async def parse_event(
     )
 
     # ── Group filtering (config-driven) ──────────────────────────────
-    channel_prompt: str | None = None
     is_admin = False
     if config and is_group:
         if not config.is_group_user_allowed(group_id, sender_id):
@@ -368,7 +367,6 @@ async def parse_event(
         trigger_keywords = config.resolve_trigger_keywords(group_id)
         keyword_first_only = config.resolve_keyword_first_only(group_id)
         strip_first_mention = config.resolve_strip_first_mention(group_id)
-        channel_prompt = config.resolve_custom_prompt(group_id)
         is_admin = config.is_admin(sender_id, group_id)
         media_delivery_mode = config.media_delivery_mode
     elif config and not is_group:
@@ -532,7 +530,6 @@ async def parse_event(
         reply_to_message_id=str(reply_to_id) if reply_to_id else None,
         reply_to_text=reply_to_text,
         timestamp=float(event.get("time", 0) or 0),
-        channel_prompt=channel_prompt,
         is_admin=is_admin,
         chat_name=chat_name,
         real_seq=str(event.get("real_seq", "") or ""),

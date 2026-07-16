@@ -37,7 +37,7 @@ COMMAND_PERM_DISABLED = "disabled"
 _VALID_COMMAND_PERM_LEVELS = {COMMAND_PERM_EVERYONE, COMMAND_PERM_ADMIN, COMMAND_PERM_DISABLED}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
-DEFAULT_PLATFORM_HINT = (
+DEFAULT_CHANNEL_PROMPT = (
     "# 平台特性\n"
     "你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n"
     "回复当前对话通常直接输出文本即可(系统会自动送达);"
@@ -87,14 +87,14 @@ DEFAULT_PLATFORM_HINT = (
 class GroupConfig:
     """Per-group configuration. Stored in AdapterConfig.groups[group_id]."""
     group_id: str
-    name: str = ""
+    name: str = ""  # UI 展示缓存;运行时群名走 name_resolver
     enabled: bool = True
     require_mention: bool | None = None       # None=跟随全局
     mention_first_only: bool | None = None    # None=跟随全局，True=仅首@段触发
     trigger_keywords: list[str] | None = None  # None=跟随全局，[] = 强制禁用关键词
     keyword_first_only: bool | None = None   # None=跟随全局，True=关键词须在开头
     strip_first_mention: bool | None = None  # None=跟随全局，True=移除首@bot段
-    custom_prompt: str = ""                   # 空=用全局 platform_hint
+    custom_prompt: str = ""                   # 空=用全局 global_channel_prompt(WebUI 保存时物化写入 Hermes config.yaml)
     admins: list[str] = field(default_factory=list)
     # ── 群成员准入（黑名单/白名单）──
     group_user_filter_mode: str = USER_FILTER_BLACKLIST  # 默认黑名单
@@ -157,7 +157,7 @@ class AdapterConfig:
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # ── 其他 ──
-    platform_hint: str = DEFAULT_PLATFORM_HINT
+    global_channel_prompt: str = DEFAULT_CHANNEL_PROMPT
     hermes_ws_port: int = 18810
     hermes_ws_path: str = "/hermes"
     hermes_ws_token: str = ""
@@ -334,10 +334,6 @@ class AdapterConfig:
             return gc.strip_first_mention
         return self.group_strip_first_mention
 
-    def resolve_custom_prompt(self, group_id: str) -> str | None:
-        gc = self.get_group_config(group_id)
-        return gc.custom_prompt if gc.custom_prompt else None
-
     def resolve_message_show_group_id(self, group_id: str) -> bool:
         gc = self.get_group_config(group_id)
         if gc.message_show_group_id is not None:
@@ -433,6 +429,9 @@ class AdapterConfig:
     def from_dict(cls, data: dict[str, Any]) -> AdapterConfig:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
+        # Migrate legacy field name: platform_hint -> global_channel_prompt
+        if "platform_hint" in data and "global_channel_prompt" not in filtered:
+            filtered["global_channel_prompt"] = data["platform_hint"]
         return cls(**filtered)
 
     def with_overrides(self, **changes: Any) -> AdapterConfig:
@@ -485,6 +484,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
         "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
         "media_delivery_mode": "可选值: passthrough(URL 占位符直传,默认) | cache(插件侧下载落盘到 ~/.hermes/cache/)",
+        "global_channel_prompt": "全局提示词;保存时物化写入 Hermes config.yaml 的"
+                                 " platforms.onebot.channel_prompts,需重启 Hermes 网关生效",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():

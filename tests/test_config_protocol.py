@@ -199,3 +199,20 @@ def test_config_is_admin_with_empty_string_group_id():
     assert cfg.is_admin("100") is True
     # Valid group admin
     assert cfg.is_admin("200", group_id="42") is True
+
+
+def test_config_from_dict_migrates_platform_hint():
+    """from_dict should migrate legacy platform_hint → global_channel_prompt."""
+    cfg = AdapterConfig.from_dict({"platform_hint": "旧提示词", "onebot_ws_token": "t", "hermes_ws_token": "t"})
+    assert cfg.global_channel_prompt == "旧提示词"
+
+
+def test_config_from_dict_global_channel_prompt_takes_precedence():
+    """If both platform_hint and global_channel_prompt are present, the new name wins."""
+    cfg = AdapterConfig.from_dict({
+        "platform_hint": "旧提示词",
+        "global_channel_prompt": "新提示词",
+        "onebot_ws_token": "t",
+        "hermes_ws_token": "t",
+    })
+    assert cfg.global_channel_prompt == "新提示词"

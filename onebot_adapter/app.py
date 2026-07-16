@@ -84,7 +84,7 @@ class AdapterService:
             self._api,
             adapter_version=__version__,
             onebot_connected_fn=self._onebot_connected,
-            on_connect=self._update_status,
+            on_connect=self._on_plugin_connect,
             on_disconnect=self._update_status,
             on_filtered=self._on_filtered_command,
             on_dispatch=self._maybe_react_delivered,
@@ -233,6 +233,19 @@ class AdapterService:
         """Synchronise WebUI state with live connection status."""
         self._state["onebot_connected"] = self._onebot_connected()
         self._state["hermes_plugin_connected"] = bool(self._relay and self._relay.has_clients)
+
+    def _on_plugin_connect(self) -> None:
+        """Called when the Hermes plugin connects to the relay WS.
+
+        Updates status and materializes channel_prompts into Hermes config.yaml
+        so the plugin picks up the latest global/per-group prompt values.
+        """
+        self._update_status()
+        try:
+            from onebot_adapter.hermes_config import materialize_channel_prompts
+            materialize_channel_prompts(self.store.config, self.store.config.hermes_install_dir or None)
+        except Exception:
+            logger.exception("materialize_channel_prompts on plugin connect failed")
 
     async def _on_onebot_event(self, event) -> None:
         self._update_status()

@@ -117,7 +117,6 @@ class NormalizedEvent:
     reply_to_message_id: str | None = None
     reply_to_text: str | None = None
     timestamp: float = 0.0
-    channel_prompt: str | None = None
     is_admin: bool = False
     chat_name: str = ""
     real_seq: str = ""
@@ -134,7 +133,6 @@ class NormalizedEvent:
             "reply_to_message_id": self.reply_to_message_id,
             "reply_to_text": self.reply_to_text,
             "timestamp": self.timestamp,
-            "channel_prompt": self.channel_prompt,
             "is_admin": self.is_admin,
             "chat_name": self.chat_name,
             "real_seq": self.real_seq,

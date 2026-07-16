@@ -93,7 +93,6 @@ async function saveGlobal() {
       group_trigger_keywords: c.group_trigger_keywords,
       group_keyword_first_only: c.group_keyword_first_only,
       group_strip_first_mention: c.group_strip_first_mention,
-      group_auto_join: c.group_auto_join,
       global_admins: c.global_admins,
       dm_user_filter_mode: c.dm_user_filter_mode,
       dm_user_list: c.dm_user_list,
@@ -105,9 +104,9 @@ async function saveGlobal() {
       event_queue_max_per_chat: c.event_queue_max_per_chat,
       event_queue_idle_timeout: c.event_queue_idle_timeout,
       media_delivery_mode: c.media_delivery_mode,
-      platform_hint: c.platform_hint,
+      global_channel_prompt: c.global_channel_prompt,
     });
-    msg.value = "全局设置已保存";
+    msg.value = "全局设置已保存。需重启 Hermes 网关生效。";
     msgType.value = "success";
   } catch (e: any) {
     msg.value = (e.response?.data?.error || e.message);
@@ -136,7 +135,6 @@ function addGroup() {
     mention_first_only: null, trigger_keywords: null, keyword_first_only: null, strip_first_mention: null,
     custom_prompt: "", admins: [],
     group_user_filter_mode: "blacklist", group_user_list: [],
-    welcome_enabled: false, welcome_message: "", auto_join: false,
     message_show_group_id: null,
     reaction_emoji_enabled: null,
     command_filter_enabled: null, command_filter_unknown: null, command_permissions: null,
@@ -220,7 +218,7 @@ function tryParseCmdPerms(text: string) {
 
 function resetHint() {
   if (!cfg.value) return;
-  cfg.value.platform_hint = "# 平台特性\n你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n回复当前对话通常直接输出文本即可(系统会自动送达);当你需要主动发送消息(分多条发、推送其他会话、跨会话通知等)时,使用 onebot_send_message 工具。\n群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n# chat_id 格式\n- 私聊: <QQ号>(如 100)\n- 群聊: group:<群号>(如 group:42)\n\n# 入站消息格式(你看到的样子)\n- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [图1](已跳过:下载失败) 或 [语音1](语音转换失败,保留原始格式)\n- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n- 合并转发:\n  [合并转发开始:1]\n  [Alice]: msg one\n  [Bob]: msg two\n  [合并转发结束:1]\n  嵌套时层级号递增;超过 4 层显示 [合并转发(已跳过:超过最大深度)]\n  合并转发中仅含昵称,无 QQ 号和群内序号,请勿尝试获取转发中发言者的详细信息\n- 斜杠命令(/reset 等)不加发送者前缀,原样传递\n- 启用群号标识时,消息头部会有 [群:42(测试群)] 行(仅主消息,斜杠命令不加)\n\n# 消息序号与工具调用\n- 群聊前缀 # 后的数字是群内序号(real_seq),不是全局消息 ID(message_id)\n- onebot_get_msg / onebot_recall_message / onebot_set_msg_emoji_like 等工具的 real_seq 参数填此群内序号\n- onebot_get_group_msg_history 的 message_seq 参数例外:填消息 ID(message_id),不是群内序号\n- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,需用 onebot_get_group_msg_history 重新获取\n\n# 出站消息格式(你输出时)\n- 直接输出文本只能发纯文本,**无法 @ 人**;要 @ 某人必须用 onebot_send_message 工具,message 参数传 OneBot 11 消息段数组,如 [{\"type\":\"at\",\"data\":{\"qq\":\"123456\"}},{\"type\":\"text\",\"data\":{\"text\":\" 你好\"}}]\n- 不要用 Markdown 语法(**粗体**、## 标题、- 列表 等),会被自动剥离;如需结构化展示可用纯文本约定(• 列表、【标题】、「引用」、───── 分隔线)\n- 回复时无需重复发送者前缀,直接输出正文\n\n# 不支持的元素\n- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n- 不支持打字状态提示(send_typing 为 no-op)";
+  cfg.value.global_channel_prompt = "# 平台特性\n你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n回复当前对话通常直接输出文本即可(系统会自动送达);当你需要主动发送消息(分多条发、推送其他会话、跨会话通知等)时,使用 onebot_send_message 工具。\n群聊需 @bot 触发。消息上限约 4500 字符,超长会自动分段。\n\n# chat_id 格式\n- 私聊: <QQ号>(如 100)\n- 群聊: group:<群号>(如 group:42)\n\n# 入站消息格式(你看到的样子)\n- 群聊消息前缀: [昵称(QQ号)#群内序号]: 内容;管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容\n  #后数字是群内递增序号(real_seq),连续可读,用于发现消息断层;调用 onebot 工具时传此数字\n  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [图1](已跳过:下载失败) 或 [语音1](语音转换失败,保留原始格式)\n- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n- 合并转发:\n  [合并转发开始:1]\n  [Alice]: msg one\n  [Bob]: msg two\n  [合并转发结束:1]\n  嵌套时层级号递增;超过 4 层显示 [合并转发(已跳过:超过最大深度)]\n  合并转发中仅含昵称,无 QQ 号和群内序号,请勿尝试获取转发中发言者的详细信息\n- 斜杠命令(/reset 等)不加发送者前缀,原样传递\n- 启用群号标识时,消息头部会有 [群:42(测试群)] 行(仅主消息,斜杠命令不加)\n\n# 消息序号与工具调用\n- 群聊前缀 # 后的数字是群内序号(real_seq),不是全局消息 ID(message_id)\n- onebot_get_msg / onebot_recall_message / onebot_set_msg_emoji_like 等工具的 real_seq 参数填此群内序号\n- onebot_get_group_msg_history 的 message_seq 参数例外:填消息 ID(message_id),不是群内序号\n- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,需用 onebot_get_group_msg_history 重新获取\n\n# 出站消息格式(你输出时)\n- 直接输出文本只能发纯文本,**无法 @ 人**;要 @ 某人必须用 onebot_send_message 工具,message 参数传 OneBot 11 消息段数组,如 [{\"type\":\"at\",\"data\":{\"qq\":\"123456\"}},{\"type\":\"text\",\"data\":{\"text\":\" 你好\"}}]\n- 不要用 Markdown 语法(**粗体**、## 标题、- 列表 等),会被自动剥离;如需结构化展示可用纯文本约定(• 列表、【标题】、「引用」、───── 分隔线)\n- 回复时无需重复发送者前缀,直接输出正文\n\n# 不支持的元素\n- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n- 不支持打字状态提示(send_typing 为 no-op)";
 }
 </script>
 
@@ -259,10 +257,6 @@ function resetHint() {
             </span>
             <input v-model="triggerKeywordsInput" placeholder="输入关键词后回车" @keydown.enter.prevent="addTag(cfg.group_trigger_keywords, triggerKeywordsInput); triggerKeywordsInput=''" />
           </div>
-        </label>
-        <label>
-          <input type="checkbox" v-model="cfg.group_auto_join" />
-          <span>自动接受加群请求</span>
         </label>
       </div>
 
@@ -411,11 +405,11 @@ function resetHint() {
       </div>
     </div>
 
-    <!-- 平台提示词 -->
+    <!-- 全局提示词 -->
     <div v-if="cfg" class="section">
-      <h3>平台提示词 (Platform Hint)</h3>
-      <p class="hint">注入到 LLM 系统提示中，告诉模型当前平台特性。群专属提示词非空时会替换此全局设置。</p>
-      <textarea v-model="cfg.platform_hint" rows="8" class="hint-editor" placeholder="输入平台提示词..."></textarea>
+      <h3>全局提示词 (Channel Prompt)</h3>
+      <p class="hint">注入到 LLM 系统提示中，告诉模型当前平台特性。保存时物化写入 Hermes config.yaml 的 platforms.onebot.channel_prompts，需重启 Hermes 网关生效。群专属提示词非空时覆盖此全局值。</p>
+      <textarea v-model="cfg.global_channel_prompt" rows="8" class="hint-editor" placeholder="输入全局提示词..."></textarea>
       <div class="hint-actions">
         <button @click="resetHint" class="reset-btn">恢复默认</button>
       </div>
@@ -542,7 +536,7 @@ function resetHint() {
         </span>
 
         <label>
-          群专属提示词（空=用全局 platform_hint）
+          群专属提示词（空=用全局提示词）
           <textarea v-model="editingGroup.custom_prompt" rows="4" placeholder="为此群定制系统提示词，留空则使用全局设置"></textarea>
         </label>
 
@@ -572,20 +566,6 @@ function resetHint() {
             </span>
             <input v-model="groupUserInput" placeholder="回车添加QQ号" @keydown.enter.prevent="addTag(editingGroup.group_user_list, groupUserInput); groupUserInput=''" />
           </div>
-        </label>
-
-        <label>
-          <input type="checkbox" v-model="editingGroup.welcome_enabled" />
-          <span>新人入群欢迎</span>
-        </label>
-        <label v-if="editingGroup.welcome_enabled">
-          欢迎消息
-          <textarea v-model="editingGroup.welcome_message" rows="2" placeholder="欢迎 @新成员 加入本群！"></textarea>
-        </label>
-
-        <label>
-          <input type="checkbox" v-model="editingGroup.auto_join" />
-          <span>自动接受此群的加群请求</span>
         </label>
 
         <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);" />

@@ -255,6 +255,96 @@ def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -
     _read_modify_write(hermes_install_dir, modify=_modify)
 
 
+# ── channel_prompts 读写(供 WebUI 管理全局/群聊提示词)──────────────────
+
+
+def read_channel_prompts(hermes_install_dir: str | None) -> dict[str, str]:
+    """读取 ``platforms.onebot.channel_prompts``。
+
+    返回 ``{group_id: prompt}`` dict;文件/节点不存在返回空 dict。
+    YAML 解析失败也返回空 dict 并记 warning。
+    """
+    try:
+        data = read_config(hermes_install_dir)
+    except HermesConfigParseError as exc:
+        logger.warning("read_channel_prompts: config parse failed: %s", exc)
+        return {}
+    platforms = data.get("platforms") or {}
+    if not hasattr(platforms, "get"):
+        return {}
+    onebot_cfg = platforms.get(PLATFORM) or {}
+    if not hasattr(onebot_cfg, "get"):
+        return {}
+    prompts = onebot_cfg.get("channel_prompts") or {}
+    if not hasattr(prompts, "items"):
+        return {}
+    return {str(k): str(v) for k, v in prompts.items()}
+
+
+def write_channel_prompts(hermes_install_dir: str | None, prompts: dict[str, str]) -> None:
+    """写入 ``platforms.onebot.channel_prompts``。
+
+    保留其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁保护下完成。
+    """
+    def _modify(data: Any) -> None:
+        platforms = data.get("platforms")
+        if platforms is None:
+            from ruamel.yaml.comments import CommentedMap
+            platforms = CommentedMap()
+            data["platforms"] = platforms
+        onebot_cfg = platforms.get(PLATFORM)
+        if onebot_cfg is None:
+            from ruamel.yaml.comments import CommentedMap
+            onebot_cfg = CommentedMap()
+            platforms[PLATFORM] = onebot_cfg
+        onebot_cfg["channel_prompts"] = {str(k): str(v) for k, v in prompts.items()}
+
+    _read_modify_write(hermes_install_dir, modify=_modify)
+
+
+def materialize_channel_prompts(config: Any, hermes_install_dir: str | None) -> None:
+    """把适配器 config 的 global_channel_prompt + 每群 custom_prompt 物化写入 Hermes config.yaml。
+
+    遍历 ``config.groups``:
+      - 有 ``custom_prompt``(非空)的群用自定义值
+      - 没有的群用 ``config.global_channel_prompt``
+
+    一次性写入 ``platforms.onebot.channel_prompts``。Hermes config.yaml
+    不存在时跳过(插件连接时再重试,保证提示词最新)。
+    """
+    config_path = resolve_hermes_config_path(hermes_install_dir)
+    if config_path is None or not config_path.exists():
+        logger.debug("materialize_channel_prompts: Hermes config.yaml 不存在,跳过")
+        return
+
+    global_prompt = getattr(config, "global_channel_prompt", "") or ""
+    groups = getattr(config, "groups", {}) or {}
+
+    prompts: dict[str, str] = {}
+    for gid, gcfg in groups.items():
+        gid_str = str(gid)
+        custom = ""
+        if isinstance(gcfg, dict):
+            custom = (gcfg.get("custom_prompt") or "").strip()
+        else:
+            custom = getattr(gcfg, "custom_prompt", "") or ""
+            custom = custom.strip() if custom else ""
+        prompts[gid_str] = custom if custom else global_prompt
+
+    try:
+        write_channel_prompts(hermes_install_dir, prompts)
+        logger.info(
+            "materialize_channel_prompts: wrote %d group prompt(s) to Hermes config.yaml",
+            len(prompts),
+        )
+    except FileNotFoundError:
+        logger.debug("materialize_channel_prompts: Hermes dir not found, skipped")
+    except HermesConfigParseError as exc:
+        logger.warning("materialize_channel_prompts: config parse failed: %s", exc)
+    except Exception:
+        logger.exception("materialize_channel_prompts: failed to write channel_prompts")
+
+
 # ── 工具集列表(从 Hermes 安装目录 import)──────────────────────────────
 
 
