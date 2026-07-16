@@ -79,7 +79,11 @@ DEFAULT_CHANNEL_PROMPT = (
     "- 回复时无需重复发送者前缀,直接输出正文\n\n"
     "# 不支持的元素\n"
     "- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n"
-    "- 不支持打字状态提示(send_typing 为 no-op)"
+    "- 不支持打字状态提示(send_typing 为 no-op)\n\n"
+    "# 交互式提问\n"
+    "- 不要使用 clarify 工具提问:OneBot 平台无按钮 UI,且群聊共享会话下用户回复会被排队拦截,"
+    "导致 agent 卡死直到超时\n"
+    "- 需要向用户提问时直接输出纯文本问题即可,用户回复后会在下一轮被正常处理"
 )
 
 
