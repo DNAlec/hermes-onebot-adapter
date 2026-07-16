@@ -449,6 +449,28 @@ def _read_mcp_servers(hermes_install_dir: str | None) -> list[dict]:
     return mcp_servers
 
 
+# ── 平台级工具集说明增强 ─────────────────────────────────────────────
+# 对特定工具集追加 OneBot 平台相关的使用建议,让 WebUI 工具页展示。
+# Hermes host 返回的 description 多为简略的"工具名"列表,不含平台特有注意事项。
+_CLARIFY_PLATFORM_WARNING = (
+    "clarify — 交互式提问工具。OneBot 平台无按钮 UI,且群聊共享会话下用户回复会被"
+    "适配器排队拦截,导致 agent 卡死直到看门狗超时。建议在 OneBot 平台关闭此工具集,"
+    "改用纯文本提问(平台提示词已引导 LLM 不使用本工具)。"
+)
+
+
+def _augment_toolset_descriptions(configurable: list[dict]) -> None:
+    """为特定工具集追加 OneBot 平台相关的使用建议(就地修改 description)。
+
+    Hermes host 返回的 description 是平台无关的简略说明;OneBot 平台对某些工具集
+    有特殊限制(如 clarify 无按钮 UI 且与群排队冲突),在此追加说明让 WebUI 工具页
+    能引导用户做出合适的选择。前端 ``Tools.vue`` 直接渲染 ``description`` 字段。
+    """
+    for item in configurable:
+        if item.get("key") == "clarify":
+            item["description"] = _CLARIFY_PLATFORM_WARNING
+
+
 def list_available_toolsets(hermes_install_dir: str | None) -> dict:
     """返回 OneBot 平台可配置的工具集 + MCP 服务器清单。
 
@@ -476,6 +498,7 @@ def list_available_toolsets(hermes_install_dir: str | None) -> dict:
         venv_python, agent_dir = venv
         result = _run_hermes_subprocess(venv_python, agent_dir, _LIST_TOOLSETS_SCRIPT)
         if result is not None and "configurable" in result:
+            _augment_toolset_descriptions(result["configurable"])
             result["mcp_servers"] = _read_mcp_servers(hermes_install_dir)
             return result
         # 子进程失败 → 继续 fallback 到 sys.path
@@ -514,6 +537,7 @@ def list_available_toolsets(hermes_install_dir: str | None) -> dict:
         except Exception as exc:
             return {"error": "failed to list toolsets", "detail": str(exc)}
 
+        _augment_toolset_descriptions(configurable)
         return {"configurable": configurable, "mcp_servers": _read_mcp_servers(hermes_install_dir)}
     finally:
         for p in added:

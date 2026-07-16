@@ -478,6 +478,44 @@ def test_list_available_toolsets_subprocess_path(monkeypatch, tmp_path: Path):
     assert "ctx7" in mcp_names
 
 
+def test_list_available_toolsets_clarify_description_augmented(monkeypatch, tmp_path: Path):
+    """clarify 工具集的 description 应被替换为含「建议关闭」的平台说明。"""
+    hermes_dir = tmp_path / "hermes"
+    agent_dir = hermes_dir / "hermes-agent"
+    venv_bin = agent_dir / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (hermes_dir / "config.yaml").write_text("mcp_servers: {}\n", encoding="utf-8")
+
+    # stub subprocess.run 返回含 clarify 的 JSON(host 原始 description 就是 "clarify")
+    class _FakeProc:
+        returncode = 0
+        stdout = (
+            '{"configurable": ['
+            '{"key": "web", "label": "Web", "description": "web_search", '
+            '"tools": ["web_search"], "is_plugin": false},'
+            '{"key": "clarify", "label": "❓ Clarifying Questions", '
+            '"description": "clarify", "tools": ["clarify"], "is_plugin": false}'
+            ']}'
+        )
+        stderr = ""
+
+    monkeypatch.setattr(hc.subprocess, "run", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(hc, "_agent_syspath", lambda d: [])
+
+    result = hc.list_available_toolsets(str(hermes_dir))
+    assert "error" not in result
+    configurable = result["configurable"]
+    clarify = next(t for t in configurable if t["key"] == "clarify")
+    web = next(t for t in configurable if t["key"] == "web")
+    # clarify description 被替换为平台说明(含「建议关闭」语义)
+    assert "建议" in clarify["description"]
+    assert "关闭" in clarify["description"]
+    assert clarify["description"] != "clarify"
+    # 其他工具集 description 不受影响
+    assert web["description"] == "web_search"
+
+
 def test_list_available_toolsets_subprocess_fails_to_syspath(monkeypatch, tmp_path: Path):
     """子进程失败时 fallback 到 sys.path 方案。"""
     hermes_dir = tmp_path / "hermes"
