@@ -80,6 +80,31 @@ def test_protocol_envelopes():
     assert result_message("r1", True, message_id="9")["success"] is True
 
 
+def test_normalized_event_is_system_notice_default():
+    """is_system_notice 默认 False,to_dict 输出 False。"""
+    ev = NormalizedEvent(
+        message_id="1", chat_id="group:42", chat_type="group",
+        user_id="u1", user_name="A", text="hi",
+    )
+    assert ev.is_system_notice is False
+    d = ev.to_dict()
+    assert d["is_system_notice"] is False
+
+
+def test_normalized_event_is_system_notice_true():
+    """is_system_notice=True 时 to_dict 输出 True。"""
+    ev = NormalizedEvent(
+        message_id="", chat_id="group:42", chat_type="group",
+        user_id="u1", user_name="A", text="[系统] ...",
+        is_system_notice=True,
+    )
+    d = ev.to_dict()
+    assert d["is_system_notice"] is True
+    # event_message 透传
+    msg = event_message(ev)
+    assert msg["is_system_notice"] is True
+
+
 # ── ensure_tokens ────────────────────────────────────────────────────────
 
 
@@ -216,3 +241,91 @@ def test_config_from_dict_global_channel_prompt_takes_precedence():
         "hermes_ws_token": "t",
     })
     assert cfg.global_channel_prompt == "新提示词"
+
+
+# ── notice 事件推送配置 ────────────────────────────────────────────────
+
+
+def test_config_notify_defaults_disabled():
+    """notify 开关默认 False。"""
+    cfg = AdapterConfig(onebot_ws_token="t", hermes_ws_token="t")
+    assert cfg.notify_poke_enabled is False
+    assert cfg.notify_member_change_enabled is False
+    assert cfg.validate() == []
+
+
+def test_config_resolve_notify_poke_enabled_global():
+    """resolve_notify_poke_enabled:全局开关。"""
+    from onebot_adapter.config import GroupConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+    )
+    assert cfg.resolve_notify_poke_enabled(None) is True
+    assert cfg.resolve_notify_poke_enabled("42") is True  # 无群配置 → 全局
+
+    cfg2 = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=False,
+        groups={"42": GroupConfig(group_id="42", notify_poke_enabled=True).to_dict()},
+    )
+    assert cfg2.resolve_notify_poke_enabled("42") is True  # 群覆盖
+    assert cfg2.resolve_notify_poke_enabled(None) is False  # 私聊用全局
+    assert cfg2.resolve_notify_poke_enabled("99") is False  # 其他群用全局
+
+
+def test_config_resolve_notify_member_change_enabled_global():
+    """resolve_notify_member_change_enabled:全局开关。"""
+    from onebot_adapter.config import GroupConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=True,
+    )
+    assert cfg.resolve_notify_member_change_enabled("42") is True
+
+    cfg2 = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=False,
+        groups={"42": GroupConfig(group_id="42", notify_member_change_enabled=True).to_dict()},
+    )
+    assert cfg2.resolve_notify_member_change_enabled("42") is True
+    assert cfg2.resolve_notify_member_change_enabled("99") is False
+
+
+def test_config_validate_group_notify_fields():
+    """GroupConfig 的 notice 字段类型检查。"""
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        groups={"42": {"group_id": "42", "notify_poke_enabled": "yes"}},  # wrong type
+    )
+    errors = cfg.validate()
+    assert any("notify_poke_enabled must be bool or null" in e for e in errors)
+
+    cfg2 = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        groups={"42": {"group_id": "42", "notify_member_change_enabled": 1}},  # wrong type
+    )
+    errors = cfg2.validate()
+    assert any("notify_member_change_enabled must be bool or null" in e for e in errors)
+
+    # None 和 bool 都合法
+    cfg3 = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        groups={"42": {"group_id": "42", "notify_poke_enabled": None, "notify_member_change_enabled": False}},
+    )
+    assert cfg3.validate() == []
+
+
+def test_config_group_config_roundtrip_notify_fields():
+    """GroupConfig notify 字段 to_dict/from_dict 往返。"""
+    from onebot_adapter.config import GroupConfig
+
+    gc = GroupConfig(group_id="42", notify_poke_enabled=True, notify_member_change_enabled=False)
+    d = gc.to_dict()
+    assert d["notify_poke_enabled"] is True
+    assert d["notify_member_change_enabled"] is False
+    gc2 = GroupConfig.from_dict(d)
+    assert gc2.notify_poke_enabled is True
+    assert gc2.notify_member_change_enabled is False

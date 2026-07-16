@@ -338,7 +338,10 @@ async def parse_event(
     the keyword at the text start). A message triggers if it satisfies any
     enabled check (OR). If no check is enabled, all messages pass through.
     """
-    if event.get("post_type") != "message":
+    post_type = event.get("post_type")
+    if post_type == "notice":
+        return await _parse_notice_event(event, self_id=self_id, config=config, name_resolver=name_resolver)
+    if post_type != "message":
         return None
 
     is_group = event.get("message_type") == "group"
@@ -732,3 +735,141 @@ async def _expand_messages(
     if forward_text:
         forward_text = f"[合并转发开始:{level}]\n{forward_text}\n[合并转发结束:{level}]"
     return forward_text
+
+
+# ── Notice event parser ────────────────────────────────────────────────────
+
+
+async def _parse_notice_event(
+    event: dict[str, Any],
+    *,
+    self_id: str,
+    config: AdapterConfig | None = None,
+    name_resolver: NameResolver | None = None,
+) -> NormalizedEvent | None:
+    """Parse a OneBot 11 notice event into a synthetic NormalizedEvent.
+
+    Handles three notice types (when enabled via config):
+      * ``notify/poke`` — bot 被戳 (target_id == self_id);群聊和私聊都处理。
+      * ``group_increase`` — 其他成员进群 (user_id != self_id)。
+      * ``group_decrease`` — 其他成员退群 (user_id != self_id, leave/kick 区分措辞)。
+
+    All other notice types are ignored (return None).
+
+    戳一戳走群/DM 用户过滤(黑名单/白名单);成员变动不走用户过滤。
+    所有合成事件设置 ``is_system_notice=True``,插件侧据此设 ``internal=True``。
+
+    Returns:
+        * :class:`NormalizedEvent` for enabled notice types.
+        * ``None`` for disabled/unhandled notice types, or when filtered out.
+    """
+    notice_type = event.get("notice_type")
+    sub_type = event.get("sub_type", "")
+    user_id = str(event.get("user_id", ""))
+    group_id_raw = event.get("group_id")
+    group_id = str(group_id_raw) if group_id_raw is not None else ""
+    is_group = bool(group_id)
+    timestamp = float(event.get("time", 0) or 0)
+
+    logger.debug(
+        "parse_notice: notice_type=%s sub_type=%s user_id=%s group_id=%s target_id=%s",
+        notice_type, sub_type, user_id, group_id, event.get("target_id"),
+    )
+
+    if config is None:
+        return None
+
+    # ── Determine notice kind and resolve config ──
+    kind = ""  # "poke" | "member_join" | "member_leave"
+    if notice_type == "notify" and sub_type == "poke":
+        # 仅 bot 被戳才推送;戳别人忽略
+        target_id = str(event.get("target_id", ""))
+        if not self_id or target_id != self_id:
+            return None
+        kind = "poke"
+        if not config.resolve_notify_poke_enabled(group_id if is_group else None):
+            return None
+    elif notice_type == "group_increase" and is_group:
+        # 仅其他成员进群;bot 自己进群忽略
+        if not self_id or user_id == self_id:
+            return None
+        kind = "member_join"
+        if not config.resolve_notify_member_change_enabled(group_id):
+            return None
+    elif notice_type == "group_decrease" and is_group:
+        # 仅其他成员退群;bot 自己退群/被踢忽略
+        if not self_id or user_id == self_id:
+            return None
+        # sub_type: leave(主动退群) | kick(被踢) | kick_me(自己被踢,已排除)
+        if sub_type not in ("leave", "kick"):
+            return None
+        kind = "member_leave"
+        if not config.resolve_notify_member_change_enabled(group_id):
+            return None
+    else:
+        return None
+
+    # ── User filtering ──
+    # 戳一戳走群/DM 用户过滤;成员变动不走用户过滤。
+    if kind == "poke":
+        if is_group:
+            if not config.is_group_user_allowed(group_id, user_id):
+                return None
+        else:
+            if not config.is_dm_allowed(user_id):
+                return None
+
+    # ── Resolve user name ──
+    user_name = ""
+    if name_resolver is not None and user_id:
+        user_name = await name_resolver.resolve(user_id, group_id if is_group else "")
+
+    # ── Build chat_id / chat_type / chat_name ──
+    if is_group:
+        chat_id = f"group:{group_id}"
+        chat_type: str = "group"
+        group_name = ""
+        if name_resolver is not None:
+            group_name = await name_resolver.resolve_group_name(group_id)
+        chat_name = f"{group_id}({group_name})" if group_name else str(group_id)
+    else:
+        chat_id = user_id
+        chat_type = "dm"
+        chat_name = user_name or user_id
+
+    # ── Build display name ──
+    display = user_name or user_id
+
+    # ── Build text ──
+    if kind == "poke":
+        text = f"[系统] 用户 {display}({user_id}) 戳了戳你"
+    elif kind == "member_join":
+        text = f"[系统] 用户 {display}({user_id}) 加入了群聊"
+    elif kind == "member_leave":
+        if sub_type == "kick":
+            text = f"[系统] 用户 {display}({user_id}) 被管理员移出了群聊"
+        else:
+            text = f"[系统] 用户 {display}({user_id}) 退出了群聊"
+    else:
+        return None
+
+    # ── Admin check (group only) ──
+    is_admin = config.is_admin(user_id, group_id) if is_group else False
+
+    logger.debug(
+        "parse_notice: synthesized kind=%s chat_id=%s user_id=%s text=%r",
+        kind, chat_id, user_id, text,
+    )
+
+    return NormalizedEvent(
+        message_id="",  # notice 事件没有 message_id
+        chat_id=chat_id,
+        chat_type=chat_type,  # type: ignore[arg-type]
+        user_id=user_id,
+        user_name=user_name or display,
+        text=text,
+        timestamp=timestamp,
+        is_admin=is_admin,
+        chat_name=chat_name,
+        is_system_notice=True,
+    )

@@ -1,5 +1,12 @@
 # 更新日志
 
+## [未发布]
+
+### 新增
+- notice 事件推送：戳一戳（bot 被戳，含私聊）和群成员进退群（区分主动退群/被踢）合成中文系统提示转发给 agent
+- 新增配置项 `notify_poke_enabled` / `notify_member_change_enabled`（全局开关，GroupConfig 可 per-group 覆盖）
+- `NormalizedEvent.is_system_notice` 字段标记合成系统事件，插件侧据此设 `MessageEvent.internal=True`
+
 ## [1.0.0b3] - 2026-07-07
 
 ### 新增

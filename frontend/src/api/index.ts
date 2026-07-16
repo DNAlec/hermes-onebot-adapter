@@ -90,6 +90,8 @@ export interface GroupConfig {
   command_filter_enabled: boolean | null;
   command_filter_unknown: boolean | null;
   command_permissions: Record<string, string> | null;
+  notify_poke_enabled: boolean | null;
+  notify_member_change_enabled: boolean | null;
 }
 
 export interface Config {
@@ -142,6 +144,9 @@ export interface Config {
   command_filter_unknown: boolean;
   command_permissions: Record<string, string>;
   command_reject_message: string;
+  // ── notice 事件推送 ──
+  notify_poke_enabled: boolean;
+  notify_member_change_enabled: boolean;
 }
 
 export const getStatus = () => api.get<Status>("/status").then((r) => r.data);

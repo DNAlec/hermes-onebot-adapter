@@ -625,6 +625,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             reply_to_text=data.get("reply_to_text"),
             timestamp=timestamp,
             channel_prompt=self._resolve_channel_prompt(source.chat_id),
+            internal=bool(data.get("is_system_notice", False)),
         )
         logger.debug(
             "OneBot plugin → Hermes: chat_id=%s",
