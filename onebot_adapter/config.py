@@ -105,6 +105,9 @@ class GroupConfig:
     command_filter_enabled: bool | None = None
     command_filter_unknown: bool | None = None
     command_permissions: dict[str, str] | None = None  # None=跟随全局，{} = 强制清空，非空=覆盖
+    # ── notice 事件推送（None=跟随全局）──
+    notify_poke_enabled: bool | None = None            # 戳一戳(bot 被戳)推送,None=跟随全局
+    notify_member_change_enabled: bool | None = None   # 群成员进退群推送,None=跟随全局
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -195,6 +198,10 @@ class AdapterConfig:
     command_permissions: dict[str, str] = field(default_factory=dict)  # {指令名: everyone|admin|disabled}
     command_reject_message: str = "⛔ 你没有权限使用此指令 /{cmd}"
 
+    # ── notice 事件推送 ──
+    notify_poke_enabled: bool = False               # 戳一戳(bot 被戳)推送开关
+    notify_member_change_enabled: bool = False      # 群成员进退群推送开关
+
     def validate(self) -> list[str]:
         errors: list[str] = []
         if self.onebot_mode not in _VALID_MODES:
@@ -257,6 +264,10 @@ class AdapterConfig:
                 errors.append(f"group {gid} command_filter_unknown must be bool or null")
             if gc.message_show_group_id is not None and not isinstance(gc.message_show_group_id, bool):
                 errors.append(f"group {gid} message_show_group_id must be bool or null")
+            if gc.notify_poke_enabled is not None and not isinstance(gc.notify_poke_enabled, bool):
+                errors.append(f"group {gid} notify_poke_enabled must be bool or null")
+            if gc.notify_member_change_enabled is not None and not isinstance(gc.notify_member_change_enabled, bool):
+                errors.append(f"group {gid} notify_member_change_enabled must be bool or null")
             if gc.command_permissions is not None:
                 for cmd, perm in gc.command_permissions.items():
                     if perm not in _VALID_COMMAND_PERM_LEVELS:
@@ -347,6 +358,24 @@ class AdapterConfig:
             if gc.reaction_emoji_enabled is not None:
                 return gc.reaction_emoji_enabled
         return self.reaction_emoji_enabled
+
+    # ── notice 事件推送解析 ──
+
+    def resolve_notify_poke_enabled(self, group_id: str | None = None) -> bool:
+        """戳一戳(bot 被戳)推送开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
+        if group_id is not None:
+            gc = self.get_group_config(group_id)
+            if gc.notify_poke_enabled is not None:
+                return gc.notify_poke_enabled
+        return self.notify_poke_enabled
+
+    def resolve_notify_member_change_enabled(self, group_id: str | None = None) -> bool:
+        """群成员进退群推送开关。群配置非 None 时覆盖全局。"""
+        if group_id is not None:
+            gc = self.get_group_config(group_id)
+            if gc.notify_member_change_enabled is not None:
+                return gc.notify_member_change_enabled
+        return self.notify_member_change_enabled
 
     # ── /指令过滤解析 ──
 
@@ -486,6 +515,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "media_delivery_mode": "可选值: passthrough(URL 占位符直传,默认) | cache(插件侧下载落盘到 ~/.hermes/cache/)",
         "global_channel_prompt": "全局提示词;保存时物化写入 Hermes config.yaml 的"
                                  " platforms.onebot.channel_prompts,需重启 Hermes 网关生效",
+        "notify_poke_enabled": "戳一戳(bot 被戳)推送开关;开启后 bot 被戳会合成系统事件转发给 agent",
+        "notify_member_change_enabled": "群成员进退群推送开关;开启后其他成员进群/退群会合成系统事件转发给 agent",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():

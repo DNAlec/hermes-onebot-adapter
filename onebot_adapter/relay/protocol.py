@@ -121,6 +121,7 @@ class NormalizedEvent:
     chat_name: str = ""
     real_seq: str = ""
     media_items: list[MediaItem] = field(default_factory=list)
+    is_system_notice: bool = False  # True=合成系统事件(notice 转文本),插件侧据此设 internal=True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +138,7 @@ class NormalizedEvent:
             "chat_name": self.chat_name,
             "real_seq": self.real_seq,
             "media_items": [m.to_dict() for m in self.media_items],
+            "is_system_notice": self.is_system_notice,
         }
 
 

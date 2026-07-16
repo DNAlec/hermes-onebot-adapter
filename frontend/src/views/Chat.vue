@@ -105,6 +105,8 @@ async function saveGlobal() {
       event_queue_idle_timeout: c.event_queue_idle_timeout,
       media_delivery_mode: c.media_delivery_mode,
       global_channel_prompt: c.global_channel_prompt,
+      notify_poke_enabled: c.notify_poke_enabled,
+      notify_member_change_enabled: c.notify_member_change_enabled,
     });
     msg.value = "全局设置已保存。需重启 Hermes 网关生效。";
     msgType.value = "success";
@@ -138,6 +140,7 @@ function addGroup() {
     message_show_group_id: null,
     reaction_emoji_enabled: null,
     command_filter_enabled: null, command_filter_unknown: null, command_permissions: null,
+    notify_poke_enabled: null, notify_member_change_enabled: null,
   };
   showEditor.value = true;
 }
@@ -382,6 +385,23 @@ function resetHint() {
       </label>
     </div>
 
+    <!-- notice 事件推送 -->
+    <div v-if="cfg" class="section">
+      <h3>notice 事件推送</h3>
+      <p class="hint" style="margin-bottom:0.75rem;">
+        将 OneBot notice 事件合成为系统提示文本转发给 agent。事件文本以 [系统] 开头,与普通消息一样走群聊排队。
+        群配置可单独覆盖。需重启适配器生效。
+      </p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.notify_poke_enabled" />
+        <span>戳一戳(bot 被戳时推送,含私聊;走群/DM 用户过滤)</span>
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.notify_member_change_enabled" />
+        <span>群成员变动(其他成员进群/退群时推送,区分主动退群和被踢)</span>
+      </label>
+    </div>
+
     <!-- 私聊设置 -->
     <div v-if="cfg" class="section">
       <h3>私聊设置</h3>
@@ -623,6 +643,27 @@ function resetHint() {
             placeholder='{"help": "everyone", "kick": "admin"} 或留空跟随全局'
           ></textarea>
           <span v-if="cmdPermsError" class="hint" style="color: var(--danger);">{{ cmdPermsError }}</span>
+        </label>
+
+        <hr style="margin: 1.25rem 0; border: none; border-top: 1px solid var(--border);" />
+        <h4 style="margin: 0 0 0.75rem; font-size: 0.95rem;">notice 事件推送</h4>
+
+        <label>
+          戳一戳推送
+          <select v-model="editingGroup.notify_poke_enabled">
+            <option :value="null">跟随全局</option>
+            <option :value="true">启用</option>
+            <option :value="false">禁用</option>
+          </select>
+        </label>
+
+        <label>
+          群成员变动推送
+          <select v-model="editingGroup.notify_member_change_enabled">
+            <option :value="null">跟随全局</option>
+            <option :value="true">启用</option>
+            <option :value="false">禁用</option>
+          </select>
         </label>
 
         <div class="modal-actions">
