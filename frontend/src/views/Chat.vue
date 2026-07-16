@@ -108,7 +108,7 @@ async function saveGlobal() {
       notify_poke_enabled: c.notify_poke_enabled,
       notify_member_change_enabled: c.notify_member_change_enabled,
     });
-    msg.value = "全局设置已保存。需重启 Hermes 网关生效。";
+    msg.value = "全局设置已保存";
     msgType.value = "success";
   } catch (e: any) {
     msg.value = (e.response?.data?.error || e.message);
@@ -373,8 +373,8 @@ function resetHint() {
       <label>
         投递模式
         <select v-model="cfg.media_delivery_mode">
-          <option value="passthrough">URL 直传（默认）</option>
-          <option value="cache">插件侧下载落盘</option>
+          <option value="passthrough">URL 直传</option>
+          <option value="cache">插件侧下载落盘（默认）</option>
         </select>
         <span class="hint">
           <strong>URL 直传</strong>:媒体 URL 作为文本占位符(如 [图1](https://...))传给 LLM,LLM 按需 fetch。<br>
@@ -390,7 +390,7 @@ function resetHint() {
       <h3>notice 事件推送</h3>
       <p class="hint" style="margin-bottom:0.75rem;">
         将 OneBot notice 事件合成为系统提示文本转发给 agent。事件文本以 [系统] 开头,与普通消息一样走群聊排队。
-        群配置可单独覆盖。需重启适配器生效。
+        群配置可单独覆盖。保存后立即生效（热加载）。
       </p>
       <label class="checkbox-row">
         <input type="checkbox" v-model="cfg.notify_poke_enabled" />
@@ -475,8 +475,8 @@ function resetHint() {
       <p v-else class="empty">暂无群配置，点击「从 OneBot 同步」或「添加群」</p>
     </div>
 
-    <button @click="saveGlobal" :disabled="saving" class="save-btn save-main">
-      {{ saving ? "保存中..." : "保存所有全局设置" }}
+    <button @click="saveGlobal" :disabled="saving" class="save-btn">
+      {{ saving ? "保存中..." : "保存配置" }}
     </button>
 
     <!-- 群详情编辑弹窗 -->
@@ -558,6 +558,7 @@ function resetHint() {
         <label>
           群专属提示词（空=用全局提示词）
           <textarea v-model="editingGroup.custom_prompt" rows="4" placeholder="为此群定制系统提示词，留空则使用全局设置"></textarea>
+          <span class="hint">保存时物化写入 Hermes config.yaml，需重启 Hermes 网关生效</span>
         </label>
 
         <label>
@@ -668,7 +669,7 @@ function resetHint() {
 
         <div class="modal-actions">
           <button @click="showEditor = false" class="cancel-btn">取消</button>
-          <button @click="saveGroup" class="save-btn">保存</button>
+          <button @click="saveGroup" class="btn-modal-save">保存</button>
         </div>
       </div>
     </div>
@@ -704,10 +705,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--p
 .row-btn.danger { color: var(--danger); border-color: var(--danger); }
 .row-btn:hover { background: #e8e8e8; }
 
-.save-btn { background: var(--primary); color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
-.save-btn:disabled { background: #ccc; cursor: not-allowed; }
-.save-main { padding: 0.75rem 2rem; font-size: 1rem; }
-.save-main:hover:not(:disabled) { background: var(--primary-dark); }
+.btn-modal-save { background: var(--primary); color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
 .sync-btn { background: var(--bg); border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
 .add-btn { background: var(--success); color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
 .empty { color: var(--text-muted); text-align: center; padding: 2rem; }
