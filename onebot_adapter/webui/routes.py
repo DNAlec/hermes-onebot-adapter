@@ -309,6 +309,13 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             except Exception as exc:
                 return aiohttp.web.json_response({"error": f"failed to save config: {exc}"}, status=500)
             store.update(new_cfg)
+            # Materialize channel_prompts into Hermes config.yaml so the plugin
+            # picks up the new global_channel_prompt on next connect/restart.
+            try:
+                from onebot_adapter.hermes_config import materialize_channel_prompts
+                materialize_channel_prompts(new_cfg, new_cfg.hermes_install_dir or None)
+            except Exception:
+                logger.exception("materialize_channel_prompts after config save failed")
         except Exception as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
         return aiohttp.web.json_response(_public_config(new_cfg))
@@ -498,6 +505,13 @@ def _put_group(store: ConfigStore):
         except ValueError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         save_config(store.config)
+        # Materialize channel_prompts into Hermes config.yaml so the plugin
+        # picks up the new per-group custom_prompt on next connect/restart.
+        try:
+            from onebot_adapter.hermes_config import materialize_channel_prompts
+            materialize_channel_prompts(store.config, store.config.hermes_install_dir or None)
+        except Exception:
+            logger.exception("materialize_channel_prompts after group save failed")
         return aiohttp.web.json_response(gc.to_dict())
 
     return handler

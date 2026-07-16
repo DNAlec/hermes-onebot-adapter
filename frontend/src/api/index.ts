@@ -85,9 +85,6 @@ export interface GroupConfig {
   admins: string[];
   group_user_filter_mode: string;
   group_user_list: string[];
-  welcome_enabled: boolean;
-  welcome_message: string;
-  auto_join: boolean;
   message_show_group_id: boolean | null;
   reaction_emoji_enabled: boolean | null;
   command_filter_enabled: boolean | null;
@@ -108,13 +105,12 @@ export interface Config {
   group_keyword_first_only: boolean;
   group_strip_first_mention: boolean;
   global_admins: string[];
-  group_auto_join: boolean;
 
   // ── 私聊设置 ──
   dm_user_filter_mode: string;
   dm_user_list: string[];
   groups: Record<string, GroupConfig>;
-  platform_hint: string;
+  global_channel_prompt: string;
   hermes_ws_port: number;
   hermes_ws_path: string;
   hermes_ws_token: string;

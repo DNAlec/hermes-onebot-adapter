@@ -148,11 +148,10 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
   "group_keyword_first_only": false,
   "group_strip_first_mention": true,
   "global_admins": [],
-  "group_auto_join": false,
   "dm_user_filter_mode": "whitelist",
   "dm_user_list": [],
   "groups": {},
-  "platform_hint": "...",
+  "global_channel_prompt": "...",
   "hermes_ws_port": 18810,
   "hermes_ws_path": "/hermes",
   "hermes_ws_token": "...",
@@ -317,9 +316,6 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
       "admins": [],
       "group_user_filter_mode": "blacklist",
       "group_user_list": [],
-      "welcome_enabled": false,
-      "welcome_message": "",
-      "auto_join": false,
       "message_show_group_id": null,
       "command_filter_enabled": null,
       "command_filter_unknown": null,
@@ -528,7 +524,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `dm_user_filter_mode` | string | `"whitelist"` | 私聊过滤：`whitelist` / `blacklist` |
 | `dm_user_list` | string[] | `[]` | 私聊用户过滤列表 |
 | `groups` | object | `{}` | 群组配置，key 为群号字符串 |
-| `platform_hint` | string | 默认提示词 | 注入 LLM 系统提示的平台说明 |
+| `global_channel_prompt` | string | 默认提示词 | 全局提示词；保存时物化写入 Hermes config.yaml 的 `platforms.onebot.channel_prompts`，需重启 Hermes 网关生效 |
 | `hermes_ws_port` | int | `18810` | Hermes 插件 WS 端口 |
 | `hermes_ws_path` | string | `"/hermes"` | Hermes 插件 WS 路径 |
 | `hermes_ws_token` | string | 自动生成 | Hermes WS 鉴权 token |
@@ -564,13 +560,10 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `trigger_keywords` | string[]\|null | `null` | 关键词列表（`[]`=强制禁用） |
 | `keyword_first_only` | bool\|null | `null` | 关键词须在开头 |
 | `strip_first_mention` | bool\|null | `null` | 移除首 @bot 段 |
-| `custom_prompt` | string | `""` | 群专属提示词（覆盖全局 platform_hint） |
+| `custom_prompt` | string | `""` | 群专属提示词（保存时物化写入 Hermes config.yaml；空=用全局提示词） |
 | `admins` | string[] | `[]` | 群管理员 QQ 号 |
 | `group_user_filter_mode` | string | `"blacklist"` | 用户过滤：`whitelist`/`blacklist` |
 | `group_user_list` | string[] | `[]` | 用户过滤列表 |
-| `welcome_enabled` | bool | `false` | 新人欢迎是否启用 |
-| `welcome_message` | string | `""` | 欢迎消息模板 |
-| `auto_join` | bool | `false` | 自动加入 |
 | `message_show_group_id` | bool\|null | `null` | 显示群号标识 |
 | `command_filter_enabled` | bool\|null | `null` | 指令过滤开关 |
 | `command_filter_unknown` | bool\|null | `null` | 未知指令过滤 |

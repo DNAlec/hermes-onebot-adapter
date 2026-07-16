@@ -624,7 +624,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             reply_to_message_id=data.get("reply_to_message_id"),
             reply_to_text=data.get("reply_to_text"),
             timestamp=timestamp,
-            channel_prompt=data.get("channel_prompt"),
+            channel_prompt=self._resolve_channel_prompt(source.chat_id),
         )
         logger.debug(
             "OneBot plugin → Hermes: chat_id=%s",
@@ -741,6 +741,25 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 # Skip this media; LLM still sees its [图N] placeholder.
                 continue
         return media_urls, media_types
+
+    def _resolve_channel_prompt(self, chat_id: str) -> str | None:
+        """Resolve the per-channel prompt from Hermes config via the native
+        ``resolve_channel_prompt`` helper (same mechanism Discord/Feishu use).
+
+        Looks up ``config.extra["channel_prompts"][group_id]``.  The adapter
+        service materializes ``global_channel_prompt`` + per-group
+        ``custom_prompt`` into this dict, so the plugin just reads it.
+        Returns ``None`` when Hermes is not importable or no entry matches.
+        """
+        try:
+            from gateway.platforms.base import resolve_channel_prompt
+        except ImportError:
+            return None
+        _config = getattr(self, "config", None)
+        _extra = getattr(_config, "extra", None) or {}
+        # Use the raw group_id as the lookup key (matches Discord's raw channel id convention).
+        lookup_key = chat_id.split(":", 1)[1] if chat_id.startswith("group:") else chat_id
+        return resolve_channel_prompt(_extra, lookup_key)
 
     def _maybe_register_idle_callback(
         self, data: dict[str, Any], message_event: Any
@@ -1268,20 +1287,7 @@ def register(ctx) -> None:
         emoji="🐧",
         pii_safe=False,
         allow_update_command=True,
-        platform_hint=os.getenv(
-            "ONEBOT_PLATFORM_HINT",
-            "你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown，仅纯文本。"
-            "群聊需 @bot 触发。消息上限约 4500 字符，超长会自动分段。"
-            "私聊 chat_id 为 QQ 号，群聊为 group:<群号>。"
-            "直接输出文本只能发纯文本，无法 @ 人；要 @ 某人必须用 onebot_send_message 工具，"
-            "message 参数传 OneBot 11 消息段数组，如 "
-            '[{"type":"at","data":{"qq":"123456"}},{"type":"text","data":{"text":" 你好"}}]。'
-            "收到的消息中 @ 显示为 @QQ号(昵称) 格式。"
-            "群聊消息前缀格式为 [昵称(QQ号)#群内序号]: 内容，管理员标识为 [昵称(QQ号)(管理员)#群内序号]: 内容。"
-            "#后数字是群内递增序号(real_seq),调用 onebot 工具时传此数字。"
-            "引用回复和合并转发中的发送者也包含 QQ 号和 #群内序号。"
-            "括号中的 QQ 号可直接用于 onebot_send_message 工具的 at 段回复。",
-        ),
+        platform_hint="",
     )
 
     # Register OneBot API tools (send, group management, history, etc.)

@@ -584,3 +584,83 @@ def test_install_default_toolsets_contains_core_and_plugin(tmp_path: Path):
     assert hc.PLUGIN_TOOLSET_KEY in current
     # default-off 工具不包含
     assert "moa" not in current
+
+
+# ── channel_prompts 读写 ──────────────────────────────────────────────────
+
+
+def test_read_channel_prompts_missing(hermes_dir: Path):
+    assert hc.read_channel_prompts(str(hermes_dir)) == {}
+
+
+def test_read_channel_prompts_present(tmp_path: Path):
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text(
+        "platforms:\n"
+        "  onebot:\n"
+        "    channel_prompts:\n"
+        "      '42': '群42提示词'\n"
+        "      '43': '群43提示词'\n",
+        encoding="utf-8",
+    )
+    prompts = hc.read_channel_prompts(str(d))
+    assert prompts == {"42": "群42提示词", "43": "群43提示词"}
+
+
+def test_write_channel_prompts_creates_section(hermes_dir: Path):
+    hc.write_channel_prompts(str(hermes_dir), {"42": "A", "43": "B"})
+    prompts = hc.read_channel_prompts(str(hermes_dir))
+    assert prompts == {"42": "A", "43": "B"}
+
+
+def test_write_channel_prompts_preserves_other_keys(hermes_dir: Path):
+    hc.write_channel_prompts(str(hermes_dir), {"42": "X"})
+    data = hc.read_config(str(hermes_dir))
+    assert "platform_toolsets" in data
+    assert "provider" in data
+    assert data["platforms"]["onebot"]["channel_prompts"]["42"] == "X"
+
+
+def test_materialize_channel_prompts_skips_when_no_config(empty_hermes_dir: Path):
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    cfg = AdapterConfig(global_channel_prompt="默认", groups={"42": GroupConfig(group_id="42").to_dict()})
+    hc.materialize_channel_prompts(cfg, str(empty_hermes_dir))
+    assert not (empty_hermes_dir / "config.yaml").exists()
+
+
+def test_materialize_channel_prompts_writes_global_and_custom(hermes_dir: Path):
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    cfg = AdapterConfig(
+        global_channel_prompt="全局默认提示词",
+        groups={
+            "42": GroupConfig(group_id="42", custom_prompt="群42专属").to_dict(),
+            "43": GroupConfig(group_id="43", custom_prompt="").to_dict(),
+        },
+    )
+    hc.materialize_channel_prompts(cfg, str(hermes_dir))
+    prompts = hc.read_channel_prompts(str(hermes_dir))
+    assert prompts == {"42": "群42专属", "43": "全局默认提示词"}
+
+
+def test_materialize_channel_prompts_preserves_other_platforms(hermes_dir: Path):
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    # 先写入其他平台配置
+    yaml = YAML(typ="rt")
+    data = hc.read_config(str(hermes_dir))
+    from ruamel.yaml.comments import CommentedMap
+    platforms = data.get("platforms") or CommentedMap()
+    platforms["discord"] = CommentedMap({"token": "abc"})
+    data["platforms"] = platforms
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    (hermes_dir / "config.yaml").write_text(buf.getvalue(), encoding="utf-8")
+
+    cfg = AdapterConfig(global_channel_prompt="默认", groups={"42": GroupConfig(group_id="42").to_dict()})
+    hc.materialize_channel_prompts(cfg, str(hermes_dir))
+    data2 = hc.read_config(str(hermes_dir))
+    assert data2["platforms"]["discord"]["token"] == "abc"
+    assert data2["platforms"]["onebot"]["channel_prompts"]["42"] == "默认"
