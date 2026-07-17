@@ -11,6 +11,7 @@ import shutil
 from pathlib import Path
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 from onebot_adapter import __version__
 
@@ -20,6 +21,25 @@ PLUGIN_SRC = Path(__file__).parent / "hermes_plugin"
 _PLUGIN_FILES = ("__init__.py", "adapter.py", "markdown.py", "onebot_tools.py", "plugin.yaml")
 _ENV_VAR_URL = "ONEBOT_ADAPTER_URL"
 _ENV_VAR_TOKEN = "ONEBOT_ADAPTER_TOKEN"
+
+
+def _is_safe_install_path(target: Path) -> bool:
+    """Return True if *target* is safe to use as an install target.
+
+    Only allow writes under the user's home directory, /home, or /tmp.
+    Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
+    writes via the CLI or WebUI.  Symlink-based attacks on /tmp are
+    mitigated by the per-file ``is_symlink()`` guard in :func:`install`.
+    """
+    allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
+    resolved = target.resolve(strict=False)
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            pass
+    return False
 
 
 def _resolve_hermes_dir(install_dir: str | None) -> Path:
@@ -35,7 +55,25 @@ def _env_path(hermes_dir: Path) -> Path:
     return hermes_dir / ".env"
 
 
+def _strip_quotes(value: str) -> str:
+    """Strip a single layer of surrounding quotes from a .env value.
+
+    Handles both ``"..."`` and ``'...'`` quoting. If the value is not
+    quoted, returns it unchanged.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 def _read_env(env_path: Path) -> dict[str, str]:
+    """Read a .env file into a dict. Comments and blank lines are dropped.
+
+    Surrounding quotes (``"..."`` or ``'...'``) are stripped so the returned
+    value is the raw string. This makes read-modify-write idempotent: the
+    writer re-quotes values that need it, so a round-trip doesn't accumulate
+    extra layers of quoting.
+    """
     if not env_path.exists():
         return {}
     env: dict[str, str] = {}
@@ -44,22 +82,36 @@ def _read_env(env_path: Path) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
-        env[k.strip()] = v.strip()
+        env[k.strip()] = _strip_quotes(v.strip())
     return env
 
 
 def _write_env(env_path: Path, updates: dict[str, str]) -> dict[str, str]:
-    """Merge *updates* into an existing env file and persist.
+    """Merge *updates* into an existing env file and persist atomically.
 
-    Returns the final env dict.
+    Values that contain spaces or shell-special characters are quoted with
+    double quotes to ensure correct parsing by dotenv loaders. The write is
+    atomic (tmp + ``os.replace``) so a crash mid-write doesn't corrupt the
+    existing .env.  Returns the final env dict.
     """
     env = _read_env(env_path)
     env.update(updates)
     lines: list[str] = []
     for k, v in env.items():
-        lines.append(f"{k}={v}")
+        # Quote values that contain spaces or special shell characters to
+        # ensure correct dotenv parsing. Values without special chars are
+        # written bare for readability.
+        if v and any(c in v for c in (" ", "\t", "'", '"', "#", "$", "\\")):
+            # Escape backslashes first (dotenv interprets \ as escape in
+            # double-quoted strings), then escape any embedded double quotes.
+            escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'{k}="{escaped}"')
+        else:
+            lines.append(f"{k}={v}")
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, env_path)
     return env
 
 
@@ -72,6 +124,12 @@ def install(
     adapter_token: str = "",
 ) -> dict:
     hermes_dir = _resolve_hermes_dir(install_dir)
+    if not _is_safe_install_path(hermes_dir):
+        return {
+            "adapter_version": __version__,
+            "hermes_dir": str(hermes_dir),
+            "error": f"install_dir resolved to {hermes_dir}, which is outside $HOME",
+        }
     dest = hermes_dir / "plugins" / "onebot"
     result: dict = {
         "adapter_version": __version__,
@@ -88,18 +146,34 @@ def install(
 
     # Copy plugin files
     dest.mkdir(parents=True, exist_ok=True)
-    _yaml = YAML()
+    # Refuse to write through a pre-planted symlink — a symlinked dest or
+    # dest/<file> could redirect writes to arbitrary files (TOCTOU race).
+    if dest.is_symlink():
+        result["error"] = f"install target is a symlink, refusing to overwrite: {dest}"
+        return result
+    # Use round-trip YAML to preserve string quoting (e.g. version: "0.0.0"
+    # stays quoted so it isn't parsed as float 0.0).
+    _yaml = YAML(typ="rt")
     for fname in _PLUGIN_FILES:
         src_file = PLUGIN_SRC / fname
         if not src_file.exists():
             continue
         if fname == "plugin.yaml":
             data = _yaml.load(src_file.read_text(encoding="utf-8"))
+            if data is None:
+                data = CommentedMap()
             data["version"] = __version__
             out_path = dest / fname
+            if out_path.is_symlink():
+                result["error"] = f"output path is a symlink, refusing to overwrite: {out_path}"
+                return result
             _yaml.dump(data, out_path)
         else:
-            shutil.copy2(src_file, dest / fname)
+            out_path = dest / fname
+            if out_path.is_symlink():
+                result["error"] = f"output path is a symlink, refusing to overwrite: {out_path}"
+                return result
+            shutil.copy2(src_file, out_path)
         result["copied"].append(fname)
 
     # Clean stale .pyc
@@ -153,6 +227,12 @@ def install(
 
 def uninstall(install_dir: str | None = None) -> dict:
     hermes_dir = _resolve_hermes_dir(install_dir)
+    if not _is_safe_install_path(hermes_dir):
+        return {
+            "adapter_version": __version__,
+            "hermes_dir": str(hermes_dir),
+            "error": f"install_dir resolved to {hermes_dir}, which is outside $HOME",
+        }
     dest = hermes_dir / "plugins" / "onebot"
     env_path = _env_path(hermes_dir)
 

@@ -1,9 +1,21 @@
 """Normalized wire protocol between the adapter service and the Hermes plugin.
 
 All frames are JSON text frames — no binary frames. Media (images, videos,
-voice, files) is passed as file paths or URLs in the JSON payload (path
-passthrough). The adapter forwards these directly to OneBot/NapCat, which
-reads the local file or downloads the URL itself.
+voice, files) is delivered to the plugin in one of two modes, selected by
+the adapter config's ``media_delivery_mode``:
+
+  * ``cache`` (default): media URLs are collected into
+    ``NormalizedEvent.media_items`` so the plugin can download them via
+    ``cache_image_from_url`` etc. and fill ``MessageEvent.media_urls`` with
+    local paths. Text placeholders are rendered without URLs (``[图1]``) so
+    the LLM still sees media positions.
+  * ``passthrough``: media URLs are rendered inline in ``text`` as
+    placeholders like ``[图1](https://...)``. The LLM fetches them on demand.
+    ``media_items`` is empty.
+
+Outbound media (send_image/send_voice/...) passes file paths or URLs as
+strings in the JSON ``send`` frame — the adapter forwards these to OneBot,
+which reads the local file or downloads the URL itself.
 
 Direction notation:
   A->P : adapter service -> Hermes plugin (inbound events, responses)
@@ -45,12 +57,58 @@ def envelope(type_: TypeKind, **fields: Any) -> dict[str, Any]:
 
 
 @dataclass
+class MediaItem:
+    """A media segment extracted from a OneBot message, for plugin-side caching.
+
+    Carries the URL (and file_id for ``file`` segments without a URL) plus
+    metadata needed by the plugin to pick the right ``cache_*_from_url`` /
+    ``cache_*_from_bytes`` helper when ``media_delivery_mode == "cache"``.
+    """
+
+    kind: str          # "image" | "record" | "video" | "file"
+    url: str = ""      # direct URL when available; empty for file_id-only segments
+    mime: str = ""     # best-effort MIME type (empty if unknown)
+    name: str = ""     # filename for file segments (empty otherwise)
+    file_id: str = ""  # OneBot file_id (only set for file segments without a URL)
+    index: int = 0     # 0-based media index (matches the ``[图N]`` placeholder number - 1)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "url": self.url,
+            "mime": self.mime,
+            "name": self.name,
+            "file_id": self.file_id,
+            "index": self.index,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MediaItem:
+        return cls(
+            kind=data.get("kind", ""),
+            url=data.get("url", ""),
+            mime=data.get("mime", ""),
+            name=data.get("name", ""),
+            file_id=data.get("file_id", ""),
+            index=int(data.get("index", 0)),
+        )
+
+
+@dataclass
 class NormalizedEvent:
     """OneBot 11 event reduced to a Hermes-neutral shape.
 
-    Media is NOT included as binary payloads — all images/videos/voice/files
-    are rendered as URL placeholders in ``text`` (e.g. ``[图1](https://...)``)
-    so the LLM can fetch them on demand.
+    Media delivery is controlled by the adapter's ``media_delivery_mode``:
+
+      * ``cache`` (default): ``media_items`` carries one entry per media
+        segment so the plugin can download them; ``text`` placeholders are
+        rendered without URLs (``[图1]``) so the LLM still sees media
+        positions.
+      * ``passthrough``: ``media_items`` is empty; media URLs are
+        rendered inline in ``text`` as placeholders like
+        ``[图1](https://...)``.
+
+    No media is downloaded by the adapter and no binary frames are produced.
     """
 
     message_id: str
@@ -62,11 +120,11 @@ class NormalizedEvent:
     reply_to_message_id: str | None = None
     reply_to_text: str | None = None
     timestamp: float = 0.0
-    channel_prompt: str | None = None
     is_admin: bool = False
     chat_name: str = ""
     real_seq: str = ""
-    raw: dict[str, Any] | None = None
+    media_items: list[MediaItem] = field(default_factory=list)
+    is_system_notice: bool = False  # True=合成系统事件(notice 转文本),插件侧据此设 internal=True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,10 +137,11 @@ class NormalizedEvent:
             "reply_to_message_id": self.reply_to_message_id,
             "reply_to_text": self.reply_to_text,
             "timestamp": self.timestamp,
-            "channel_prompt": self.channel_prompt,
             "is_admin": self.is_admin,
             "chat_name": self.chat_name,
             "real_seq": self.real_seq,
+            "media_items": [m.to_dict() for m in self.media_items],
+            "is_system_notice": self.is_system_notice,
         }
 
 
@@ -112,7 +171,9 @@ class FilteredEvent:
 
     Carries enough context for the adapter service to send a reject message
     back to the originating chat via the OneBot HTTP API, without going
-    through the Hermes plugin.
+    through the Hermes plugin.  This is a process-internal Python object —
+    it is never serialised onto the wire (the adapter's ``on_filtered``
+    callback receives it directly).
     """
 
     chat_id: str
@@ -125,26 +186,19 @@ class FilteredEvent:
     reply_to_message_id: str | None = None
     timestamp: float = 0.0
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "chat_id": self.chat_id,
-            "chat_type": self.chat_type,
-            "user_id": self.user_id,
-            "user_name": self.user_name,
-            "command_name": self.command_name,
-            "reject_message": self.reject_message,
-            "message_id": self.message_id,
-            "reply_to_message_id": self.reply_to_message_id,
-            "timestamp": self.timestamp,
-        }
 
-
-def ready_message(onebot_connected: bool, adapter_version: str, self_id: str = "") -> dict[str, Any]:
+def ready_message(
+    onebot_connected: bool,
+    adapter_version: str,
+    self_id: str = "",
+    media_delivery_mode: str = "passthrough",
+) -> dict[str, Any]:
     return envelope(
         "ready",
         onebot_connected=onebot_connected,
         adapter_version=adapter_version,
         self_id=self_id,
+        media_delivery_mode=media_delivery_mode,
     )
 
 
@@ -198,13 +252,6 @@ def commands_refresh_message() -> dict[str, Any]:
     """A->P: adapter service → Hermes plugin.  Adapter asks the plugin to
     re-collect and push a fresh commands_snapshot (e.g. after plugin reload)."""
     return envelope("commands_refresh")
-
-
-def filtered_message(event: FilteredEvent) -> dict[str, Any]:
-    """OneBot event filtered by the command filter (adapter internal, not
-    forwarded to the Hermes plugin as a regular ``event``).  Delivered to the
-    adapter service's ``on_filtered`` callback so it can send a reject reply."""
-    return envelope("filtered", **event.to_dict())
 
 
 def idle_message(chat_id: str, group_id: str) -> dict[str, Any]:

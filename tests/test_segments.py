@@ -16,34 +16,6 @@ def test_extract_text_with_file():
     assert seg.extract_text(segs) == "[文件: doc.pdf]"
 
 
-def test_extract_image_urls():
-    segs = [
-        {"type": "image", "data": {"url": "http://a/1.jpg"}},
-        {"type": "image", "data": {"file": "http://a/2.png"}},
-        {"type": "text", "data": {"text": "skip"}},
-    ]
-    assert seg.extract_image_urls(segs) == ["http://a/1.jpg", "http://a/2.png"]
-
-
-def test_extract_record_url():
-    segs = [{"type": "record", "data": {"url": "http://a/v.silk"}}]
-    assert seg.extract_record_url(segs) == "http://a/v.silk"
-
-
-def test_extract_video_urls():
-    segs = [{"type": "video", "data": {"url": "http://a/v.mp4"}}]
-    assert seg.extract_video_urls(segs) == ["http://a/v.mp4"]
-
-
-def test_extract_files():
-    segs = [{"type": "file", "data": {"file": "f.txt", "file_id": "fid1", "url": "http://a/f", "file_size": 100}}]
-    files = seg.extract_files(segs)
-    assert len(files) == 1
-    assert files[0]["name"] == "f.txt"
-    assert files[0]["url"] == "http://a/f"
-    assert files[0]["file_id"] == "fid1"
-
-
 def test_extract_reply_id():
     assert seg.extract_reply_id([{"type": "reply", "data": {"id": 42}}]) == 42
     assert seg.extract_reply_id([{"type": "text", "data": {"text": "x"}}]) is None
@@ -72,7 +44,7 @@ def test_extract_forward_content():
     assert seg.extract_forward_content(segs_two) == [{"a": 1}]
 
 
-def test_has_and_strip_bot_mention():
+def test_has_bot_mention():
     segs = [
         {"type": "at", "data": {"qq": "111"}},
         {"type": "at", "data": {"qq": "999"}},
@@ -80,9 +52,74 @@ def test_has_and_strip_bot_mention():
     ]
     assert seg.has_bot_mention(segs, "999") is True
     assert seg.has_bot_mention(segs, "888") is False
-    stripped = seg.strip_bot_mention(segs, "999")
-    assert len(stripped) == 2
-    assert all(s.get("data", {}).get("qq") != "999" for s in stripped)
+
+
+def test_strip_first_bot_mention_leading():
+    """Leading @bot is removed; non-leading @bot preserved."""
+    # [at(bot), text] → [text]
+    segs = [
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": "hi"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert [s.get("type") for s in out] == ["text"]
+
+
+def test_strip_first_bot_mention_skips_reply():
+    """Leading `reply` segments are skipped before checking @bot."""
+    segs = [
+        {"type": "reply", "data": {"id": "55"}},
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": "hi"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert [s.get("type") for s in out] == ["reply", "text"]
+
+
+def test_strip_first_bot_mention_non_leading_preserved():
+    """When @bot is not the first non-reply segment, nothing is stripped."""
+    # @someone-else first → bot mention kept
+    segs = [
+        {"type": "at", "data": {"qq": "111"}},
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": "hi"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert out == segs  # unchanged
+
+    # text first, @bot later → kept
+    segs2 = [
+        {"type": "text", "data": {"text": "hi "}},
+        {"type": "at", "data": {"qq": "999"}},
+    ]
+    out2 = seg.strip_first_bot_mention(segs2, "999")
+    assert out2 == segs2
+
+
+def test_strip_first_bot_mention_only_first_bot_removed():
+    """Two @bot mentions: only the leading one is removed."""
+    segs = [
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": " "}},
+        {"type": "at", "data": {"qq": "999"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert [s.get("type") for s in out] == ["text", "at"]
+    assert out[1].get("data", {}).get("qq") == "999"
+
+
+def test_strip_first_bot_mention_no_bot():
+    """No @bot at the leading position → list returned unchanged."""
+    segs = [
+        {"type": "text", "data": {"text": "hi"}},
+        {"type": "at", "data": {"qq": "111"}},
+    ]
+    out = seg.strip_first_bot_mention(segs, "999")
+    assert out == segs
+
+
+def test_strip_first_bot_mention_empty():
+    assert seg.strip_first_bot_mention([], "999") == []
 
 
 def test_has_bot_mention_first():

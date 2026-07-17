@@ -28,6 +28,7 @@ def _init_config(force: bool) -> int:
         existing_tokens = {
             "onebot_ws_token": old.onebot_ws_token,
             "hermes_ws_token": old.hermes_ws_token,
+            "webui_token": old.webui_token,
         }
 
     cfg = AdapterConfig(**existing_tokens)
@@ -35,7 +36,9 @@ def _init_config(force: bool) -> int:
     print(f"✓ 配置文件已生成: {target}")
     print(f"  onebot_ws_token:  {cfg.onebot_ws_token}")
     print(f"  hermes_ws_token:  {cfg.hermes_ws_token}")
+    print(f"  webui_token:      {cfg.webui_token}")
     print("  编辑完成后运行 hermes-onebot-adapter 启动服务")
+    print("  首次登录 WebUI 时输入 webui_token")
     return 0
 
 

@@ -11,24 +11,13 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from onebot_adapter._async_utils import log_task_exception
+
 logger = logging.getLogger(__name__)
 
 
-def _log_listener_exception(task: asyncio.Task) -> None:
-    """Done-callback: log unhandled exceptions from async config-change
-    listener tasks instead of letting them surface as "Task exception was
-    never retrieved" warnings.
-    """
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("config change listener task crashed: %r", exc, exc_info=exc)
-
-
 CONFIG_ENV = "ONEBOT_ADAPTER_CONFIG"
-DEFAULT_CONFIG_DIR = Path.home() / ".onebot_adapter"
-DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
+DEFAULT_CONFIG_PATH = Path.home() / ".onebot_adapter" / "config.json"
 
 NAPCAT_MODE_REVERSE = "reverse"
 NAPCAT_MODE_FORWARD = "forward"
@@ -38,12 +27,17 @@ USER_FILTER_WHITELIST = "whitelist"
 USER_FILTER_BLACKLIST = "blacklist"
 _VALID_USER_FILTER_MODES = {USER_FILTER_WHITELIST, USER_FILTER_BLACKLIST}
 
+MEDIA_DELIVERY_PASSTHROUGH = "passthrough"
+MEDIA_DELIVERY_CACHE = "cache"
+_VALID_MEDIA_DELIVERY_MODES = {MEDIA_DELIVERY_PASSTHROUGH, MEDIA_DELIVERY_CACHE}
+
 COMMAND_PERM_EVERYONE = "everyone"
 COMMAND_PERM_ADMIN = "admin"
 COMMAND_PERM_DISABLED = "disabled"
 _VALID_COMMAND_PERM_LEVELS = {COMMAND_PERM_EVERYONE, COMMAND_PERM_ADMIN, COMMAND_PERM_DISABLED}
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
-DEFAULT_PLATFORM_HINT = (
+DEFAULT_CHANNEL_PROMPT = (
     "# 平台特性\n"
     "你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n"
     "回复当前对话通常直接输出文本即可(系统会自动送达);"
@@ -58,7 +52,8 @@ DEFAULT_PLATFORM_HINT = (
     "  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n"
     "- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n"
     "- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n"
-    "- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 [语音1](语音转换失败,保留原始格式)\n"
+    "- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 "
+    "[图1](已跳过:下载失败) 或 [语音1](语音转换失败,保留原始格式)\n"
     "- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n"
     "- 合并转发:\n"
     "  [合并转发开始:1]\n"
@@ -76,13 +71,19 @@ DEFAULT_PLATFORM_HINT = (
     "- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,"
     "需用 onebot_get_group_msg_history 重新获取\n\n"
     "# 出站消息格式(你输出时)\n"
-    "- 要 @ 某人,使用 {@QQ号} 格式,如 {@123456} 你好(QQ 号 5-11 位数字,大括号包裹)\n"
+    "- 直接输出文本只能发纯文本,**无法 @ 人**;要 @ 某人必须用 onebot_send_message 工具,"
+    "message 参数传 OneBot 11 消息段数组,如 "
+    '[{"type":"at","data":{"qq":"123456"}},{"type":"text","data":{"text":" 你好"}}]\n'
     "- 不要用 Markdown 语法(**粗体**、## 标题、- 列表 等),会被自动剥离;"
     "如需结构化展示可用纯文本约定(• 列表、【标题】、「引用」、───── 分隔线)\n"
     "- 回复时无需重复发送者前缀,直接输出正文\n\n"
     "# 不支持的元素\n"
     "- 表情(face/emoji/bface/mface)段在入站时会被丢弃,不要期望看到 QQ 原生表情\n"
-    "- 不支持打字状态提示(send_typing 为 no-op)"
+    "- 不支持打字状态提示(send_typing 为 no-op)\n\n"
+    "# 交互式提问\n"
+    "- 不要使用 clarify 工具提问:OneBot 平台无按钮 UI,且群聊共享会话下用户回复会被排队拦截,"
+    "导致 agent 卡死直到超时\n"
+    "- 需要向用户提问时直接输出纯文本问题即可,用户回复后会在下一轮被正常处理"
 )
 
 
@@ -90,14 +91,14 @@ DEFAULT_PLATFORM_HINT = (
 class GroupConfig:
     """Per-group configuration. Stored in AdapterConfig.groups[group_id]."""
     group_id: str
-    name: str = ""
+    name: str = ""  # UI 展示缓存;运行时群名走 name_resolver
     enabled: bool = True
     require_mention: bool | None = None       # None=跟随全局
     mention_first_only: bool | None = None    # None=跟随全局，True=仅首@段触发
     trigger_keywords: list[str] | None = None  # None=跟随全局，[] = 强制禁用关键词
     keyword_first_only: bool | None = None   # None=跟随全局，True=关键词须在开头
-    keep_mention: bool | None = None         # None=跟随全局，True=保留@bot段
-    custom_prompt: str = ""                   # 空=用全局 platform_hint
+    strip_first_mention: bool | None = None  # None=跟随全局，True=移除首@bot段
+    custom_prompt: str = ""                   # 空=用全局 global_channel_prompt(WebUI 保存时物化写入 Hermes config.yaml)
     admins: list[str] = field(default_factory=list)
     # ── 群成员准入（黑名单/白名单）──
     group_user_filter_mode: str = USER_FILTER_BLACKLIST  # 默认黑名单
@@ -108,6 +109,9 @@ class GroupConfig:
     command_filter_enabled: bool | None = None
     command_filter_unknown: bool | None = None
     command_permissions: dict[str, str] | None = None  # None=跟随全局，{} = 强制清空，非空=覆盖
+    # ── notice 事件推送（None=跟随全局）──
+    notify_poke_enabled: bool | None = None            # 戳一戳(bot 被戳)推送,None=跟随全局
+    notify_member_change_enabled: bool | None = None   # 群成员进退群推送,None=跟随全局
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -116,6 +120,9 @@ class GroupConfig:
     def from_dict(cls, data: dict[str, Any]) -> GroupConfig:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
+        # group_id is a required field — default to "" if absent in the dict
+        # so empty group config dicts ({}) don't raise TypeError.
+        filtered.setdefault("group_id", "")
         return cls(**filtered)
 
     def is_user_allowed(self, user_id: str) -> bool:
@@ -146,7 +153,7 @@ class AdapterConfig:
     group_mention_first_only: bool = False       # True=仅首@段触发，False=任意位置@
     group_trigger_keywords: list[str] = field(default_factory=list)  # 关键词触发，空=不启用
     group_keyword_first_only: bool = False       # True=关键词须出现在文本开头
-    group_keep_mention: bool = False              # True=触发后保留@bot段（不 strip）
+    group_strip_first_mention: bool = True       # True=消息以@bot开头时移除该段(非首@bot保留)
     global_admins: list[str] = field(default_factory=list)
 
     # ── 私聊设置 ──
@@ -157,7 +164,7 @@ class AdapterConfig:
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # ── 其他 ──
-    platform_hint: str = DEFAULT_PLATFORM_HINT
+    global_channel_prompt: str = DEFAULT_CHANNEL_PROMPT
     hermes_ws_port: int = 18810
     hermes_ws_path: str = "/hermes"
     hermes_ws_token: str = ""
@@ -166,6 +173,7 @@ class AdapterConfig:
     webui_token: str = ""  # WebUI 登录鉴权 token,自动生成,请勿清空
     webui_token_lifetime_hours: int = 168  # 登录有效期(小时),最小 1;默认 168(7 天)
     webui_token_epoch: int = 0  # token 纪元,改 lifetime 时 bump 使所有旧 session token 立即失效
+    webui_trust_proxy_headers: bool = False  # 信任 X-Forwarded-For(仅反向代理时开启)
     log_level: str = "INFO"
     log_message_preview: int = 100
     log_file_enabled: bool = True
@@ -185,11 +193,18 @@ class AdapterConfig:
     event_queue_max_per_chat: int = 50          # 单群排队上限,超限拒绝入队
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
 
+    # ── 媒体投递 ──
+    media_delivery_mode: str = MEDIA_DELIVERY_CACHE  # "passthrough"(URL 占位符) | "cache"(默认,插件侧下载落盘)
+
     # ── /指令过滤 ──
     command_filter_enabled: bool = False                # 总开关：是否对 /指令 做权限过滤
     command_filter_unknown: bool = False                # 未知指令(不在 hermes 列表)是否过滤，默认放行
     command_permissions: dict[str, str] = field(default_factory=dict)  # {指令名: everyone|admin|disabled}
     command_reject_message: str = "⛔ 你没有权限使用此指令 /{cmd}"
+
+    # ── notice 事件推送 ──
+    notify_poke_enabled: bool = False               # 戳一戳(bot 被戳)推送开关
+    notify_member_change_enabled: bool = False      # 群成员进退群推送开关
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -201,6 +216,10 @@ class AdapterConfig:
             errors.append("log_message_preview must be non-negative")
         if self.log_retention_days < 1:
             errors.append("log_retention_days must be at least 1")
+        for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port"):
+            port_val = getattr(self, port_field)
+            if not isinstance(port_val, int) or port_val < 1 or port_val > 65535:
+                errors.append(f"{port_field} must be an integer in [1, 65535]")
         if not self.onebot_ws_token:
             errors.append("onebot_ws_token must not be empty")
         if not self.hermes_ws_token:
@@ -213,13 +232,14 @@ class AdapterConfig:
             errors.append("event_queue_max_per_chat must be at least 1")
         if self.event_queue_idle_timeout <= 0:
             errors.append("event_queue_idle_timeout must be positive")
+        if self.media_delivery_mode not in _VALID_MEDIA_DELIVERY_MODES:
+            errors.append(f"media_delivery_mode must be one of {sorted(_VALID_MEDIA_DELIVERY_MODES)}")
         if self.webui_token_lifetime_hours < 1:
             errors.append("webui_token_lifetime_hours must be at least 1")
         if not self.reaction_emoji_id:
             errors.append("reaction_emoji_id must not be empty")
         if self.dm_user_filter_mode not in _VALID_USER_FILTER_MODES:
             errors.append(f"dm_user_filter_mode must be one of {sorted(_VALID_USER_FILTER_MODES)}")
-        _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         if self.log_level.upper() not in _VALID_LOG_LEVELS:
             errors.append(f"log_level must be one of {sorted(_VALID_LOG_LEVELS)}")
         for cmd, perm in self.command_permissions.items():
@@ -238,10 +258,20 @@ class AdapterConfig:
                 errors.append(f"group {gid} mention_first_only must be bool or null")
             if gc.keyword_first_only is not None and not isinstance(gc.keyword_first_only, bool):
                 errors.append(f"group {gid} keyword_first_only must be bool or null")
-            if gc.keep_mention is not None and not isinstance(gc.keep_mention, bool):
-                errors.append(f"group {gid} keep_mention must be bool or null")
+            if gc.strip_first_mention is not None and not isinstance(gc.strip_first_mention, bool):
+                errors.append(f"group {gid} strip_first_mention must be bool or null")
             if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
                 errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
+            if gc.command_filter_enabled is not None and not isinstance(gc.command_filter_enabled, bool):
+                errors.append(f"group {gid} command_filter_enabled must be bool or null")
+            if gc.command_filter_unknown is not None and not isinstance(gc.command_filter_unknown, bool):
+                errors.append(f"group {gid} command_filter_unknown must be bool or null")
+            if gc.message_show_group_id is not None and not isinstance(gc.message_show_group_id, bool):
+                errors.append(f"group {gid} message_show_group_id must be bool or null")
+            if gc.notify_poke_enabled is not None and not isinstance(gc.notify_poke_enabled, bool):
+                errors.append(f"group {gid} notify_poke_enabled must be bool or null")
+            if gc.notify_member_change_enabled is not None and not isinstance(gc.notify_member_change_enabled, bool):
+                errors.append(f"group {gid} notify_member_change_enabled must be bool or null")
             if gc.command_permissions is not None:
                 for cmd, perm in gc.command_permissions.items():
                     if perm not in _VALID_COMMAND_PERM_LEVELS:
@@ -254,8 +284,12 @@ class AdapterConfig:
     def get_group_config(self, group_id: str) -> GroupConfig:
         """Return GroupConfig for a group, or a default if not configured."""
         raw = self.groups.get(str(group_id))
-        if raw:
-            return GroupConfig.from_dict(raw)
+        if raw is not None:
+            gc = GroupConfig.from_dict(raw)
+            # Ensure group_id is set even if the stored dict omitted it
+            if not gc.group_id:
+                gc.group_id = str(group_id)
+            return gc
         return GroupConfig(group_id=str(group_id))
 
     def is_group_user_allowed(self, group_id: str, user_id: str) -> bool:
@@ -279,7 +313,7 @@ class AdapterConfig:
         uid = str(user_id)
         if uid in self.global_admins:
             return True
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if uid in gc.admins:
                 return True
@@ -309,15 +343,11 @@ class AdapterConfig:
             return gc.keyword_first_only
         return self.group_keyword_first_only
 
-    def resolve_keep_mention(self, group_id: str) -> bool:
+    def resolve_strip_first_mention(self, group_id: str) -> bool:
         gc = self.get_group_config(group_id)
-        if gc.keep_mention is not None:
-            return gc.keep_mention
-        return self.group_keep_mention
-
-    def resolve_custom_prompt(self, group_id: str) -> str | None:
-        gc = self.get_group_config(group_id)
-        return gc.custom_prompt if gc.custom_prompt else None
+        if gc.strip_first_mention is not None:
+            return gc.strip_first_mention
+        return self.group_strip_first_mention
 
     def resolve_message_show_group_id(self, group_id: str) -> bool:
         gc = self.get_group_config(group_id)
@@ -327,17 +357,35 @@ class AdapterConfig:
 
     def resolve_reaction_emoji_enabled(self, group_id: str | None = None) -> bool:
         """消息送达贴表情开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.reaction_emoji_enabled is not None:
                 return gc.reaction_emoji_enabled
         return self.reaction_emoji_enabled
 
+    # ── notice 事件推送解析 ──
+
+    def resolve_notify_poke_enabled(self, group_id: str | None = None) -> bool:
+        """戳一戳(bot 被戳)推送开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
+        if group_id is not None:
+            gc = self.get_group_config(group_id)
+            if gc.notify_poke_enabled is not None:
+                return gc.notify_poke_enabled
+        return self.notify_poke_enabled
+
+    def resolve_notify_member_change_enabled(self, group_id: str | None = None) -> bool:
+        """群成员进退群推送开关。群配置非 None 时覆盖全局。"""
+        if group_id is not None:
+            gc = self.get_group_config(group_id)
+            if gc.notify_member_change_enabled is not None:
+                return gc.notify_member_change_enabled
+        return self.notify_member_change_enabled
+
     # ── /指令过滤解析 ──
 
     def resolve_command_filter_enabled(self, group_id: str | None = None) -> bool:
         """指令过滤总开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.command_filter_enabled is not None:
                 return gc.command_filter_enabled
@@ -345,7 +393,7 @@ class AdapterConfig:
 
     def resolve_command_filter_unknown(self, group_id: str | None = None) -> bool:
         """未知指令处理：True=过滤，False=放行(默认)。群配置非 None 时覆盖全局。"""
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.command_filter_unknown is not None:
                 return gc.command_filter_unknown
@@ -361,7 +409,7 @@ class AdapterConfig:
         清空所有指令配置(均视为未配置)；群配置非空 dict 时按 key 覆盖，其余
         指令回落到全局 ``command_permissions``。
         """
-        if group_id:
+        if group_id is not None:
             gc = self.get_group_config(group_id)
             if gc.command_permissions is not None:
                 # 群级显式配置：直接查；未在群配置中的指令视为 None(不回落全局)
@@ -414,6 +462,9 @@ class AdapterConfig:
     def from_dict(cls, data: dict[str, Any]) -> AdapterConfig:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
+        # Migrate legacy field name: platform_hint -> global_channel_prompt
+        if "platform_hint" in data and "global_channel_prompt" not in filtered:
+            filtered["global_channel_prompt"] = data["platform_hint"]
         return cls(**filtered)
 
     def with_overrides(self, **changes: Any) -> AdapterConfig:
@@ -453,6 +504,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "webui_token": "WebUI 登录鉴权 token,自动生成,请勿清空",
         "webui_token_lifetime_hours": "WebUI 登录有效期(小时),最小 1,默认 168(7天);改后已登录会话立即失效",
         "webui_token_epoch": "token 纪元(内部状态,勿手动修改);改 lifetime 时自动递增使旧 session token 失效",
+        "webui_trust_proxy_headers": "信任 X-Forwarded-For 获取客户端 IP(仅反向代理时开启;"
+                                     "直连开启会被伪造 IP 绕过登录限流)",
         "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
@@ -463,6 +516,11 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
         "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
+        "media_delivery_mode": "可选值: passthrough(URL 占位符直传) | cache(插件侧下载落盘到 ~/.hermes/cache/,默认)",
+        "global_channel_prompt": "全局提示词;保存时物化写入 Hermes config.yaml 的"
+                                 " platforms.onebot.channel_prompts,需重启 Hermes 网关生效",
+        "notify_poke_enabled": "戳一戳(bot 被戳)推送开关;开启后 bot 被戳会合成系统事件转发给 agent",
+        "notify_member_change_enabled": "群成员进退群推送开关;开启后其他成员进群/退群会合成系统事件转发给 agent",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():
@@ -527,7 +585,7 @@ class ConfigStore:
                     try:
                         loop = asyncio.get_running_loop()
                         task = loop.create_task(result)
-                        task.add_done_callback(_log_listener_exception)
+                        task.add_done_callback(log_task_exception)
                     except RuntimeError:
                         result.close()
             except Exception:

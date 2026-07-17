@@ -43,7 +43,7 @@ async function save() {
       send_dedup_ttl_seconds: c.send_dedup_ttl_seconds,
       seq_map_size: c.seq_map_size,
     });
-    msg.value = "✅ 设置已保存";
+    msg.value = "✅ 配置已保存";
     msgType.value = "success";
   } catch (e: any) {
     msg.value = "❌ " + (e.response?.data?.error || e.message);
@@ -136,7 +136,7 @@ async function changeToken() {
         确认新 Token
         <input v-model="confirmToken" type="password" placeholder="再次输入新 Token" autocomplete="new-password" />
       </label>
-      <button @click="changeToken" :disabled="changingToken" class="save-btn">
+      <button @click="changeToken" :disabled="changingToken" class="btn-token-change">
         {{ changingToken ? "修改中..." : "修改 Token" }}
       </button>
 
@@ -146,7 +146,7 @@ async function changeToken() {
       <label>
         有效期(小时)
         <input type="number" v-model.number="cfg.webui_token_lifetime_hours" min="1" max="87600" />
-        <span class="hint">最小 1 小时;修改后点击下方"保存设置"生效</span>
+        <span class="hint">最小 1 小时;修改后点击下方"保存配置"生效</span>
       </label>
     </div>
 
@@ -202,12 +202,12 @@ async function changeToken() {
       <label>
         去重 TTL(秒)
         <input type="number" v-model.number="cfg.send_dedup_ttl_seconds" min="1" step="1" />
-        <span class="hint">相同内容在此时间内被重复发送时直接返回缓存结果(默认 90 秒,需覆盖 Gateway _send_with_retry 的完整重试窗口:30s 超时 + 2.7s 退避 + 30s 超时 + 4.6s 退避 ≈ 67s)。值越小误去重风险越低,但可能漏掉间隔较长的重试。</span>
+        <span class="hint">相同内容在此时间内被重复发送时直接返回缓存结果(默认 10 秒)。建议覆盖 Gateway _send_with_retry 的完整重试窗口(30s 超时 + 2.7s 退避 + 30s 超时 + 4.6s 退避 ≈ 67s),否则间隔较长的重试可能漏掉去重导致重复发送。值越小误去重风险越低,但可能漏掉间隔较长的重试。</span>
       </label>
     </div>
 
     <button @click="save" :disabled="saving" class="save-btn">
-      {{ saving ? "保存中..." : "保存设置" }}
+      {{ saving ? "保存中..." : "保存配置" }}
     </button>
     </div>
   </div>
@@ -224,8 +224,8 @@ input, select { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-rad
 .checkbox-row span { font-weight: 500; }
 .checkbox-row input[type="checkbox"] { width: auto; margin-top: 0; }
 
-.save-btn { background: var(--primary); color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem; }
-.save-btn:disabled { background: #ccc; cursor: not-allowed; }
+.btn-token-change { background: var(--primary); color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem; }
+.btn-token-change:disabled { background: #ccc; cursor: not-allowed; }
 .message { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
 .message.success { background: #d4edda; color: #155724; border-left: 4px solid var(--success); }
 .message.error { background: #f8d7da; color: #721c24; border-left: 4px solid var(--danger); }

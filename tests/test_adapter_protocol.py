@@ -81,6 +81,7 @@ def _make_adapter():
     adapter._recv_task = None
     adapter._futures = {}
     adapter._send_semaphore = asyncio.Semaphore(2)  # match _MAX_INFLIGHT_SENDS
+    adapter._push_tasks = set()
     adapter._onebot_connected = False
     adapter._self_id = ""
     adapter._is_connected = True

@@ -12,11 +12,13 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -55,10 +57,43 @@ def _yaml() -> YAML:
     return yaml
 
 
+class HermesConfigParseError(Exception):
+    """config.yaml 存在但解析失败时抛出,防止写入逻辑覆盖损坏的原始文件。"""
+
+
+@contextmanager
+def _locked(config_path: Path):
+    """对 config.yaml 加文件锁(进程级),避免与 Hermes 网关并发写互相覆盖。
+
+    使用 ``fcntl.flock`` 阻塞式排他锁,作用域为本上下文。Linux/macOS 可用;
+    Windows 无 flock 但有 msvcrt,此处仅支持 POSIX(适配器部署目标)。
+    """
+    import fcntl
+
+    lock_path = config_path.with_suffix(config_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    locked = False
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        fh.close()
+
+
 def read_config(hermes_install_dir: str | None) -> Any:
     """Round-trip load Hermes config.yaml;不存在返回空 dict-like。
 
     返回 ruamel.yaml 的 CommentedMap(支持注释保留);文件不存在时返回空 CommentedMap。
+
+    文件存在但解析失败时抛 :class:`HermesConfigParseError`,避免调用方(写入逻辑)
+    基于空数据覆盖用户的(可恢复的)损坏 YAML。
     """
     yaml = _yaml()
     config_path = resolve_hermes_config_path(hermes_install_dir)
@@ -70,9 +105,9 @@ def read_config(hermes_install_dir: str | None) -> Any:
         return yaml.load(config_path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Hermes config.yaml 解析失败 (%s): %s", config_path, exc)
-        from ruamel.yaml.comments import CommentedMap
-
-        return CommentedMap()
+        raise HermesConfigParseError(
+            f"Hermes config.yaml 解析失败 ({config_path}): {exc}"
+        ) from exc
 
 
 def _atomic_write(config_path: Path, content: str) -> None:
@@ -82,13 +117,18 @@ def _atomic_write(config_path: Path, content: str) -> None:
     os.replace(tmp, config_path)
 
 
-def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str]) -> None:
-    """写入 ``platform_toolsets.onebot`` 和 ``known_plugin_toolsets.onebot``。
+def _read_modify_write(
+    hermes_install_dir: str | None,
+    *,
+    modify: Any,
+) -> None:
+    """在文件锁保护下完成读取-修改-写入,避免 TOCTOU 丢失更新。
 
-    - ``platform_toolsets.onebot`` = sorted(set(toolsets))
-    - ``known_plugin_toolsets.onebot`` 至少含 ``"onebot"``(若已存在则补入,保留其它条目)
+    *modify* 是一个接收已解析的 ``data`` (CommentedMap) 并就地修改它的 callable。
+    整个 read-modify-write 都在 ``_locked`` 作用域内,保证 Hermes 网关与适配器
+    的并发写入不会互相覆盖。
 
-    保留 config.yaml 其它顶层 key、注释和顺序。原子写。
+    当目录不存在时抛 ``FileNotFoundError``;解析失败抛 ``HermesConfigParseError``。
     """
     config_path = resolve_hermes_config_path(hermes_install_dir)
     if config_path is None:
@@ -97,53 +137,80 @@ def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str])
             "请先在 WebUI 设置 hermes_install_dir"
         )
 
-    data = read_config(hermes_install_dir)
+    with _locked(config_path):
+        # Read inside the lock so no concurrent writer can slip in between
+        # our read and our write.
+        yaml = _yaml()
+        if not config_path.exists():
+            from ruamel.yaml.comments import CommentedMap
 
-    platform_toolsets = data.get("platform_toolsets")
-    if platform_toolsets is None:
-        from ruamel.yaml.comments import CommentedMap
+            data: Any = CommentedMap()
+        else:
+            try:
+                data = yaml.load(config_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Hermes config.yaml 解析失败 (%s): %s", config_path, exc)
+                raise HermesConfigParseError(
+                    f"Hermes config.yaml 解析失败 ({config_path}): {exc}"
+                ) from exc
 
-        platform_toolsets = CommentedMap()
-        data["platform_toolsets"] = platform_toolsets
-    platform_toolsets[PLATFORM] = sorted(set(toolsets))
+        modify(data)
 
-    known = data.get("known_plugin_toolsets")
-    if known is None:
-        from ruamel.yaml.comments import CommentedMap
+        buf = io.StringIO()
+        yaml.dump(data, buf)
+        _atomic_write(config_path, buf.getvalue())
 
-        known = CommentedMap()
-        data["known_plugin_toolsets"] = known
-    existing = list(known.get(PLATFORM, []) or [])
-    if PLUGIN_TOOLSET_KEY not in existing:
-        existing.append(PLUGIN_TOOLSET_KEY)
-    known[PLATFORM] = sorted(set(existing))
 
-    import io
+def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str]) -> None:
+    """写入 ``platform_toolsets.onebot`` 和 ``known_plugin_toolsets.onebot``。
 
-    buf = io.StringIO()
-    _yaml().dump(data, buf)
-    _atomic_write(config_path, buf.getvalue())
+    - ``platform_toolsets.onebot`` = sorted(set(toolsets))
+    - ``known_plugin_toolsets.onebot`` 至少含 ``"onebot"``(若已存在则补入,保留其它条目)
+
+    保留 config.yaml 其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁
+    保护下完成,避免与 Hermes 网关并发写互相覆盖。解析失败时抛
+    :class:`HermesConfigParseError`,不覆盖原始文件。
+    """
+    def _modify(data: Any) -> None:
+        platform_toolsets = data.get("platform_toolsets")
+        if platform_toolsets is None:
+            from ruamel.yaml.comments import CommentedMap
+
+            platform_toolsets = CommentedMap()
+            data["platform_toolsets"] = platform_toolsets
+        platform_toolsets[PLATFORM] = sorted(set(toolsets))
+
+        known = data.get("known_plugin_toolsets")
+        if known is None:
+            from ruamel.yaml.comments import CommentedMap
+
+            known = CommentedMap()
+            data["known_plugin_toolsets"] = known
+        existing = list(known.get(PLATFORM, []) or [])
+        if PLUGIN_TOOLSET_KEY not in existing:
+            existing.append(PLUGIN_TOOLSET_KEY)
+        known[PLATFORM] = sorted(set(existing))
+
+    _read_modify_write(hermes_install_dir, modify=_modify)
 
 
 def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
     """删除 ``platform_toolsets.onebot`` 条目(其它平台保留)。
 
     不删 ``known_plugin_toolsets`` —— 删除 known 会让 Hermes 把 onebot 当"新插件"
-    默认启用,与 reset 的"回到未配置状态"语义不符。
+    默认启用,与 reset 的"回到未配置状态"语义不符。整个 read-modify-write 在文件锁
+    保护下完成。
     """
     config_path = resolve_hermes_config_path(hermes_install_dir)
     if config_path is None or not config_path.exists():
         return
 
-    data = read_config(hermes_install_dir)
-    platform_toolsets = data.get("platform_toolsets")
-    if platform_toolsets is not None and PLATFORM in platform_toolsets:
-        del platform_toolsets[PLATFORM]
-        import io
+    def _modify(data: Any) -> None:
+        platform_toolsets = data.get("platform_toolsets")
+        if platform_toolsets is not None and PLATFORM in platform_toolsets:
+            del platform_toolsets[PLATFORM]
 
-        buf = io.StringIO()
-        _yaml().dump(data, buf)
-        _atomic_write(config_path, buf.getvalue())
+    _read_modify_write(hermes_install_dir, modify=_modify)
 
 
 # ── 顶层 group_sessions_per_user 读写(供 WebUI 管理)────────────────────
@@ -152,13 +219,19 @@ def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
 def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
     """读取 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
 
-    返回 ``True`` / ``False``;字段不存在时返回 ``None``(调用方按 Hermes
-    默认值 ``True`` 处理,即每用户独立 session)。
+    返回 ``True`` / ``False``;字段不存在或文件/目录不存在时返回 ``None``
+    (调用方按 Hermes 默认值 ``True`` 处理,即每用户独立 session)。
+    YAML 解析失败时也返回 ``None`` 并记 warning,不抛异常,与
+    ``_read_mcp_servers`` 的错误处理策略一致。
     """
     config_path = resolve_hermes_config_path(hermes_install_dir)
     if config_path is None or not config_path.exists():
         return None
-    data = read_config(hermes_install_dir)
+    try:
+        data = read_config(hermes_install_dir)
+    except HermesConfigParseError as exc:
+        logger.warning("read_group_sessions_per_user: config parse failed: %s", exc)
+        return None
     if "group_sessions_per_user" not in data:
         return None
     value = data.get("group_sessions_per_user")
@@ -172,23 +245,104 @@ def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
 def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -> None:
     """写入 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
 
-    保留其它顶层 key、注释和顺序。原子写。修改后需重启 Hermes 网关生效。
+    保留其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁保护下完成。
+    修改后需重启 Hermes 网关生效。
+    """
+
+    def _modify(data: Any) -> None:
+        data["group_sessions_per_user"] = bool(value)
+
+    _read_modify_write(hermes_install_dir, modify=_modify)
+
+
+# ── channel_prompts 读写(供 WebUI 管理全局/群聊提示词)──────────────────
+
+
+def read_channel_prompts(hermes_install_dir: str | None) -> dict[str, str]:
+    """读取 ``platforms.onebot.channel_prompts``。
+
+    返回 ``{group_id: prompt}`` dict;文件/节点不存在返回空 dict。
+    YAML 解析失败也返回空 dict 并记 warning。
+    """
+    try:
+        data = read_config(hermes_install_dir)
+    except HermesConfigParseError as exc:
+        logger.warning("read_channel_prompts: config parse failed: %s", exc)
+        return {}
+    platforms = data.get("platforms") or {}
+    if not hasattr(platforms, "get"):
+        return {}
+    onebot_cfg = platforms.get(PLATFORM) or {}
+    if not hasattr(onebot_cfg, "get"):
+        return {}
+    prompts = onebot_cfg.get("channel_prompts") or {}
+    if not hasattr(prompts, "items"):
+        return {}
+    return {str(k): str(v) for k, v in prompts.items()}
+
+
+def write_channel_prompts(hermes_install_dir: str | None, prompts: dict[str, str]) -> None:
+    """写入 ``platforms.onebot.channel_prompts``。
+
+    保留其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁保护下完成。
+    """
+    def _modify(data: Any) -> None:
+        platforms = data.get("platforms")
+        if platforms is None:
+            from ruamel.yaml.comments import CommentedMap
+            platforms = CommentedMap()
+            data["platforms"] = platforms
+        onebot_cfg = platforms.get(PLATFORM)
+        if onebot_cfg is None:
+            from ruamel.yaml.comments import CommentedMap
+            onebot_cfg = CommentedMap()
+            platforms[PLATFORM] = onebot_cfg
+        onebot_cfg["channel_prompts"] = {str(k): str(v) for k, v in prompts.items()}
+
+    _read_modify_write(hermes_install_dir, modify=_modify)
+
+
+def materialize_channel_prompts(config: Any, hermes_install_dir: str | None) -> None:
+    """把适配器 config 的 global_channel_prompt + 每群 custom_prompt 物化写入 Hermes config.yaml。
+
+    遍历 ``config.groups``:
+      - 有 ``custom_prompt``(非空)的群用自定义值
+      - 没有的群用 ``config.global_channel_prompt``
+
+    一次性写入 ``platforms.onebot.channel_prompts``。Hermes config.yaml
+    不存在时跳过(插件连接时再重试,保证提示词最新)。
     """
     config_path = resolve_hermes_config_path(hermes_install_dir)
-    if config_path is None:
-        raise FileNotFoundError(
-            f"Hermes 安装目录未配置或不存在: {hermes_install_dir!r}; "
-            "请先在 WebUI 设置 hermes_install_dir"
+    if config_path is None or not config_path.exists():
+        logger.debug("materialize_channel_prompts: Hermes config.yaml 不存在,跳过")
+        return
+
+    global_prompt = getattr(config, "global_channel_prompt", "") or ""
+    groups = getattr(config, "groups", {}) or {}
+
+    prompts: dict[str, str] = {}
+    for gid, gcfg in groups.items():
+        gid_str = str(gid)
+        custom = ""
+        if isinstance(gcfg, dict):
+            custom = (gcfg.get("custom_prompt") or "").strip()
+        else:
+            custom = getattr(gcfg, "custom_prompt", "") or ""
+            custom = custom.strip() if custom else ""
+        prompts[gid_str] = custom if custom else global_prompt
+
+    try:
+        write_channel_prompts(hermes_install_dir, prompts)
+        logger.info(
+            "materialize_channel_prompts: wrote %d group prompt(s) to Hermes config.yaml",
+            len(prompts),
         )
-
-    data = read_config(hermes_install_dir)
-    data["group_sessions_per_user"] = bool(value)
-
-    import io
-
-    buf = io.StringIO()
-    _yaml().dump(data, buf)
-    _atomic_write(config_path, buf.getvalue())
+    except FileNotFoundError:
+        logger.debug("materialize_channel_prompts: Hermes dir not found, skipped")
+    except HermesConfigParseError as exc:
+        logger.warning("materialize_channel_prompts: config parse failed: %s", exc)
+    except Exception:
+        logger.exception("materialize_channel_prompts: failed to write channel_prompts")
 
 
 # ── 工具集列表(从 Hermes 安装目录 import)──────────────────────────────
@@ -295,6 +449,28 @@ def _read_mcp_servers(hermes_install_dir: str | None) -> list[dict]:
     return mcp_servers
 
 
+# ── 平台级工具集说明增强 ─────────────────────────────────────────────
+# 对特定工具集追加 OneBot 平台相关的使用建议,让 WebUI 工具页展示。
+# Hermes host 返回的 description 多为简略的"工具名"列表,不含平台特有注意事项。
+_CLARIFY_PLATFORM_WARNING = (
+    "clarify — 交互式提问工具。OneBot 平台无按钮 UI,且群聊共享会话下用户回复会被"
+    "适配器排队拦截,导致 agent 卡死直到看门狗超时。建议在 OneBot 平台关闭此工具集,"
+    "改用纯文本提问(平台提示词已引导 LLM 不使用本工具)。"
+)
+
+
+def _augment_toolset_descriptions(configurable: list[dict]) -> None:
+    """为特定工具集追加 OneBot 平台相关的使用建议(就地修改 description)。
+
+    Hermes host 返回的 description 是平台无关的简略说明;OneBot 平台对某些工具集
+    有特殊限制(如 clarify 无按钮 UI 且与群排队冲突),在此追加说明让 WebUI 工具页
+    能引导用户做出合适的选择。前端 ``Tools.vue`` 直接渲染 ``description`` 字段。
+    """
+    for item in configurable:
+        if item.get("key") == "clarify":
+            item["description"] = _CLARIFY_PLATFORM_WARNING
+
+
 def list_available_toolsets(hermes_install_dir: str | None) -> dict:
     """返回 OneBot 平台可配置的工具集 + MCP 服务器清单。
 
@@ -322,6 +498,7 @@ def list_available_toolsets(hermes_install_dir: str | None) -> dict:
         venv_python, agent_dir = venv
         result = _run_hermes_subprocess(venv_python, agent_dir, _LIST_TOOLSETS_SCRIPT)
         if result is not None and "configurable" in result:
+            _augment_toolset_descriptions(result["configurable"])
             result["mcp_servers"] = _read_mcp_servers(hermes_install_dir)
             return result
         # 子进程失败 → 继续 fallback 到 sys.path
@@ -360,6 +537,7 @@ def list_available_toolsets(hermes_install_dir: str | None) -> dict:
         except Exception as exc:
             return {"error": "failed to list toolsets", "detail": str(exc)}
 
+        _augment_toolset_descriptions(configurable)
         return {"configurable": configurable, "mcp_servers": _read_mcp_servers(hermes_install_dir)}
     finally:
         for p in added:
@@ -443,8 +621,12 @@ def default_onebot_toolsets(hermes_install_dir: str | None) -> list[str]:
 
 
 def read_current_enabled(hermes_install_dir: str | None) -> list[str]:
-    """读取 ``platform_toolsets.onebot``;不存在返回空列表。"""
-    data = read_config(hermes_install_dir)
+    """读取 ``platform_toolsets.onebot``;不存在或解析失败返回空列表。"""
+    try:
+        data = read_config(hermes_install_dir)
+    except HermesConfigParseError as exc:
+        logger.warning("read_current_enabled: config parse failed: %s", exc)
+        return []
     platform_toolsets = data.get("platform_toolsets") or {}
     if hasattr(platform_toolsets, "get"):
         val = platform_toolsets.get(PLATFORM, [])

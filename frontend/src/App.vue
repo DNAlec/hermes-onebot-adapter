@@ -184,6 +184,22 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: var(
 
 .content { padding: 1.5rem; max-width: 1000px; width: 100%; margin: 0 auto; flex: 1; }
 
+/* Shared primary save button — used by all page-level save buttons.
+   Non-page-level buttons (modal save, change token) use different classes
+   to avoid inheriting these styles. */
+.save-btn {
+  background: var(--primary);
+  color: white;
+  border: none;
+  padding: 0.6rem 1.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  transition: background 0.2s;
+}
+.save-btn:hover:not(:disabled) { background: var(--primary-dark); }
+.save-btn:disabled { background: #ccc; cursor: not-allowed; }
+
 @media (max-width: 768px) {
   .topbar { gap: 0.5rem; padding: 0.5rem 1rem; }
   .topbar h1 { font-size: 0.95rem; }

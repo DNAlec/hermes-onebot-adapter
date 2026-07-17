@@ -68,11 +68,11 @@ def strip_markdown(text: str) -> str:
             continue
 
         # ── ordered lists ─────────────────────────────────────────────────
-        ol = re.match(r"^(\s*)\d+[.)]\s+(.*)", line)
+        ol = re.match(r"^(\s*)(\d+)[.)]\s+(.*)", line)
         if ol:
             indent = len(ol.group(1)) // 2
-            num = re.match(r"^\s*(\d+)", line).group(1)
-            out.append("  " * indent + num + ". " + _inline(ol.group(2)))
+            num = ol.group(2)
+            out.append("  " * indent + num + ". " + _inline(ol.group(3)))
             continue
 
         # ── table rows ────────────────────────────────────────────────────
@@ -85,6 +85,14 @@ def strip_markdown(text: str) -> str:
 
         # ── normal line ───────────────────────────────────────────────────
         out.append(_inline(line))
+
+    # Flush an unclosed fenced code block (LLM output truncated mid-block).
+    if in_code:
+        label = f"[{code_lang}]" if code_lang else "[代码]"
+        out.append(f"┌─{label}─")
+        for cl in code_lines:
+            out.append("│ " + cl)
+        out.append("└──────")
 
     return "\n".join(out).strip()
 

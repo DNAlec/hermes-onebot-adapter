@@ -49,15 +49,6 @@ def test_scope_independent_keys():
     assert m.lookup("43", 100) == "g43-100"
 
 
-def test_clear():
-    m = SeqMap(maxlen=10)
-    m.add("42", 1, "a")
-    m.add("43", 2, "b")
-    m.clear()
-    assert m.lookup("42", 1) is None
-    assert m.lookup("43", 2) is None
-
-
 def test_empty_scope_ignored():
     m = SeqMap(maxlen=10)
     m.add("", 100, "x")

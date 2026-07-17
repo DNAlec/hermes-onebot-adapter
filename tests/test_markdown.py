@@ -40,6 +40,17 @@ def test_ordered_list():
     assert strip_markdown("1. first\n2. second") == "1. first\n2. second"
 
 
+def test_ordered_list_multidigit():
+    """Multi-digit ordered list numbers should be preserved correctly."""
+    assert strip_markdown("10. ten\n11. eleven") == "10. ten\n11. eleven"
+    assert strip_markdown("100. hundred") == "100. hundred"
+
+
+def test_ordered_list_with_paren():
+    """Ordered lists using ')' as delimiter should work."""
+    assert strip_markdown("1) first\n2) second") == "1. first\n2. second"
+
+
 def test_link_converted():
     result = strip_markdown("[text](http://url)")
     assert "text" in result

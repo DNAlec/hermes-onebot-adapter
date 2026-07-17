@@ -15,14 +15,18 @@ try:
     from ._version_scm import __version__  # noqa: F811
 except ImportError:
     # Source checkout without a build — derive version from git.
+    desc: str | None = None
     try:
         r = subprocess.run(
             ["git", "describe", "--tags", "--long", "--dirty", "--always"],
-            cwd=_repo_root, capture_output=True, text=True,
+            cwd=_repo_root, capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0 and r.stdout:
             desc = r.stdout.strip()
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
+    if desc is None:
+        # git missing / failed / non-zero exit: fall back to package metadata.
         try:
             from importlib.metadata import version as _pkg_version
 

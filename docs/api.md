@@ -107,24 +107,30 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 响应 `200`：
 ```json
 {
-  "adapter_version": "0.1.0",
+  "adapter_version": "1.1.0b",
+  "plugin_version": "1.1.0b",
+  "version_mismatch": false,
   "onebot_connected": true,
   "hermes_plugin_connected": true,
   "onebot_mode": "reverse",
   "self_id": "123456",
   "onebot_ws_port": 18800,
   "hermes_ws_port": 18810,
-  "webui_port": 18820
+  "webui_port": 18820,
+  "hermes_group_sessions_per_user": true
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `adapter_version` | string | 适配器版本号 |
+| `plugin_version` | string\|null | Hermes 插件版本号（插件未连接时为 `null`） |
+| `version_mismatch` | bool | 插件与适配器版本是否不匹配（插件未连接时为 `true`） |
 | `onebot_connected` | bool | OneBot 客户端是否已连接 |
 | `hermes_plugin_connected` | bool | Hermes 插件是否已连接 |
 | `onebot_mode` | string | OneBot 连接模式：`reverse`（被动等待）/ `forward`（主动连接） |
 | `self_id` | string | 机器人 QQ 号 |
+| `hermes_group_sessions_per_user` | bool | Hermes 会话隔离模式（插件上报；`true`=每人独立 session，`false`=全群共享 session，触发群聊排队） |
 
 ---
 
@@ -146,32 +152,46 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
   "group_mention_first_only": false,
   "group_trigger_keywords": [],
   "group_keyword_first_only": false,
-  "group_keep_mention": false,
+  "group_strip_first_mention": true,
   "global_admins": [],
-  "group_auto_join": false,
   "dm_user_filter_mode": "whitelist",
   "dm_user_list": [],
   "groups": {},
-  "platform_hint": "...",
+  "global_channel_prompt": "...",
   "hermes_ws_port": 18810,
   "hermes_ws_path": "/hermes",
   "hermes_ws_token": "...",
   "hermes_install_dir": "",
   "webui_port": 18820,
   "webui_token": "...",
+  "webui_token_lifetime_hours": 168,
+  "webui_trust_proxy_headers": false,
   "log_level": "INFO",
   "log_message_preview": 100,
   "log_file_enabled": true,
   "log_file_dir": "",
   "log_retention_days": 3,
-  "message_show_group_id": false,
+  "message_show_group_id": true,
   "seq_map_size": 4500,
+  "reaction_emoji_enabled": true,
+  "reaction_emoji_id": "124",
+  "reaction_emoji_id_queued": "123",
+  "send_dedup_enabled": true,
+  "send_dedup_ttl_seconds": 10.0,
+  "event_queue_enabled": true,
+  "event_queue_max_per_chat": 50,
+  "event_queue_idle_timeout": 300.0,
+  "media_delivery_mode": "cache",
   "command_filter_enabled": false,
   "command_filter_unknown": false,
   "command_permissions": {},
-  "command_reject_message": "⛔ 你没有权限使用此指令 /{cmd}"
+  "command_reject_message": "⛔ 你没有权限使用此指令 /{cmd}",
+  "notify_poke_enabled": false,
+  "notify_member_change_enabled": false
 }
 ```
+
+> 注：`webui_token` 在 `GET /api/config` 响应中会被剔除（登录口令不可通过 API 读取），仅可用 `POST /api/login` 验证；此处列出仅为说明字段存在。`webui_token_epoch` 为内部状态，不在 API 中暴露也不接受客户端设置。
 
 完整字段说明见 [Config 字段表](#config-字段)。
 
@@ -222,10 +242,35 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 响应 `200`：
 ```json
 {
-  "adapter_version": "0.1.0",
+  "adapter_version": "1.1.0b",
+  "hermes_dir": "/home/user/.hermes/hermes-agent",
   "plugin_dest": "/home/user/.hermes/plugins/onebot/",
-  "files_copied": 5,
-  "config_updated": true
+  "source": "/path/to/onebot_adapter/hermes_plugin",
+  "copied": ["__init__.py", "adapter.py", "markdown.py", "onebot_tools.py", "plugin.yaml"],
+  "env_vars": {
+    "ONEBOT_ADAPTER_URL": "ws://127.0.0.1:18810/hermes",
+    "ONEBOT_ADAPTER_TOKEN": "..."
+  },
+  "note": "Plugin installed to ... Restart the Hermes gateway for changes to take effect. 已为 OneBot 平台启用默认工具集;请运行 hermes plugins enable onebot-platform 并重启 Hermes 网关后生效。"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `adapter_version` | string | 适配器版本号 |
+| `hermes_dir` | string | 解析后的 Hermes 安装目录 |
+| `plugin_dest` | string | 插件复制目标目录 |
+| `source` | string | 插件源目录（随包发行） |
+| `copied` | string[] | 实际复制的文件名列表 |
+| `env_vars` | object | 写入 Hermes `.env` 的环境变量（`ONEBOT_ADAPTER_URL` / `ONEBOT_ADAPTER_TOKEN`） |
+| `note` | string | 安装结果提示（含工具集初始化结果） |
+
+响应 `200`（安装路径不安全时）：
+```json
+{
+  "adapter_version": "1.1.0b",
+  "hermes_dir": "/etc",
+  "error": "install_dir resolved to /etc, which is outside $HOME"
 }
 ```
 
@@ -238,10 +283,20 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 响应 `200`：
 ```json
 {
+  "adapter_version": "1.1.0b",
+  "hermes_dir": "/home/user/.hermes/hermes-agent",
+  "plugin_dest": "/home/user/.hermes/plugins/onebot/",
   "removed": true,
-  "plugin_dir": "/home/user/.hermes/plugins/onebot/"
+  "env_cleaned": true,
+  "note": "Plugin removed from ... Env vars cleaned. Restart the Hermes gateway."
 }
 ```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `removed` | bool | 插件目录是否已删除 |
+| `env_cleaned` | bool | 是否清理了 `.env` 中的相关变量 |
+| `note` | string | 卸载结果提示 |
 
 ---
 
@@ -312,18 +367,18 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
       "mention_first_only": null,
       "trigger_keywords": [],
       "keyword_first_only": null,
-      "keep_mention": null,
+      "strip_first_mention": null,
       "custom_prompt": "",
       "admins": [],
       "group_user_filter_mode": "blacklist",
       "group_user_list": [],
-      "welcome_enabled": false,
-      "welcome_message": "",
-      "auto_join": false,
       "message_show_group_id": null,
+      "reaction_emoji_enabled": null,
       "command_filter_enabled": null,
       "command_filter_unknown": null,
-      "command_permissions": null
+      "command_permissions": null,
+      "notify_poke_enabled": null,
+      "notify_member_change_enabled": null
     }
   ]
 }
@@ -506,6 +561,157 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
+### 12. Hermes 会话隔离模式
+
+OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊会话隔离方式：`true`=每人独立 session，`false`=全群共享 session（适配器启用群聊排队）。该值由插件连接时上报给适配器，WebUI「连接管理」页可直接修改 Hermes `config.yaml` 的此字段。
+
+**`GET /api/hermes_mode`**
+
+返回当前生效的 `group_sessions_per_user` 值及来源。
+
+响应 `200`（插件已连接，值来自插件上报）：
+```json
+{
+  "group_sessions_per_user": true,
+  "source": "plugin_report",
+  "plugin_connected": true
+}
+```
+
+响应 `200`（插件未连接，回退读 Hermes `config.yaml`）：
+```json
+{
+  "group_sessions_per_user": true,
+  "source": "hermes_config_yaml",
+  "plugin_connected": false
+}
+```
+
+响应 `200`（文件中无该字段，使用 Hermes 默认 `true`）：
+```json
+{
+  "group_sessions_per_user": true,
+  "source": "default",
+  "plugin_connected": false
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `group_sessions_per_user` | bool | 当前生效的会话隔离模式 |
+| `source` | string | 值来源：`plugin_report`（插件上报）/ `hermes_config_yaml`（文件读取）/ `default`（Hermes 默认） |
+| `plugin_connected` | bool | Hermes 插件是否已连接 |
+
+响应 `500` — 读取 Hermes `config.yaml` 失败：
+```json
+{"error": "读取 Hermes config.yaml 失败: <详情>"}
+```
+
+---
+
+**`PUT /api/hermes_mode`**
+
+写入 `group_sessions_per_user` 到 Hermes `config.yaml`（顶层字段）。Body（JSON）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `group_sessions_per_user` | bool | 是 | 会话隔离模式 |
+
+请求：
+```json
+{"group_sessions_per_user": false}
+```
+
+响应 `200`：
+```json
+{
+  "ok": true,
+  "written": false,
+  "restart_required": true,
+  "note": "已写入 Hermes config.yaml,需重启 Hermes 网关生效。重启后请点击'刷新上报值'更新显示。"
+}
+```
+
+响应 `400` — `hermes_install_dir` 未配置或值类型错误：
+```json
+{"error": "group_sessions_per_user 必须是布尔值"}
+```
+
+> 写入后需**重启 Hermes 网关**生效。重启后点击「刷新上报值」让插件重新上报，更新 WebUI 显示。
+
+---
+
+**`POST /api/hermes_mode/refresh`**
+
+要求已连接的 Hermes 插件重新上报 `group_sessions_per_user`（用于 Hermes 重启或配置变更后刷新显示）。
+
+响应 `200`：
+```json
+{"ok": true, "note": "已请求插件重新上报,稍后刷新页面查看"}
+```
+
+响应 `503` — relay 未就绪：
+```json
+{"error": "relay 未就绪"}
+```
+
+响应 `200`（插件未连接，无法刷新）：
+```json
+{
+  "ok": false,
+  "error": "Hermes 插件未连接,无法刷新。请先确保插件已连接。"
+}
+```
+
+---
+
+### 13. 版本更新检查
+
+**`GET /api/update_check`**
+
+查询 GitHub 最新 release tag 并与当前适配器版本比较。结果在服务端缓存 1 小时（错误结果缓存 5 分钟）。
+
+响应 `200`（无更新）：
+```json
+{
+  "current_version": "1.1.0b",
+  "latest_version": "1.1.0b",
+  "has_update": false,
+  "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md"
+}
+```
+
+响应 `200`（有更新）：
+```json
+{
+  "current_version": "1.0.0b3",
+  "latest_version": "1.1.0b",
+  "has_update": true,
+  "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md"
+}
+```
+
+响应 `200`（请求失败，含错误字段）：
+```json
+{
+  "current_version": "1.1.0b",
+  "latest_version": "1.1.0b",
+  "has_update": false,
+  "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md",
+  "error": "GitHub API returned 403"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `current_version` | string | 当前适配器版本 |
+| `latest_version` | string | GitHub 最新 tag（无可用 tag 时等于 `current_version`） |
+| `has_update` | bool | 是否有新版本 |
+| `changelog_url` | string | CHANGELOG 链接 |
+| `error` | string | 仅在请求失败时出现，描述失败原因 |
+
+---
+
 ## 数据类型
 
 ### Config 字段
@@ -522,35 +728,43 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `group_mention_first_only` | bool | `false` | True=仅首 @ 触发 |
 | `group_trigger_keywords` | string[] | `[]` | 群聊关键词触发列表 |
 | `group_keyword_first_only` | bool | `false` | True=关键词须在开头 |
-| `group_keep_mention` | bool | `false` | True=保留 @bot 段 |
+| `group_strip_first_mention` | bool | `true` | True=消息以@bot开头时移除该段(非首@bot保留) |
 | `global_admins` | string[] | `[]` | 全局管理员 QQ 号列表 |
-| `group_auto_join` | bool | `false` | 是否自动加入新群 |
 | `dm_user_filter_mode` | string | `"whitelist"` | 私聊过滤：`whitelist` / `blacklist` |
 | `dm_user_list` | string[] | `[]` | 私聊用户过滤列表 |
 | `groups` | object | `{}` | 群组配置，key 为群号字符串 |
-| `platform_hint` | string | 默认提示词 | 注入 LLM 系统提示的平台说明 |
+| `global_channel_prompt` | string | 默认提示词 | 全局提示词；保存时物化写入 Hermes config.yaml 的 `platforms.onebot.channel_prompts`，需重启 Hermes 网关生效 |
 | `hermes_ws_port` | int | `18810` | Hermes 插件 WS 端口 |
 | `hermes_ws_path` | string | `"/hermes"` | Hermes 插件 WS 路径 |
 | `hermes_ws_token` | string | 自动生成 | Hermes WS 鉴权 token |
-| `hermes_install_dir` | string | `""` | Hermes 安装目录 |
+| `hermes_install_dir` | string | `""` | Hermes 安装目录（插件安装/工具集读写/会话隔离模式写入的目标路径） |
 | `webui_port` | int | `18820` | WebUI 端口 |
-| `webui_token` | string | 自动生成 | WebUI 登录原始 token（仅用于 `/api/login`，不可直接调其他 API） |
+| `webui_token` | string | 自动生成 | WebUI 登录原始 token（仅用于 `/api/login`，不可直接调其他 API；`GET /api/config` 不返回此字段） |
 | `webui_token_lifetime_hours` | int | `168` | 登录有效期（小时），最小 1，默认 7 天；修改后所有已登录会话立即失效 |
-| `webui_token_epoch` | int | `0` | token 纪元（内部状态，勿手动修改） |
-| `log_level` | string | `"INFO"` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR` |
+| `webui_token_epoch` | int | `0` | token 纪元（内部状态，用于会话失效；不在 API 中暴露，不接受客户端设置） |
+| `webui_trust_proxy_headers` | bool | `false` | 信任 `X-Forwarded-For` 获取客户端 IP（仅反向代理时开启；直连开启会被伪造 IP 绕过登录限流） |
+| `log_level` | string | `"INFO"` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` |
 | `log_message_preview` | int | `100` | 消息正文日志截断长度 |
 | `log_file_enabled` | bool | `true` | 是否启用文件日志 |
 | `log_file_dir` | string | `""` | 日志文件目录（空=默认） |
 | `log_retention_days` | int | `3` | 日志保留天数 |
-| `message_show_group_id` | bool | `false` | 消息是否显示群号标识 |
+| `message_show_group_id` | bool | `true` | 消息是否显示群号标识 |
 | `seq_map_size` | int | `4500` | seq map 环形缓冲区大小 |
+| `reaction_emoji_enabled` | bool | `true` | 消息送达 Hermes 后在原消息贴表情回应；群配置可单独覆盖 |
+| `reaction_emoji_id` | string | `"124"` | 贴表情回应使用的表情 ID（QQ 表情编号） |
+| `reaction_emoji_id_queued` | string | `"123"` | 消息排队时贴的表情 ID（空=不贴表情） |
+| `send_dedup_enabled` | bool | `true` | 发送去重开关（防 Gateway send_text 超时重试导致重复发送） |
+| `send_dedup_ttl_seconds` | float | `10.0` | 发送去重 TTL（秒） |
 | `event_queue_enabled` | bool | `true` | 群聊排队总开关：Hermes 不隔离群成员时是否排队 |
 | `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限拒绝入队（详见[群聊消息排队](#群聊消息排队)） |
 | `event_queue_idle_timeout` | float | `300.0` | 群聊排队：plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy 状态 |
+| `media_delivery_mode` | string | `"cache"` | 媒体投递模式：`cache`（默认，插件侧下载落盘到 `~/.hermes/cache/`）/ `passthrough`（URL 作为文本占位符直传） |
 | `command_filter_enabled` | bool | `false` | 指令过滤总开关 |
 | `command_filter_unknown` | bool | `false` | 未知指令是否过滤 |
 | `command_permissions` | object | `{}` | 全局指令权限：`{指令名: "everyone"/"admin"/"disabled"}` |
 | `command_reject_message` | string | `"⛔..."` | 指令拒绝回复模板（`{cmd}` 替换为指令名） |
+| `notify_poke_enabled` | bool | `false` | 戳一戳（bot 被戳）推送开关；开启后合成系统事件转发给 agent |
+| `notify_member_change_enabled` | bool | `false` | 群成员进退群推送开关；开启后合成系统事件转发给 agent |
 
 ### GroupConfig 字段
 
@@ -563,18 +777,18 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 | `mention_first_only` | bool\|null | `null` | 仅首 @ 触发 |
 | `trigger_keywords` | string[]\|null | `null` | 关键词列表（`[]`=强制禁用） |
 | `keyword_first_only` | bool\|null | `null` | 关键词须在开头 |
-| `keep_mention` | bool\|null | `null` | 保留 @ 段 |
-| `custom_prompt` | string | `""` | 群专属提示词（覆盖全局 platform_hint） |
+| `strip_first_mention` | bool\|null | `null` | 移除首 @bot 段 |
+| `custom_prompt` | string | `""` | 群专属提示词（保存时物化写入 Hermes config.yaml；空=用全局提示词） |
 | `admins` | string[] | `[]` | 群管理员 QQ 号 |
 | `group_user_filter_mode` | string | `"blacklist"` | 用户过滤：`whitelist`/`blacklist` |
 | `group_user_list` | string[] | `[]` | 用户过滤列表 |
-| `welcome_enabled` | bool | `false` | 新人欢迎是否启用 |
-| `welcome_message` | string | `""` | 欢迎消息模板 |
-| `auto_join` | bool | `false` | 自动加入 |
 | `message_show_group_id` | bool\|null | `null` | 显示群号标识 |
+| `reaction_emoji_enabled` | bool\|null | `null` | 消息送达贴表情回应（null=跟随全局） |
 | `command_filter_enabled` | bool\|null | `null` | 指令过滤开关 |
 | `command_filter_unknown` | bool\|null | `null` | 未知指令过滤 |
 | `command_permissions` | object\|null | `null` | 群级指令权限覆盖 |
+| `notify_poke_enabled` | bool\|null | `null` | 戳一戳推送开关（null=跟随全局） |
+| `notify_member_change_enabled` | bool\|null | `null` | 群成员进退群推送开关（null=跟随全局） |
 
 > `null` 值表示跟随全局配置。`[]`（空数组）和 `{}`（空对象）表示强制设为空（不等于 null）。
 
