@@ -4,13 +4,14 @@ All frames are JSON text frames — no binary frames. Media (images, videos,
 voice, files) is delivered to the plugin in one of two modes, selected by
 the adapter config's ``media_delivery_mode``:
 
-  * ``passthrough`` (default): media URLs are rendered inline in ``text`` as
+  * ``cache`` (default): media URLs are collected into
+    ``NormalizedEvent.media_items`` so the plugin can download them via
+    ``cache_image_from_url`` etc. and fill ``MessageEvent.media_urls`` with
+    local paths. Text placeholders are rendered without URLs (``[图1]``) so
+    the LLM still sees media positions.
+  * ``passthrough``: media URLs are rendered inline in ``text`` as
     placeholders like ``[图1](https://...)``. The LLM fetches them on demand.
     ``media_items`` is empty.
-  * ``cache``: media URLs are collected into ``NormalizedEvent.media_items``
-    so the plugin can download them via ``cache_image_from_url`` etc. and
-    fill ``MessageEvent.media_urls`` with local paths. Text placeholders are
-    rendered without URLs (``[图1]``) so the LLM still sees media positions.
 
 Outbound media (send_image/send_voice/...) passes file paths or URLs as
 strings in the JSON ``send`` frame — the adapter forwards these to OneBot,
@@ -99,11 +100,13 @@ class NormalizedEvent:
 
     Media delivery is controlled by the adapter's ``media_delivery_mode``:
 
-      * ``passthrough`` (default): ``media_items`` is empty; media URLs are
-        rendered inline in ``text`` as placeholders like ``[图1](https://...)``.
-      * ``cache``: ``media_items`` carries one entry per media segment so the
-        plugin can download them; ``text`` placeholders are rendered without
-        URLs (``[图1]``) so the LLM still sees media positions.
+      * ``cache`` (default): ``media_items`` carries one entry per media
+        segment so the plugin can download them; ``text`` placeholders are
+        rendered without URLs (``[图1]``) so the LLM still sees media
+        positions.
+      * ``passthrough``: ``media_items`` is empty; media URLs are
+        rendered inline in ``text`` as placeholders like
+        ``[图1](https://...)``.
 
     No media is downloaded by the adapter and no binary frames are produced.
     """

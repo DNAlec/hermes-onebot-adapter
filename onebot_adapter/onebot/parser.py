@@ -8,14 +8,14 @@ Reduces raw OneBot 11 event dicts into a :class:`NormalizedEvent`. Handles:
     with level-numbered begin/end tags
   * reply context via ``get_msg`` (text / image / voice / video / file / forward)
   * media delivery — controlled by ``media_delivery_mode``:
-    - ``passthrough`` (default): media URLs are rendered inline in ``text``
-      as placeholders like ``[图1](https://...)`` so the LLM can fetch them
-      on demand via code execution or vision tools. ``media_items`` is empty.
-    - ``cache``: ``media_items`` carries one entry per media segment so the
-      plugin can download them via ``cache_image_from_url`` etc.; text
+    - ``cache`` (default): ``media_items`` carries one entry per media segment
+      so the plugin can download them via ``cache_image_from_url`` etc.; text
       placeholders are rendered without URLs (``[图1]``) so the LLM still sees
       media positions. No media is downloaded by the adapter; no binary WS
       frames are produced.
+    - ``passthrough``: media URLs are rendered inline in ``text``
+      as placeholders like ``[图1](https://...)`` so the LLM can fetch them
+      on demand via code execution or vision tools. ``media_items`` is empty.
 """
 from __future__ import annotations
 
@@ -306,16 +306,16 @@ async def parse_event(
           messages (no text).
 
     Media delivery is controlled by *media_delivery_mode* (defaults to
-    ``"passthrough"``, overridable via *config.media_delivery_mode* when
+    ``"cache"``, overridable via *config.media_delivery_mode* when
     *config* is supplied):
 
-      * ``passthrough``: media URLs are rendered inline in ``text`` as
-        placeholders like ``[图1](https://...)`` so the LLM can fetch them on
-        demand. ``media_items`` is empty.
       * ``cache``: ``media_items`` carries one entry per media segment so
         the plugin can download them; ``text`` placeholders are rendered
         without URLs (``[图1]``). No media is downloaded by the adapter and
         no binary WS frames are produced in either mode.
+      * ``passthrough``: media URLs are rendered inline in ``text`` as
+        placeholders like ``[图1](https://...)`` so the LLM can fetch them on
+        demand. ``media_items`` is empty.
 
     When *config* is provided, the per-group trigger settings
     (*group_require_mention*, *mention_first_only*, *trigger_keywords*,
