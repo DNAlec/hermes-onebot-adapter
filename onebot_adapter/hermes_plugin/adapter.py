@@ -605,7 +605,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # the appropriate ``cache_*_from_url`` / ``cache_*_from_bytes`` helper
         # from ``gateway.platforms.base`` and fill ``media_urls`` / ``media_types``
         # with local paths so vision/STT tools can read them directly.
-        # In ``passthrough`` mode (default) ``media_items`` is empty and media
+        # In ``passthrough`` mode ``media_items`` is empty and media
         # URLs are rendered inline in ``text`` as placeholders — no download.
         media_urls: list[str] = []
         media_types: list[str] = []
