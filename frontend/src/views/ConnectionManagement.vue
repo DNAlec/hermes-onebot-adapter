@@ -222,7 +222,7 @@ function copyAdapterUrl() {
           <label v-if="cfg.onebot_mode === 'reverse'">
             监听端口
             <input type="number" v-model.number="cfg.onebot_reverse_ws_port" min="1" max="65535" />
-            <span class="hint">OneBot 将连接到此端口</span>
+            <span class="hint">OneBot 将连接到此端口（修改后需重启适配器生效）</span>
           </label>
           <label v-if="cfg.onebot_mode === 'reverse'">
             WS 路径
@@ -291,6 +291,7 @@ function copyAdapterUrl() {
             <label>
               WS 端口
               <input type="number" v-model.number="cfg.hermes_ws_port" min="1" max="65535" />
+              <span class="hint">插件连接端口（修改后需重启适配器生效）</span>
             </label>
             <label>
               WS 路径
@@ -322,7 +323,7 @@ function copyAdapterUrl() {
             <code class="url-display">{{ getAdapterUrl() }}</code>
             <button @click="copyAdapterUrl" class="icon-btn" title="复制">📋</button>
           </div>
-          <span class="hint">将此 URL 配置到 Hermes 的 ONEBOT_ADAPTER_URL 环境变量</span>
+          <span class="hint">将此 URL 配置到 Hermes 的 ONEBOT_ADAPTER_URL 环境变量（安装插件时自动写入 ~/.hermes/.env，通常无需手动配置）</span>
         </div>
 
         <div class="subsection last">
@@ -690,20 +691,6 @@ input:focus {
   font-size: 0.9rem;
   color: #856404;
 }
-
-.save-btn {
-  background: var(--primary);
-  color: white;
-  border: none;
-  padding: 0.75rem 2rem;
-  border-radius: 6px;
-  font-size: 1rem;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.save-btn:hover:not(:disabled) { background: var(--primary-dark); }
-.save-btn:disabled { background: #ccc; cursor: not-allowed; }
 
 .message {
   padding: 0.75rem 1rem;

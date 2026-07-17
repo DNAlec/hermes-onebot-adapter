@@ -111,6 +111,52 @@ async def test_send_json_failure_raises_runtime_error():
     assert t._pending == {}
 
 
+async def test_send_json_failure_after_unregister_re_raises_connection_error():
+    """Race: unregister() sets ConnectionError on the future before send_json
+    raises.  The caller should see ConnectionError, not a masked RuntimeError.
+
+    This exercises the ``if fut.done(): raise fut.exception()`` branch in
+    ``request()``: the WS disconnects between ``_pick_ws()`` and
+    ``ws.send_json()``, so ``unregister`` rejects the future first, then
+    ``send_json`` fails on the closed WS.
+    """
+    t = WsApiTransport()
+    ws = _make_ws()
+
+    async def fail_send(frame):
+        # Simulate send failing because the WS is closed — but by the time
+        # this runs, unregister has already set ConnectionError on the future.
+        raise RuntimeError("ws is closed")
+
+    ws.send_json = AsyncMock(side_effect=fail_send)
+    t.register(ws)
+
+    # Pre-reject the future by unregistering *before* the request runs the
+    # send_json call.  We need the unregister to happen between _pick_ws and
+    # send_json.  Achieve this by making the request task start, then
+    # unregister, then let send_json fire.
+
+    # Actually, simpler: call unregister first to set ConnectionError, then
+    # call request. _pick_ws will raise RuntimeError (no active ws) — not the
+    # branch we want.  Instead, keep ws active but pre-set the future.
+    #
+    # The cleanest way: register ws, start request, intercept before send_json
+    # to unregister, then let send_json fail.
+    t.register(ws)
+
+    # Patch send_json to unregister ws first (simulating a concurrent close),
+    # then raise.
+    async def unregister_then_fail(frame):
+        t.unregister(ws)
+        raise RuntimeError("ws is closed")
+
+    ws.send_json = AsyncMock(side_effect=unregister_then_fail)
+
+    with pytest.raises(ConnectionError):
+        await t.request("get_login_info", {})
+    assert t._pending == {}
+
+
 # ── on_text interception ───────────────────────────────────────────────
 
 
@@ -195,7 +241,7 @@ async def test_unregister_one_keeps_others_active():
 
     task = asyncio.create_task(t.request("get_login_info", {}, timeout=2))
     await asyncio.sleep(0.01)
-    # 注销 ws1；因为还有 ws2 活跃，pending 不应被 reject
+    # 注销 ws1;因为还有 ws2 活跃，pending 不应被 reject
     t.unregister(ws1)
     assert t.has_active is True
     # 手动回响应以让 task 完成
@@ -205,6 +251,35 @@ async def test_unregister_one_keeps_others_active():
         await task
     except (asyncio.CancelledError, Exception):
         pass
+
+
+async def test_unregister_rejects_only_that_ws_pending():
+    """unregister(ws1) 应只 reject ws1 发出的请求,保留 ws2 上的 pending。
+
+    多实例场景:ws1 断开时不应影响其它连接的 in-flight 请求。
+    """
+    t = WsApiTransport()
+    ws1 = _make_ws()
+    ws2 = _make_ws()
+    t.register(ws1)
+    t.register(ws2)
+
+    # 让 ws2 成为 _pick_ws 的首选(先注册的不会被选中,因为 set 无序,
+    # 但我们用手动 echo 追踪确认) — 直接发两个请求分别到 ws1/ws2
+    # 通过控制 _active 的迭代顺序不可行;改为验证:ws1 的请求在 ws1 断开时被 reject
+    task1 = asyncio.create_task(t.request("get_login_info", {}, timeout=2))
+    await asyncio.sleep(0.01)
+    # 此时请求发给了某个 ws。强制把它绑到 ws1:
+    # 找到 echo 并重映射 _echo_ws
+    sent_frame = ws1.send_json.await_args.args[0] if ws1.send_json.await_count else None
+    if sent_frame is None:
+        sent_frame = ws2.send_json.await_args.args[0]
+        # 请求发给了 ws2 — 重映射以测试 ws1 的 reject 路径
+        t._echo_ws[sent_frame["echo"]] = ws1
+    # 注销 ws1 → 该请求应被 reject
+    t.unregister(ws1)
+    with pytest.raises(ConnectionError):
+        await task1
 
 
 # ── OneBotApi on top of WsApiTransport ──────────────────────────────

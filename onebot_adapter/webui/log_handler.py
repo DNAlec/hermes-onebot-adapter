@@ -14,15 +14,11 @@ class WebUILogHandler(logging.Handler):
         self._buffer = buffer
         self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 
-    def update_level(self, level: int) -> None:
-        """Hot-reload the handler level."""
-        self.setLevel(level)
-
     def emit(self, record: logging.LogRecord) -> None:
         try:
             self._buffer.append(self.format(record))
         except Exception:
-            pass
+            self.handleError(record)
 
 
 def attach_log_handler(state: dict[str, Any], level: str = "INFO") -> WebUILogHandler:

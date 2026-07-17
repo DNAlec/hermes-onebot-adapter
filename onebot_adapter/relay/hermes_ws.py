@@ -15,7 +15,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 import uuid
 from collections import deque
@@ -25,6 +24,8 @@ from typing import Any
 import aiohttp
 import aiohttp.web
 
+from onebot_adapter._async_utils import bearer_token
+from onebot_adapter._async_utils import log_task_exception as _log_task_exception
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot import api as ob
 from onebot_adapter.onebot.log_format import log_send_line
@@ -42,18 +43,6 @@ from onebot_adapter.relay.protocol import (
 
 logger = logging.getLogger(__name__)
 
-_AT_MARKER_PATTERN = re.compile(r"\{@(\d{5,11})\}")
-
-
-def _log_task_exception(task: asyncio.Task) -> None:
-    """Done-callback: log exceptions on fire-and-forget tasks instead of
-    letting them surface as "Task exception was never retrieved".
-    """
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("relay background task crashed: %r", exc, exc_info=exc)
 
 # Send actions eligible for deduplication.  When the Hermes gateway's
 # ``send_text`` (or any send) times out waiting for the adapter's ``result``
@@ -74,7 +63,7 @@ def _send_fingerprint(action: str, data: dict[str, Any]) -> str:
     elif action == "send_image":
         raw = f"{data.get('image_url', '')}|{data.get('caption', '')}"
     elif action == "send_voice":
-        raw = f"{data.get('audio_path', '')}"
+        raw = f"{data.get('audio_path', '')}|{data.get('caption', '')}"
     elif action == "send_video":
         raw = f"{data.get('video_path', '')}|{data.get('caption', '')}"
     elif action == "send_document":
@@ -84,31 +73,16 @@ def _send_fingerprint(action: str, data: dict[str, Any]) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _parse_at_markers(text: str) -> list[dict]:
-    """Split text on ``{@QQ号}`` markers, producing at + text segments.
-
-    Example: ``"hello {@123} world"`` →
-    ``[text_segment("hello "), at_segment("123"), text_segment(" world")]``
-    """
-    segs: list[dict] = []
-    last_end = 0
-    for match in _AT_MARKER_PATTERN.finditer(text):
-        if match.start() > last_end:
-            segs.append(ob.text_segment(text[last_end:match.start()]))
-        segs.append(ob.at_segment(match.group(1)))
-        last_end = match.end()
-    if last_end < len(text):
-        segs.append(ob.text_segment(text[last_end:]))
-    if not segs:
-        segs.append(ob.text_segment(text))
-    return segs
-
-
 class HermesRelayServer:
     _RING_BUFFER_SIZE = 50
     _RING_BUFFER_MAX_AGE = 30.0  # seconds; skip older events on replay
     _WATCHDOG_INTERVAL = 30.0    # seconds between busy-timeout sweeps
     _STOP_IDLE_DELAY = 3.0      # seconds to wait after /stop before force-clearing busy
+    # Hermes gateway built-in commands that interrupt an in-flight turn by
+    # bumping the session generation, causing the stale run's idle callback
+    # to be popped without firing.  Hardcoded because they are gateway
+    # internals, not plugin commands — the ``commands_snapshot`` registry
+    # only carries plugin/builtin slash commands, not generation-bumping ones.
     _INTERRUPT_COMMANDS = frozenset({"/stop", "/new", "/reset"})
     # Max concurrent OneBot API send calls (send_group_msg / upload_*_file).
     # NapCat serializes API requests on a single WS, so unbounded concurrency
@@ -154,11 +128,12 @@ class HermesRelayServer:
         # ``commands_snapshot`` frame is received.
         self._commands: dict[str, dict[str, Any]] = {}
         self._commands_aliases: dict[str, str] = {}  # alias → canonical name
-        # Tasks spawned to handle a single client's text frames / send
-        # dispatches.  Tracked per-WebSocket so a disconnect can cancel only
-        # that client's in-flight work without aborting other clients.
+        # Tasks spawned to handle client text frames / send dispatches.
+        # Tracked in a single global set so ``stop()`` can cancel every
+        # in-flight task (broadcast, dequeue, seq_map populate, …) regardless
+        # of which client originated it.  Per-client cancellation is handled
+        # via the local ``my_tasks`` set in ``_handler``.
         self._text_tasks: set[asyncio.Task] = set()
-        self._client_tasks: dict[aiohttp.web.WebSocketResponse, set[asyncio.Task]] = {}
         # Send-dedup cache: (chat_id, action, fingerprint, reply_to) ->
         # (monotonic_ts, message_id).  Guards against Gateway send retries
         # (plugin reissues the same payload with a fresh req_id when the
@@ -206,7 +181,18 @@ class HermesRelayServer:
                 )
             self._busy_groups.clear()
             self._queues.clear()
+        # 媒体投递模式变化:广播 fresh ready 让插件实时切换缓存策略。
+        # broadcast_self_id 复用 ready 帧机制,这里用新 config 广播。
         self._config = config
+        if old.media_delivery_mode != config.media_delivery_mode:
+            logger.info(
+                "relay: media_delivery_mode changed %s -> %s, broadcasting fresh ready",
+                old.media_delivery_mode, config.media_delivery_mode,
+            )
+            task = asyncio.create_task(self.broadcast_self_id(config.self_id))
+            self._text_tasks.add(task)
+            task.add_done_callback(self._text_tasks.discard)
+            task.add_done_callback(_log_task_exception)
 
     def _maybe_evict_send_cache(self) -> None:
         """Opportunistic cap on the send-dedup cache.
@@ -324,27 +310,28 @@ class HermesRelayServer:
         return bool(self._clients)
 
     async def stop(self) -> None:
-        for ws in list(self._clients):
-            await ws.close()
-        self._clients.clear()
-        # Cancel and await in-flight _handle_text tasks.  Snapshot the set
-        # before cancelling: a task's done-callback (set.discard) runs while
-        # we await, so gathering the live set would miss the very tasks we
-        # just cancelled and leave their CancelledError unretrieved.
+        # Cancel in-flight tasks first so they stop touching the WebSocket
+        # before we close it — otherwise pending sends would log misleading
+        # "send failed" errors against the closing ws.
         snap = list(self._text_tasks)
         for task in snap:
             task.cancel()
         if snap:
             await asyncio.gather(*snap, return_exceptions=True)
         self._text_tasks.clear()
-        self._client_tasks.clear()
+        # Now close the WebSocket responses (idempotent if already closed).
+        for ws in list(self._clients):
+            await ws.close()
+        self._clients.clear()
         # Stop the queue watchdog and clear all queue state.
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             try:
                 await self._watchdog_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.warning("relay: watchdog task raised on cancel", exc_info=True)
             self._watchdog_task = None
         self._busy_groups.clear()
         self._queues.clear()
@@ -375,13 +362,20 @@ class HermesRelayServer:
                 self._clients.discard(ws)
 
     async def broadcast_self_id(self, self_id: str) -> None:
-        """Push an updated self_id to every connected plugin client by sending
-        a fresh ``ready`` frame.  Called after _probe_self_id succeeds so that
-        plugins that connected before the probe completes see the new self_id."""
+        """Push an updated self_id (and media_delivery_mode) to every connected
+        plugin client by sending a fresh ``ready`` frame.
+
+        Called after _probe_self_id succeeds so that plugins that connected
+        before the probe completes see the new self_id.  Also called when
+        ``media_delivery_mode`` changes via hot-reload — the fresh ready frame
+        carries the new mode so plugins can switch caching strategy without
+        reconnecting.
+        """
         msg = ready_message(
             onebot_connected=self._onebot_connected_fn(),
             adapter_version=self._adapter_version,
             self_id=self_id,
+            media_delivery_mode=self._config.media_delivery_mode,
         )
         for ws in list(self._clients):
             try:
@@ -391,14 +385,13 @@ class HermesRelayServer:
                 self._clients.discard(ws)
 
     async def _handler(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
-        token = request.query.get("token") or _bearer(request.headers.get("Authorization", ""))
+        token = request.query.get("token") or bearer_token(request.headers.get("Authorization", ""))
         if not self._config.hermes_ws_token or token != self._config.hermes_ws_token:
             return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         ws = aiohttp.web.WebSocketResponse()
         await ws.prepare(request)
         self._clients.add(ws)
         my_tasks: set[asyncio.Task] = set()
-        self._client_tasks[ws] = my_tasks
         if self._on_connect:
             self._on_connect()
         logger.info("Hermes plugin WS connected from %s", request.remote)
@@ -407,6 +400,7 @@ class HermesRelayServer:
                 onebot_connected=self._onebot_connected_fn(),
                 adapter_version=self._adapter_version,
                 self_id=self._config.self_id,
+                media_delivery_mode=self._config.media_delivery_mode,
             )
         )
         # Replay buffered events so a reconnecting plugin doesn't miss messages.
@@ -427,7 +421,6 @@ class HermesRelayServer:
                     break
         finally:
             self._clients.discard(ws)
-            self._client_tasks.pop(ws, None)
             if self._on_disconnect:
                 self._on_disconnect()
             # Cancel this client's in-flight tasks: they hold references to
@@ -504,12 +497,11 @@ class HermesRelayServer:
         if (event.text or "").startswith("/"):
             cmd = (event.text or "").strip().split(maxsplit=1)[0]
             result = await self._broadcast_with_status(event)
-            if (
-                result == "broadcast"
-                and gid is not None
-                and cmd in self._INTERRUPT_COMMANDS
-            ):
-                asyncio.create_task(self._delayed_stop_cleanup(gid))
+            if result == "broadcast" and cmd in self._INTERRUPT_COMMANDS:
+                task = asyncio.create_task(self._delayed_stop_cleanup(gid))
+                self._text_tasks.add(task)
+                task.add_done_callback(self._text_tasks.discard)
+                task.add_done_callback(_log_task_exception)
             return result
         # Hermes 隔离群成员 或 适配器总开关关 → 不排队
         if self._hermes_group_sessions_per_user or not self._config.event_queue_enabled:
@@ -521,7 +513,12 @@ class HermesRelayServer:
                 # Idle — claim the group and broadcast immediately.
                 self._busy_groups[gid] = (event.user_id, time.monotonic())
                 self._ensure_watchdog()
-                return await self._broadcast_with_status(event)
+                result = await self._broadcast_with_status(event)
+                if result == "dropped":
+                    # No client received the event — roll back the busy claim so
+                    # the next message (or reconnect replay) can try again.
+                    self._busy_groups.pop(gid, None)
+                return result
             # Group busy — enqueue (all users, including the busy user).
             busy_user_id, _ = busy
             q = self._queues.setdefault(gid, deque())
@@ -583,21 +580,6 @@ class HermesRelayServer:
         gid = cid[len("group:"):]
         return gid or None
 
-    @staticmethod
-    def _gid_key(num_id: Any) -> str:
-        """Canonical busy-slot key for a numeric group id.
-
-        ``parse_chat_id`` returns ``num_id`` as ``int``, which strips leading
-        zeros (``"042"`` → ``42``).  Busy slots are keyed by the raw string
-        from ``chat_id`` (see ``_group_id_of``); to look them up from a
-        ``num_id`` we must reconstruct the same string.  ``str(num_id)`` is
-        correct for QQ groups because QQ group ids are stored without
-        leading zeros in OneBot events — but we use this helper to keep the
-        convention in one place and avoid the ``str(num_id)`` vs raw-string
-        drift bug recurring.
-        """
-        return str(num_id)
-
     def _ensure_watchdog(self) -> None:
         """Start the busy-timeout watchdog if it isn't already running."""
         if self._watchdog_task is None or self._watchdog_task.done():
@@ -642,14 +624,16 @@ class HermesRelayServer:
         caller doesn't have to await it.
 
         If no plugin client is currently connected, the busy slot is cleared
-        but the queue is left intact so a future reconnect replay can pick up
-        the message — broadcasting into zero clients would silently drop it.
-        The watchdog will retry on its next sweep once a plugin reconnects.
+        but the queue is left intact.  The watchdog will retry on its next
+        sweep (every ``_WATCHDOG_INTERVAL`` seconds) once a plugin reconnects.
+        Note: ``_replay_ring_buffer`` clears queue/busy state on reconnect, so
+        queued events from a prior session are discarded there — the ring
+        buffer replays the recent events from scratch.
         """
         self._busy_groups.pop(gid, None)
         if not self._clients:
-            # No plugin connected — leave the queue in place; the ring buffer
-            # replay on the next reconnect (or the next idle) will dispatch.
+            # No plugin connected — leave the queue in place; the watchdog
+            # will retry on its next sweep once a plugin reconnects.
             return
         q = self._queues.get(gid)
         if not q:
@@ -675,18 +659,18 @@ class HermesRelayServer:
             self._queues.pop(gid, None)
         self._busy_groups[gid] = (nxt.user_id, time.monotonic())
         self._ensure_watchdog()
-        # Schedule the broadcast + on_dispatch as tracked tasks so stop() can
-        # cancel them and exceptions surface via the done-callback instead of
-        # being silently swallowed ("Task exception was never retrieved").
-        task = asyncio.create_task(self._broadcast_event(nxt))
+        # Schedule the broadcast + on_dispatch as a single tracked task so
+        # stop() can cancel it and _on_dispatch only fires when the event
+        # was actually delivered (at least one client received it).
+        async def _dispatch_nxt() -> None:
+            delivered = await self._broadcast_event(nxt)
+            if delivered and self._on_dispatch is not None:
+                await self._on_dispatch(nxt)
+
+        task = asyncio.create_task(_dispatch_nxt())
         self._text_tasks.add(task)
         task.add_done_callback(self._text_tasks.discard)
         task.add_done_callback(_log_task_exception)
-        if self._on_dispatch is not None:
-            task = asyncio.create_task(self._on_dispatch(nxt))
-            self._text_tasks.add(task)
-            task.add_done_callback(self._text_tasks.discard)
-            task.add_done_callback(_log_task_exception)
         logger.info(
             "relay dequeue: gid=%s remaining=%d new_busy_user=%s merged=%d text_preview=%r",
             gid, len(self._queues.get(gid, ())), nxt.user_id, merged_count,
@@ -750,23 +734,31 @@ class HermesRelayServer:
             logger.info("relay idle: gid=%s — dispatching next queued", gid)
             self._dequeue_and_dispatch(gid)
 
-    async def _broadcast_event(self, event: NormalizedEvent) -> None:
+    async def _broadcast_event(self, event: NormalizedEvent) -> bool:
+        """Broadcast *event* to all connected plugin clients.
+
+        Returns ``True`` if at least one client received the event,
+        ``False`` if there were zero clients or all sends failed.
+        """
         n_clients = len(self._clients)
         if n_clients == 0:
             logger.warning(
                 "relay broadcast: 0 plugin clients connected — event dropped (chat_id=%s text_preview=%r)",
                 event.chat_id, (event.text or "")[:120],
             )
-            return
+            return False
         logger.debug("relay broadcast: sending to %d client(s)", n_clients)
         frame = event_message(event)
         logger.debug("relay broadcast event frame: %s", json.dumps(frame, ensure_ascii=False)[:2000])
+        delivered = False
         for ws in list(self._clients):
             try:
                 await ws.send_json(frame)
+                delivered = True
             except Exception:
                 logger.exception("push_event failed; dropping client")
                 self._clients.discard(ws)
+        return delivered
 
     async def _replay_ring_buffer(self, ws: aiohttp.web.WebSocketResponse) -> bool:
         """Send buffered events to a newly-connected plugin.
@@ -908,12 +900,17 @@ class HermesRelayServer:
                     except (ValueError, TypeError):
                         pass
                 content = data.get("content", "")
-                segs.extend(_parse_at_markers(content))
+                segs.append(ob.text_segment(content))
 
             elif action == "send_image":
                 file_ref = str(data.get("image_url", ""))
                 if not file_ref:
                     raise ValueError("no image_url provided")
+                if data.get("reply_to"):
+                    try:
+                        segs.append(ob.reply_segment(int(data["reply_to"])))
+                    except (ValueError, TypeError):
+                        pass
                 segs.append(ob.image_segment(file_ref))
                 if data.get("caption"):
                     segs.append(ob.text_segment(data["caption"]))
@@ -922,12 +919,24 @@ class HermesRelayServer:
                 file_ref = str(data.get("audio_path", ""))
                 if not file_ref:
                     raise ValueError("no audio_path provided")
+                if data.get("reply_to"):
+                    try:
+                        segs.append(ob.reply_segment(int(data["reply_to"])))
+                    except (ValueError, TypeError):
+                        pass
                 segs.append(ob.record_segment(file_ref))
+                if data.get("caption"):
+                    segs.append(ob.text_segment(data["caption"]))
 
             elif action == "send_video":
                 file_ref = str(data.get("video_path", ""))
                 if not file_ref:
                     raise ValueError("no video_path provided")
+                if data.get("reply_to"):
+                    try:
+                        segs.append(ob.reply_segment(int(data["reply_to"])))
+                    except (ValueError, TypeError):
+                        pass
                 segs.append(ob.video_segment(file_ref))
                 if data.get("caption"):
                     segs.append(ob.text_segment(data["caption"]))
@@ -957,14 +966,34 @@ class HermesRelayServer:
                 else:
                     async with self._send_api_semaphore:
                         await self._api.upload_private_file(num_id, file_ref, filename)
+                # Send caption as a follow-up text message (with reply if provided).
+                caption = data.get("caption")
+                reply_to_doc = data.get("reply_to")
+                if caption or reply_to_doc:
+                    caption_segs: list[dict] = []
+                    if reply_to_doc:
+                        try:
+                            caption_segs.append(ob.reply_segment(int(reply_to_doc)))
+                        except (ValueError, TypeError):
+                            pass
+                    if caption:
+                        caption_segs.append(ob.text_segment(caption))
+                    if caption_segs:
+                        if is_group:
+                            async with self._send_api_semaphore:
+                                await self._api.send_group_msg(num_id, caption_segs)
+                        else:
+                            async with self._send_api_semaphore:
+                                await self._api.send_private_msg(num_id, caption_segs)
                 # 写入去重缓存(send_document 无 message_id,缓存空串;命中时回 None)。
                 if dedup_key is not None:
                     self._send_cache[dedup_key] = (time.monotonic(), "")
                     self._maybe_evict_send_cache()
-                if is_group and self._gid_key(num_id) in self._busy_groups:
-                    gk = self._gid_key(num_id)
-                    busy_user, _ = self._busy_groups[gk]
-                    self._busy_groups[gk] = (busy_user, time.monotonic())
+                if is_group:
+                    raw_gid = chat_id[len("group:"):] if chat_id.startswith("group:") else ""
+                    if raw_gid and raw_gid in self._busy_groups:
+                        busy_user, _ = self._busy_groups[raw_gid]
+                        self._busy_groups[raw_gid] = (busy_user, time.monotonic())
                 await ws.send_json(result_message(req_id, True))
                 return
 
@@ -1009,13 +1038,13 @@ class HermesRelayServer:
             # 顺便刷新该群 busy 槽的时间戳,防止看门狗误判超时。busy 槽用原始群号
             # 字符串作 key(保留前导零),与 _group_id_of / _handle_idle 保持一致。
             if is_group:
-                gk = self._gid_key(num_id)
-                if gk in self._busy_groups:
-                    busy_user, _ = self._busy_groups[gk]
-                    self._busy_groups[gk] = (busy_user, time.monotonic())
+                raw_gid = chat_id[len("group:"):] if chat_id.startswith("group:") else ""
+                if raw_gid and raw_gid in self._busy_groups:
+                    busy_user, _ = self._busy_groups[raw_gid]
+                    self._busy_groups[raw_gid] = (busy_user, time.monotonic())
             if self._seq_map is not None and is_group and msg_id:
                 task = asyncio.create_task(
-                    self._populate_seq_map(self._gid_key(num_id), msg_id),
+                    self._populate_seq_map(str(num_id), msg_id),
                     name=f"seq_map_populate:{num_id}:{msg_id}",
                 )
                 self._text_tasks.add(task)
@@ -1078,7 +1107,8 @@ class HermesRelayServer:
         """
         if self._seq_map is None:
             return params
-        seq_actions = {"get_msg", "delete_msg", "set_msg_emoji_like", "mark_msg_as_read"}
+        seq_actions = {"get_msg", "delete_msg", "set_msg_emoji_like", "mark_msg_as_read",
+                   "forward_group_single_msg", "forward_friend_single_msg"}
         if action not in seq_actions:
             return params
         real_seq = params.pop("real_seq", None)
@@ -1119,7 +1149,7 @@ class HermesRelayServer:
                     segs.append(ob.reply_segment(int(reply_to)))
                 except (ValueError, TypeError):
                     pass
-            segs.extend(_parse_at_markers(message))
+            segs.append(ob.text_segment(message))
             if is_group:
                 async with self._send_api_semaphore:
                     resp = await self._api.send_group_msg(num_id, segs)
@@ -1134,9 +1164,3 @@ class HermesRelayServer:
         except Exception:
             logger.exception("relay send_reject_message failed chat_id=%s", chat_id)
             return False
-
-
-def _bearer(header: str) -> str:
-    if header.lower().startswith("bearer "):
-        return header[7:].strip()
-    return ""

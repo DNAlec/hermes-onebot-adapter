@@ -110,6 +110,30 @@ def test_resolve_seq_params_set_msg_emoji_like():
     assert out["group_id"] == "42"
 
 
+def test_resolve_seq_params_forward_group_single_msg():
+    """forward_group_single_msg: real_seq→message_id, group_id 保留。"""
+    sm = SeqMap(maxlen=10)
+    sm.add("42", 300, "7000")
+    relay = _make_relay(sm)
+    params = {"real_seq": 300, "group_id": "42"}
+    out = relay._resolve_seq_params("forward_group_single_msg", params)
+    assert out["message_id"] == 7000
+    assert "real_seq" not in out
+    assert out["group_id"] == "42"
+
+
+def test_resolve_seq_params_forward_friend_single_msg():
+    """forward_friend_single_msg: DM 场景用 user_id 作 scope, user_id 保留。"""
+    sm = SeqMap(maxlen=10)
+    sm.add("10001000", 400, "8000")
+    relay = _make_relay(sm)
+    params = {"real_seq": 400, "user_id": "10001000"}
+    out = relay._resolve_seq_params("forward_friend_single_msg", params)
+    assert out["message_id"] == 8000
+    assert "real_seq" not in out
+    assert out["user_id"] == "10001000"
+
+
 def test_resolve_seq_params_no_seq_map():
     """无 SeqMap:不转换,params 不变。"""
     relay = _make_relay(None)

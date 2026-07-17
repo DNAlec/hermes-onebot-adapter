@@ -238,7 +238,7 @@ def test_extract_command_name_after_at_bot_strip():
         {"type": "text", "data": {"text": "/help"}},
     ]
     from onebot_adapter.onebot import segments as seg
-    stripped = seg.strip_bot_mention(segs, "999")
+    stripped = seg.strip_first_bot_mention(segs, "999")
     assert parser._extract_command_name(stripped) == "help"
 
 
@@ -542,7 +542,7 @@ async def test_parser_command_filter_works_without_mention_requirement():
 # ── Relay protocol: FilteredEvent serialization ─────────────────────────
 
 
-def test_filtered_event_to_dict():
+def test_filtered_event_fields():
     fe = FilteredEvent(
         chat_id="group:42",
         chat_type="group",
@@ -553,16 +553,14 @@ def test_filtered_event_to_dict():
         message_id="99",
         timestamp=1700000000.0,
     )
-    d = fe.to_dict()
-    assert d["chat_id"] == "group:42"
-    assert d["command_name"] == "kick"
-    assert d["reject_message"] == "⛔ no permission"
-    assert d["chat_type"] == "group"
+    assert fe.chat_id == "group:42"
+    assert fe.command_name == "kick"
+    assert fe.reject_message == "⛔ no permission"
+    assert fe.chat_type == "group"
+    assert fe.message_id == "99"
 
 
-def test_filtered_event_message_construction():
-    from onebot_adapter.relay.protocol import filtered_message
-
+def test_filtered_event_defaults():
     fe = FilteredEvent(
         chat_id="group:42",
         chat_type="group",
@@ -571,9 +569,9 @@ def test_filtered_event_message_construction():
         command_name="kick",
         reject_message="⛔ no",
     )
-    msg = filtered_message(fe)
-    assert msg["type"] == "filtered"
-    assert msg["command_name"] == "kick"
+    assert fe.message_id == ""
+    assert fe.reply_to_message_id is None
+    assert fe.timestamp == 0.0
 
 
 # ── Relay: commands_snapshot storage & lookup ───────────────────────────

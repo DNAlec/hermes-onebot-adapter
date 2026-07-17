@@ -5,7 +5,6 @@ import base64
 import hashlib
 import hmac
 import logging
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -22,18 +21,17 @@ logger = logging.getLogger(__name__)
 # Search paths for built SPA assets, checked in order:
 # 1. source-tree static dir (e.g. pip install -e . or editable installs)
 # 2. frontend/dist after manual npm build
-# 3. pip-installed site-packages static dir
+# We deliberately do NOT scan ``sys.path`` for static dirs — that would allow
+# a malicious ``onebot_adapter/webui/static/index.html`` in the current working
+# directory (or an attacker-controlled PYTHONPATH entry) to shadow the real
+# SPA. Only the package's own location and the explicit frontend/dist
+# fallback are trusted.
 _PKG_ROOT = Path(__file__).parent.parent
 _WEBUI_STATIC = Path(__file__).parent / "static"
 _STATIC_CANDIDATES = [
     _WEBUI_STATIC,
     _PKG_ROOT.parent / "frontend" / "dist",
 ]
-# Add site-packages path from the installed package if different from source
-for p in sys.path:
-    candidate = Path(p) / "onebot_adapter" / "webui" / "static"
-    if candidate != _WEBUI_STATIC and candidate not in _STATIC_CANDIDATES:
-        _STATIC_CANDIDATES.append(candidate)
 
 
 def _find_static() -> Path | None:
@@ -59,7 +57,7 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_put("/api/config", _put_config(store, state))
     app.router.add_get("/api/hermes_dir_status", _hermes_dir_status(store))
     app.router.add_post("/api/install_plugin", _install_plugin(store, state))
-    app.router.add_post("/api/uninstall_plugin", _uninstall_plugin(state))
+    app.router.add_post("/api/uninstall_plugin", _uninstall_plugin(store, state))
     app.router.add_post("/api/send", _send(store, state))
     app.router.add_get("/api/logs", _logs(state))
     # Group management
@@ -97,16 +95,30 @@ def _login(store: ConfigStore, state: dict[str, Any]):
     within ``_LOGIN_BAN_SECONDS``, the IP is banned for the remainder of the
     window and receives ``429 Too Many Requests``. State lives in
     ``state["login_failures"]`` (in-memory; cleared on restart).
+
+    The client IP is taken from ``X-Forwarded-For`` (first hop) **only** when
+    ``cfg.webui_trust_proxy_headers`` is True — i.e. the adapter is explicitly
+    deployed behind a trusted reverse proxy. Without the flag (default), the
+    direct ``request.remote`` is used; this prevents a non-proxied client from
+    spoofing ``X-Forwarded-For`` to bypass the rate limit.
     """
     failures: dict[str, tuple[int, float]] = state.setdefault("login_failures", {})
 
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        ip = request.remote or "unknown"
+        # Use X-Forwarded-For only when the user has explicitly opted in via
+        # config; otherwise the direct peer IP is used to prevent spoofing.
+        ip: str
+        if store.config.webui_trust_proxy_headers:
+            xff = request.headers.get("X-Forwarded-For", "")
+            ip = xff.split(",")[0].strip() if xff.strip() else (request.remote or "unknown")
+        else:
+            ip = request.remote or "unknown"
         now = time.time()
         # Garbage-collect expired entries to keep the dict bounded.
+        # Clear any entry whose ban window has passed, regardless of fail count.
         for k in list(failures):
             fails, first_ts = failures[k]
-            if fails < _LOGIN_MAX_FAILS and now - first_ts > _LOGIN_BAN_SECONDS:
+            if now - first_ts > _LOGIN_BAN_SECONDS:
                 del failures[k]
         # Check ban
         entry = failures.get(ip)
@@ -128,7 +140,7 @@ def _login(store: ConfigStore, state: dict[str, Any]):
                 {"error": "webui_token not configured — restart the adapter service to regenerate it"},
                 status=401,
             )
-        if token != cfg.webui_token:
+        if not hmac.compare_digest(token, cfg.webui_token):
             fails, first_ts = failures.get(ip, (0, now))
             failures[ip] = (fails + 1, first_ts)
             return aiohttp.web.json_response({"error": "invalid token"}, status=401)
@@ -168,7 +180,11 @@ def _verify_session_token(token: str, secret: str, epoch: int, lifetime_hours: i
         issued_at = int(issued_str)
     except Exception:
         return False
-    if time.time() - issued_at > lifetime_hours * 3600:
+    now = time.time()
+    if now - issued_at > lifetime_hours * 3600:
+        return False
+    # Reject tokens issued too far in the future (clock skew / forgery guard).
+    if issued_at - now > 60:
         return False
     msg = f"{epoch}:{issued_at}".encode()
     expected = hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
@@ -248,9 +264,14 @@ def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
     readable over the API — verify it through ``POST /api/login`` instead.
     Other tokens (onebot_ws_token, hermes_ws_token) are operational values
     the user needs to see/copy in the WebUI and are returned as-is.
+
+    ``webui_token_epoch`` is internal state used for session invalidation
+    and must not be exposed or client-settable; it is stripped here and in
+    ``_put_config`` so a PUT body cannot override the internally-bumped value.
     """
     d = cfg.to_dict()
     d.pop("webui_token", None)
+    d.pop("webui_token_epoch", None)
     return d
 
 
@@ -270,6 +291,9 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
         try:
             # Bump the token epoch when the lifetime changes so that every
             # already-issued HMAC session token becomes invalid immediately.
+            # Strip client-supplied epoch first so a PUT body can't override
+            # the internal counter (see _public_config for rationale).
+            data.pop("webui_token_epoch", None)
             if "webui_token_lifetime_hours" in data and \
                     data["webui_token_lifetime_hours"] != store.config.webui_token_lifetime_hours:
                 data["webui_token_epoch"] = store.config.webui_token_epoch + 1
@@ -277,8 +301,21 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             errors = new_cfg.validate()
             if errors:
                 return aiohttp.web.json_response({"error": "; ".join(errors)}, status=400)
+            # Persist to disk first so that a save failure doesn't leave
+            # in-memory state diverged from on-disk state (listeners would
+            # have already applied the new config but the file would be stale).
+            try:
+                save_config(new_cfg)
+            except Exception as exc:
+                return aiohttp.web.json_response({"error": f"failed to save config: {exc}"}, status=500)
             store.update(new_cfg)
-            save_config(new_cfg)
+            # Materialize channel_prompts into Hermes config.yaml so the plugin
+            # picks up the new global_channel_prompt on next connect/restart.
+            try:
+                from onebot_adapter.hermes_config import materialize_channel_prompts
+                materialize_channel_prompts(new_cfg, new_cfg.hermes_install_dir or None)
+            except Exception:
+                logger.exception("materialize_channel_prompts after config save failed")
         except Exception as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
         return aiohttp.web.json_response(_public_config(new_cfg))
@@ -286,44 +323,17 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
-def _is_safe_install_path(target: Path) -> bool:
-    """Return True if *target* is safe to use as an install target.
-
-    Only allow writes under the user's home directory, /home, or /tmp.
-    Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
-    writes via the WebUI (which is auth-gated but behind a proxy the
-    same IP may be shared by multiple users).
-    """
-    allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
-    resolved = target.resolve(strict=False)
-    for root in allowed_roots:
-        try:
-            resolved.relative_to(root.resolve(strict=False))
-            return True
-        except ValueError:
-            pass
-    return False
-
-
 def _install_plugin(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
             data = await request.json()
         except Exception:
-            data = {}
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
         install_dir = data.get("hermes_install_dir")
         cfg = store.config
         from onebot_adapter.installer import _resolve_hermes_dir
 
-        # Validate the install dir is under the user's home directory or an
-        # explicitly allowed path, to prevent accidental writes to system
-        # paths (e.g. /, /etc) when the WebUI is exposed behind a proxy.
         target = _resolve_hermes_dir(install_dir)
-        if not _is_safe_install_path(target):
-            return aiohttp.web.json_response(
-                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
-                status=400,
-            )
         adapter_url = f"ws://127.0.0.1:{cfg.hermes_ws_port}{cfg.hermes_ws_path}"
         adapter_token = cfg.hermes_ws_token
         from onebot_adapter import installer
@@ -334,6 +344,11 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
                 adapter_url=adapter_url,
                 adapter_token=adapter_token,
             )
+            # Persist the install dir so subsequent toolset reads / uninstalls
+            # use the same path without the user re-entering it in the config page.
+            if install_dir and str(target) != cfg.hermes_install_dir:
+                store.patch(hermes_install_dir=str(target))
+                save_config(store.config)
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin install failed")
@@ -342,25 +357,25 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
-def _uninstall_plugin(state: dict[str, Any]):
+def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
             data = await request.json()
         except Exception:
-            data = {}
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
         install_dir = data.get("hermes_install_dir")
         from onebot_adapter.installer import _resolve_hermes_dir
 
         target = _resolve_hermes_dir(install_dir)
-        if not _is_safe_install_path(target):
-            return aiohttp.web.json_response(
-                {"error": f"install_dir resolved to {target}, which is outside $HOME"},
-                status=400,
-            )
         from onebot_adapter import installer
 
         try:
             result = installer.uninstall(str(target))
+            # Persist the resolved install dir so the config reflects where
+            # the plugin was managed, matching _install_plugin's behavior.
+            if install_dir and str(target) != store.config.hermes_install_dir:
+                store.patch(hermes_install_dir=str(target))
+                save_config(store.config)
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin uninstall failed")
@@ -452,6 +467,26 @@ def _get_groups(store: ConfigStore):
     return handler
 
 
+def _coerce_group_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce WebUI-supplied group fields to their expected types.
+
+    The existing ``GroupConfig.from_dict`` drops unknown keys but doesn't
+    type-check known ones. A WebUI bug or malicious payload could push
+    ``admins: "123"`` (string) instead of ``["123"]`` (list), which would
+    crash ``is_admin()`` at lookup time. This function coerces list fields
+    to lists of strings and ``command_permissions`` to a str→str dict.
+    """
+    for list_field in ("admins", "trigger_keywords", "group_user_list"):
+        val = data.get(list_field)
+        if val is not None and not isinstance(val, list):
+            data[list_field] = [str(val)]
+    # Coerce command_permissions values to strings
+    cp = data.get("command_permissions")
+    if cp is not None and isinstance(cp, dict):
+        data["command_permissions"] = {str(k): str(v) for k, v in cp.items()}
+    return data
+
+
 def _put_group(store: ConfigStore):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         group_id = request.match_info.get("group_id", "")
@@ -461,11 +496,22 @@ def _put_group(store: ConfigStore):
             data = await request.json()
         except Exception:
             return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        data = _coerce_group_fields(data)
         gc = GroupConfig.from_dict({**data, "group_id": str(group_id)})
         cfg = store.config
         new_groups = {**cfg.groups, str(group_id): gc.to_dict()}
-        store.patch(groups=new_groups)
+        try:
+            store.patch(groups=new_groups)
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         save_config(store.config)
+        # Materialize channel_prompts into Hermes config.yaml so the plugin
+        # picks up the new per-group custom_prompt on next connect/restart.
+        try:
+            from onebot_adapter.hermes_config import materialize_channel_prompts
+            materialize_channel_prompts(store.config, store.config.hermes_install_dir or None)
+        except Exception:
+            logger.exception("materialize_channel_prompts after group save failed")
         return aiohttp.web.json_response(gc.to_dict())
 
     return handler
@@ -532,7 +578,11 @@ def _get_hermes_tools(store: ConfigStore):
         available = list_available_toolsets(cfg.hermes_install_dir or None)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
-        current = read_current_enabled(cfg.hermes_install_dir or None)
+        try:
+            current = read_current_enabled(cfg.hermes_install_dir or None)
+        except Exception as exc:
+            logger.warning("read_current_enabled failed: %s", exc)
+            current = []
         return aiohttp.web.json_response({
             "configurable": available.get("configurable", []),
             "mcp_servers": available.get("mcp_servers", []),
@@ -569,6 +619,12 @@ def _put_hermes_tools(store: ConfigStore):
         toolsets = data.get("toolsets", []) or []
         mcp_servers = data.get("mcp_servers", []) or []
         no_mcp = bool(data.get("no_mcp", False))
+
+        # no_mcp 与 mcp_servers 互斥:no_mcp 表示屏蔽全部 MCP,不应同时启用具体 MCP servers
+        if no_mcp and mcp_servers:
+            return aiohttp.web.json_response(
+                {"error": "no_mcp 与 mcp_servers 互斥,不能同时设置"}, status=400,
+            )
 
         # 校验:每个 key 必须在 configurable ∪ plugin_keys ∪ mcp_names 中
         available = list_available_toolsets(cfg.hermes_install_dir or None)
@@ -731,10 +787,12 @@ async def _index(_: aiohttp.web.Request) -> aiohttp.web.Response:
 async def _spa_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
     tail = request.match_info.get("tail", "")
     clean = tail.lstrip("/")
-    if ".." in clean:
-        raise aiohttp.web.HTTPNotFound()
-    file_path = _STATIC_DIR / clean
-    if file_path.exists() and file_path.is_file() and file_path.is_relative_to(_STATIC_DIR):
+    # Resolve real path before checking containment — ``Path.is_relative_to``
+    # only compares string prefixes and does NOT resolve ``..`` segments, so
+    # ``static/../secret.txt`` would pass a raw ``is_relative_to(static)`` check.
+    static_resolved = _STATIC_DIR.resolve()
+    file_path = (static_resolved / clean).resolve()
+    if file_path.is_file() and file_path.is_relative_to(static_resolved):
         return aiohttp.web.FileResponse(file_path)
     return await _index(request)
 

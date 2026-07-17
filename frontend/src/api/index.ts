@@ -80,19 +80,18 @@ export interface GroupConfig {
   mention_first_only: boolean | null;
   trigger_keywords: string[] | null;
   keyword_first_only: boolean | null;
-  keep_mention: boolean | null;
+  strip_first_mention: boolean | null;
   custom_prompt: string;
   admins: string[];
   group_user_filter_mode: string;
   group_user_list: string[];
-  welcome_enabled: boolean;
-  welcome_message: string;
-  auto_join: boolean;
   message_show_group_id: boolean | null;
   reaction_emoji_enabled: boolean | null;
   command_filter_enabled: boolean | null;
   command_filter_unknown: boolean | null;
   command_permissions: Record<string, string> | null;
+  notify_poke_enabled: boolean | null;
+  notify_member_change_enabled: boolean | null;
 }
 
 export interface Config {
@@ -106,15 +105,14 @@ export interface Config {
   group_mention_first_only: boolean;
   group_trigger_keywords: string[];
   group_keyword_first_only: boolean;
-  group_keep_mention: boolean;
+  group_strip_first_mention: boolean;
   global_admins: string[];
-  group_auto_join: boolean;
 
   // ── 私聊设置 ──
   dm_user_filter_mode: string;
   dm_user_list: string[];
   groups: Record<string, GroupConfig>;
-  platform_hint: string;
+  global_channel_prompt: string;
   hermes_ws_port: number;
   hermes_ws_path: string;
   hermes_ws_token: string;
@@ -122,7 +120,6 @@ export interface Config {
   webui_port: number;
   webui_token?: string;
   webui_token_lifetime_hours: number;
-  webui_token_epoch: number;
   log_level: string;
   log_message_preview: number;
   log_file_enabled: boolean;
@@ -140,11 +137,16 @@ export interface Config {
   event_queue_enabled: boolean;
   event_queue_max_per_chat: number;
   event_queue_idle_timeout: number;
+  // ── 媒体投递 ──
+  media_delivery_mode: string;
   // ── /指令过滤 ──
   command_filter_enabled: boolean;
   command_filter_unknown: boolean;
   command_permissions: Record<string, string>;
   command_reject_message: string;
+  // ── notice 事件推送 ──
+  notify_poke_enabled: boolean;
+  notify_member_change_enabled: boolean;
 }
 
 export const getStatus = () => api.get<Status>("/status").then((r) => r.data);

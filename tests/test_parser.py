@@ -578,8 +578,8 @@ async def test_no_trigger_requirements_passes_all():
     assert result is not None
 
 
-async def test_keep_mention_preserves_at_segment():
-    """keep_mention=True: @bot segment stays in text as @QQ号(昵称)."""
+async def test_strip_first_mention_disabled_preserves_leading_at():
+    """strip_first_mention=False: leading @bot segment stays in text as @QQ号(昵称)."""
     resolver = MagicMock()
     resolver.resolve = AsyncMock(return_value="BotNick")
     resolver.resolve_group_name = AsyncMock(return_value="")
@@ -592,12 +592,61 @@ async def test_keep_mention_preserves_at_segment():
         _msg_event("@99999 hi", message_type="group", group_id=42, segments=segs, user_id=100),
         self_id="99999",
         group_require_mention=True,
-        keep_mention=True,
+        strip_first_mention=False,
         name_resolver=resolver,
     )
     assert result is not None
     event = result
     assert "@99999(BotNick)" in event.text
+
+
+async def test_strip_first_mention_removes_only_leading():
+    """strip_first_mention=True (default): only the leading @bot is removed;
+    a second, non-leading @bot mention is preserved as @QQ号(昵称)."""
+    resolver = MagicMock()
+    resolver.resolve = AsyncMock(return_value="BotNick")
+    resolver.resolve_group_name = AsyncMock(return_value="")
+
+    segs = [
+        {"type": "at", "data": {"qq": "99999"}},
+        {"type": "text", "data": {"text": "hi "}},
+        {"type": "at", "data": {"qq": "99999"}},
+    ]
+    result = await parser.parse_event(
+        _msg_event("@99999 hi @99999", message_type="group", group_id=42, segments=segs, user_id=100),
+        self_id="99999",
+        group_require_mention=True,
+        name_resolver=resolver,
+    )
+    assert result is not None
+    event = result
+    # Leading @bot stripped (not present as @99999(BotNick) at start of user text),
+    # but trailing @bot preserved.
+    assert event.text.endswith("@99999(BotNick)")
+    assert "@99999(BotNick): " not in event.text  # leading one was stripped, not rendered
+
+
+async def test_strip_first_mention_works_without_require_mention():
+    """strip_first_mention applies even when group_require_mention=False:
+    a leading @bot is stripped regardless of trigger mode."""
+    resolver = MagicMock()
+    resolver.resolve = AsyncMock(return_value="BotNick")
+    resolver.resolve_group_name = AsyncMock(return_value="")
+
+    segs = [
+        {"type": "at", "data": {"qq": "99999"}},
+        {"type": "text", "data": {"text": "hello"}},
+    ]
+    result = await parser.parse_event(
+        _msg_event("@99999 hello", message_type="group", group_id=42, segments=segs, user_id=100),
+        self_id="99999",
+        group_require_mention=False,
+        strip_first_mention=True,
+        name_resolver=resolver,
+    )
+    assert result is not None
+    event = result
+    assert "@99999" not in event.text  # leading @bot stripped, none remaining
 
 
 async def test_per_group_mention_first_only_override():
@@ -902,3 +951,353 @@ async def test_slash_command_no_prefix_with_real_seq():
     assert result is not None
     event = result
     assert event.text == "/reset"
+
+
+# ── notice 事件 ──────────────────────────────────────────────────────────
+
+
+def _notice_event(
+    notice_type: str,
+    *,
+    sub_type: str = "",
+    user_id: int = 100,
+    target_id: int = 999,
+    group_id: int | None = None,
+    time: int = 1700000000,
+) -> dict[str, Any]:
+    ev: dict[str, Any] = {
+        "post_type": "notice",
+        "notice_type": notice_type,
+        "user_id": user_id,
+        "time": time,
+    }
+    if sub_type:
+        ev["sub_type"] = sub_type
+    if notice_type == "notify":
+        ev["target_id"] = target_id
+    if group_id is not None:
+        ev["group_id"] = group_id
+    return ev
+
+
+async def test_notice_poke_bot_in_group():
+    """群内戳 bot 推送合成事件。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    event = result
+    assert event.is_system_notice is True
+    assert event.chat_id == "group:42"
+    assert event.chat_type == "group"
+    assert event.user_id == "100"
+    assert "戳了戳你" in event.text
+    assert "100" in event.text
+
+
+async def test_notice_poke_bot_in_dm():
+    """私聊戳 bot 推送合成事件。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+        dm_user_filter_mode="blacklist",
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    event = result
+    assert event.is_system_notice is True
+    assert event.chat_id == "100"
+    assert event.chat_type == "dm"
+    assert "戳了戳你" in event.text
+
+
+async def test_notice_poke_other_target_ignored():
+    """戳别人(非 bot)不推送。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=200, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_poke_disabled():
+    """配置关闭时不推送戳一戳。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=False,
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_poke_no_config():
+    """无 config 时不推送 notice(测试环境)。"""
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+    )
+    assert result is None
+
+
+async def test_notice_poke_blacklisted_user():
+    """群黑名单用户戳 bot 不推送。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+        groups={"42": {"group_id": "42", "group_user_filter_mode": "blacklist", "group_user_list": ["100"]}},
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_poke_dm_blacklisted():
+    """私聊黑名单用户戳 bot 不推送。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+        dm_user_filter_mode="blacklist",
+        dm_user_list=["100"],
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_poke_per_group_override():
+    """群配置覆盖全局:全局关,群开。"""
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=False,
+        groups={"42": GroupConfig(group_id="42", notify_poke_enabled=True).to_dict()},
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    assert result.is_system_notice is True
+
+
+async def test_notice_member_join():
+    """其他成员进群推送合成事件。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("group_increase", sub_type="approve", user_id=100, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    event = result
+    assert event.is_system_notice is True
+    assert event.chat_id == "group:42"
+    assert "加入了群聊" in event.text
+
+
+async def test_notice_member_leave():
+    """其他成员退群(leave)推送合成事件。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("group_decrease", sub_type="leave", user_id=100, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    event = result
+    assert event.is_system_notice is True
+    assert "退出了群聊" in event.text
+
+
+async def test_notice_member_kick():
+    """其他成员被踢(kick)推送合成事件,措辞区分。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("group_decrease", sub_type="kick", user_id=100, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    event = result
+    assert "被管理员移出了群聊" in event.text
+
+
+async def test_notice_member_join_bot_self_ignored():
+    """bot 自己进群不推送。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("group_increase", sub_type="invite", user_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_member_change_disabled():
+    """配置关闭时不推送成员变动。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=False,
+    )
+    result = await parser.parse_event(
+        _notice_event("group_increase", sub_type="approve", user_id=100, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_member_change_per_group_override():
+    """群配置覆盖全局:全局关,群开。"""
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_member_change_enabled=False,
+        groups={"42": GroupConfig(group_id="42", notify_member_change_enabled=True).to_dict()},
+    )
+    result = await parser.parse_event(
+        _notice_event("group_increase", sub_type="approve", user_id=100, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    assert result.is_system_notice is True
+
+
+async def test_notice_unhandled_type_ignored():
+    """未处理的 notice 类型(group_upload)返回 None。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+        notify_member_change_enabled=True,
+    )
+    result = await parser.parse_event(
+        {"post_type": "notice", "notice_type": "group_upload", "group_id": 42},
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_request_event_ignored():
+    """request 类型事件(post_type=request)返回 None。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+    )
+    result = await parser.parse_event(
+        {"post_type": "request", "request_type": "friend", "user_id": 100},
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_poke_with_name_resolver():
+    """戳一戳通过 name_resolver 解析用户名。"""
+    from onebot_adapter.config import AdapterConfig
+    from onebot_adapter.onebot.name_resolver import NameResolver
+
+    mock_api = MagicMock()
+    mock_api.get_group_member_info = AsyncMock(return_value={"card": "Alice", "nickname": "Alice"})
+    mock_api.get_group_info = AsyncMock(return_value={"group_name": "测试群"})
+    resolver = NameResolver(mock_api)
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+        name_resolver=resolver,
+    )
+    assert result is not None
+    event = result
+    assert "Alice" in event.text
+    assert "100" in event.text
+    assert event.chat_name == "42(测试群)"

@@ -294,7 +294,9 @@ async def test_changing_lifetime_invalidates_old_sessions(tmp_path, monkeypatch)
     # Change lifetime → epoch should bump → old token invalid
     resp = await client.put("/api/config", json={"webui_token_lifetime_hours": 48}, headers=auth)
     assert resp.status == 200
-    assert (await resp.json())["webui_token_epoch"] == 1
+    # webui_token_epoch is internal state, not exposed in the API response;
+    # verify it bumped by reading the store directly.
+    assert store.config.webui_token_epoch == _EPOCH + 1
 
     # Old session token no longer works
     assert (await client.get("/api/status", headers=auth)).status == 401
@@ -385,3 +387,57 @@ async def test_login_rate_limit_different_ips_independent(signed_client):
     assert (await signed_client.post("/api/login", json={"token": _TOKEN})).status == 429
     # But an existing valid signed token still works on other endpoints.
     assert (await signed_client.get("/api/status", headers=_auth())).status == 200
+
+
+async def test_xff_ignored_by_default(signed_client):
+    """When webui_trust_proxy_headers=False (default), X-Forwarded-For is
+    ignored — a spoofed XFF header cannot bypass the rate limit by appearing
+    as a new IP each time."""
+    for _ in range(5):
+        resp = await signed_client.post(
+            "/api/login",
+            json={"token": "wrong"},
+            headers={"X-Forwarded-For": "10.0.0.1"},
+        )
+        assert resp.status == 401
+    # 6th attempt with a *different* spoofed XFF → still banned (same real IP)
+    resp = await signed_client.post(
+        "/api/login",
+        json={"token": "wrong"},
+        headers={"X-Forwarded-For": "10.0.0.2"},
+    )
+    assert resp.status == 429
+
+
+async def test_xff_trusted_when_configured(tmp_path, monkeypatch):
+    """When webui_trust_proxy_headers=True, X-Forwarded-For is used for rate
+    limiting, so different XFF values count as different IPs."""
+    monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(tmp_path / "cfg.json"))
+    store = ConfigStore(AdapterConfig(
+        self_id="123", onebot_ws_token="t1", hermes_ws_token="t2", webui_token=_TOKEN,
+        webui_token_lifetime_hours=24, webui_token_epoch=_EPOCH,
+        webui_trust_proxy_headers=True,
+    ))
+    service = AdapterService(store)
+    app = service.build_webui_app()
+    server = TestServer(app)
+    await server.start_server()
+    client = TestClient(server)
+    try:
+        # 5 failures with one XFF IP → banned for that XFF
+        for _ in range(5):
+            assert (await client.post(
+                "/api/login", json={"token": "wrong"},
+                headers={"X-Forwarded-For": "10.0.0.1"},
+            )).status == 401
+        assert (await client.post(
+            "/api/login", json={"token": "wrong"},
+            headers={"X-Forwarded-For": "10.0.0.1"},
+        )).status == 429
+        # A different XFF IP is not banned
+        assert (await client.post(
+            "/api/login", json={"token": _TOKEN},
+            headers={"X-Forwarded-For": "10.0.0.2"},
+        )).status == 200
+    finally:
+        await server.close()

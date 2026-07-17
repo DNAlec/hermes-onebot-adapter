@@ -179,17 +179,17 @@ def test_resolve_keyword_first_only_group_override():
     assert cfg.resolve_keyword_first_only("42") is True
 
 
-def test_resolve_keep_mention_global():
-    cfg = AdapterConfig(group_keep_mention=True)
-    assert cfg.resolve_keep_mention("999") is True
+def test_resolve_strip_first_mention_global():
+    cfg = AdapterConfig(group_strip_first_mention=True)
+    assert cfg.resolve_strip_first_mention("999") is True
 
 
-def test_resolve_keep_mention_group_override():
+def test_resolve_strip_first_mention_group_override():
     cfg = AdapterConfig(
-        group_keep_mention=False,
-        groups={"42": GroupConfig(group_id="42", keep_mention=True).to_dict()},
+        group_strip_first_mention=False,
+        groups={"42": GroupConfig(group_id="42", strip_first_mention=True).to_dict()},
     )
-    assert cfg.resolve_keep_mention("42") is True
+    assert cfg.resolve_strip_first_mention("42") is True
 
 
 def test_resolve_reaction_emoji_default_enabled():
@@ -230,17 +230,6 @@ def test_resolve_reaction_emoji_group_none_follows_global():
     assert cfg.resolve_reaction_emoji_enabled("42") is True
 
 
-
-
-
-def test_resolve_custom_prompt_global_none():
-    cfg = AdapterConfig()
-    assert cfg.resolve_custom_prompt("999") is None
-
-
-def test_resolve_custom_prompt_group():
-    cfg = AdapterConfig(groups={"42": GroupConfig(group_id="42", custom_prompt="custom").to_dict()})
-    assert cfg.resolve_custom_prompt("42") == "custom"
 
 
 # ── Parser with config ──────────────────────────────────────────────────
@@ -305,7 +294,10 @@ async def test_parser_group_chat_id():
     assert event.chat_id == "group:42"
 
 
-async def test_parser_group_custom_prompt():
+async def test_parser_group_custom_prompt_not_in_event():
+    """custom_prompt is no longer read by the parser (it's materialized into
+    Hermes config.yaml by the WebUI and read via resolve_channel_prompt in
+    the plugin).  Verify the field is absent from NormalizedEvent."""
     cfg = AdapterConfig(group_require_mention=False,
         groups={"42": GroupConfig(group_id="42", custom_prompt="你是测试群助手").to_dict()})
     result = await parse_event(
@@ -315,7 +307,7 @@ async def test_parser_group_custom_prompt():
     )
     assert result is not None
     event = result
-    assert event.channel_prompt == "你是测试群助手"
+    assert not hasattr(event, "channel_prompt")
 
 
 async def test_parser_group_admin():
@@ -409,4 +401,3 @@ async def test_parser_no_config_fallback():
     event = result
     assert event.chat_id == "100"
     assert event.is_admin is False
-    assert event.channel_prompt is None

@@ -299,8 +299,90 @@ async def test_forward_client_filters_non_message_events():
         await asyncio.sleep(0.5)
 
         await client.stop()
-        # Only the message event should be in events
+        # Only the message event should be in events (group_upload notice ignored — config defaults off)
         assert len(events) == 1
         assert events[0].text == "real message"
+    finally:
+        await server.close()
+
+
+async def test_forward_client_notice_poke_delivered():
+    """戳一戳 notice 在配置开启时应该合成事件并投递。"""
+    server, _, active_wss = await _start_mock_onebot_ws()
+    try:
+        cfg = AdapterConfig(
+            onebot_mode="forward",
+            onebot_forward_ws_url=f"ws://127.0.0.1:{server.port}/onebot/v11/ws",
+            onebot_ws_token="testtoken",
+            hermes_ws_token="t",
+
+            self_id="999",
+            dm_user_filter_mode="blacklist",
+            notify_poke_enabled=True,
+        )
+        events: list = []
+        client = OneBotForwardClient(
+            cfg, api=None, on_event=lambda e: events.append(e),
+        )
+        client.start()
+        await asyncio.sleep(0.5)
+        assert len(active_wss) >= 1
+
+        # Push a poke notice (bot 被戳) then a real message
+        await active_wss[0].send_json({
+            "post_type": "notice",
+            "notice_type": "notify",
+            "sub_type": "poke",
+            "user_id": 100,
+            "target_id": 999,
+            "time": 1700000000,
+        })
+        await active_wss[0].send_json(_msg_event("real message"))
+        await asyncio.sleep(0.5)
+
+        await client.stop()
+        # Both the synthesized notice event and the real message should be delivered
+        assert len(events) == 2
+        assert events[0].is_system_notice is True
+        assert "戳了戳你" in events[0].text
+        assert events[1].text == "real message"
+    finally:
+        await server.close()
+
+
+async def test_forward_client_notice_disabled_not_delivered():
+    """notice 配置关闭时,戳一戳不投递。"""
+    server, _, active_wss = await _start_mock_onebot_ws()
+    try:
+        cfg = AdapterConfig(
+            onebot_mode="forward",
+            onebot_forward_ws_url=f"ws://127.0.0.1:{server.port}/onebot/v11/ws",
+            onebot_ws_token="testtoken",
+            hermes_ws_token="t",
+
+            self_id="999",
+            dm_user_filter_mode="blacklist",
+            notify_poke_enabled=False,
+        )
+        events: list = []
+        client = OneBotForwardClient(
+            cfg, api=None, on_event=lambda e: events.append(e),
+        )
+        client.start()
+        await asyncio.sleep(0.5)
+        assert len(active_wss) >= 1
+
+        await active_wss[0].send_json({
+            "post_type": "notice",
+            "notice_type": "notify",
+            "sub_type": "poke",
+            "user_id": 100,
+            "target_id": 999,
+            "time": 1700000000,
+        })
+        await asyncio.sleep(0.5)
+
+        await client.stop()
+        assert len(events) == 0
     finally:
         await server.close()

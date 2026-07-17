@@ -5,8 +5,6 @@ No I/O, no downloads — just shape extraction so the parser stays readable.
 """
 from __future__ import annotations
 
-from typing import Any
-
 
 def extract_text(segments: list[dict]) -> str:
     """Concatenate text from text/at/file segments into a plain string."""
@@ -87,53 +85,6 @@ def extract_text_with_placeholders(
     return "".join(parts).strip(), markers
 
 
-def extract_image_urls(segments: list[dict]) -> list[str]:
-    urls: list[str] = []
-    for s in segments:
-        if s.get("type") == "image":
-            data = s.get("data", {}) or {}
-            url = data.get("url") or data.get("file", "")
-            if url:
-                urls.append(url)
-    return urls
-
-
-def extract_record_url(segments: list[dict]) -> str | None:
-    for s in segments:
-        if s.get("type") == "record":
-            data = s.get("data", {}) or {}
-            return data.get("url") or data.get("file")
-    return None
-
-
-def extract_video_urls(segments: list[dict]) -> list[str]:
-    urls: list[str] = []
-    for s in segments:
-        if s.get("type") == "video":
-            data = s.get("data", {}) or {}
-            url = data.get("url") or data.get("file", "")
-            if url:
-                urls.append(url)
-    return urls
-
-
-def extract_files(segments: list[dict]) -> list[dict[str, Any]]:
-    """Extract file segments. Returns list of {name, file_id, url, size}."""
-    result: list[dict[str, Any]] = []
-    for s in segments:
-        if s.get("type") == "file":
-            data = s.get("data", {}) or {}
-            result.append(
-                {
-                    "name": data.get("file") or data.get("name", "未知文件"),
-                    "file_id": data.get("file_id", ""),
-                    "url": data.get("url", ""),
-                    "size": data.get("file_size", 0),
-                }
-            )
-    return result
-
-
 def extract_reply_id(segments: list[dict]) -> int | None:
     for s in segments:
         if s.get("type") == "reply":
@@ -195,11 +146,25 @@ def has_bot_mention_first(segments: list[dict], self_id: str) -> bool:
     return s.get("type") == "at" and str(s.get("data", {}).get("qq")) == self_id
 
 
-def strip_bot_mention(segments: list[dict], self_id: str) -> list[dict]:
-    return [
-        s for s in segments
-        if not (s.get("type") == "at" and str(s.get("data", {}).get("qq")) == self_id)
-    ]
+def strip_first_bot_mention(segments: list[dict], self_id: str) -> list[dict]:
+    """Remove only a *leading* @bot mention, preserving non-leading ones.
+
+    Leading ``reply`` segments are skipped first (OneBot puts the ``reply``
+    segment ahead of the ``at`` segment in quoted messages, mirroring
+    :func:`has_bot_mention_first`). After the skipped replies, if the next
+    segment is an @bot mention (``type == "at"`` with ``data.qq == self_id``),
+    it is dropped; otherwise the list is returned unchanged. Non-leading
+    @bot mentions are always preserved to keep the message complete.
+    """
+    i = 0
+    n = len(segments)
+    while i < n and segments[i].get("type") == "reply":
+        i += 1
+    if i < n:
+        s = segments[i]
+        if s.get("type") == "at" and str(s.get("data", {}).get("qq")) == self_id:
+            return segments[:i] + segments[i + 1:]
+    return segments
 
 
 def sender_display(sender: dict) -> str:

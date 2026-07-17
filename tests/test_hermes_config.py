@@ -79,6 +79,88 @@ def test_read_config_empty_dir_returns_empty(empty_hermes_dir: Path):
     assert len(data) == 0
 
 
+def test_read_config_raises_on_parse_failure(tmp_path: Path):
+    """解析失败应抛 HermesConfigParseError,而非静默返回空 dict。"""
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text("bad: yaml: :::", encoding="utf-8")
+    with pytest.raises(hc.HermesConfigParseError):
+        hc.read_config(str(d))
+
+
+def test_write_does_not_overwrite_broken_yaml(tmp_path: Path):
+    """写入操作不应在 parse 失败时覆盖原始(可恢复的)YAML。"""
+    d = tmp_path / "hermes"
+    d.mkdir()
+    original = "bad: yaml: :::\n# a comment to preserve\n"
+    (d / "config.yaml").write_text(original, encoding="utf-8")
+    with pytest.raises(hc.HermesConfigParseError):
+        hc.write_platform_toolsets(str(d), ["web"])
+    # 原文件应保持不变
+    assert (d / "config.yaml").read_text(encoding="utf-8") == original
+
+
+def test_read_modify_write_preserves_all_existing_keys(tmp_path: Path):
+    """write_platform_toolsets 保留所有已有顶层 key(包括非 platform_toolsets 的)。
+
+    验证 read-modify-write 模式:只修改目标 key,不触碰其他。
+    """
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text(
+        "provider: openai\n"
+        "mcp_servers:\n"
+        "  github:\n"
+        "    enabled: true\n"
+        "group_sessions_per_user: true\n",
+        encoding="utf-8",
+    )
+    hc.write_platform_toolsets(str(d), ["web", "onebot"])
+    data = hc.read_config(str(d))
+    # All pre-existing keys preserved
+    assert data["provider"] == "openai"
+    assert "mcp_servers" in data
+    assert data["mcp_servers"]["github"]["enabled"] is True
+    assert data["group_sessions_per_user"] is True
+    # Our write applied
+    assert "web" in data["platform_toolsets"]["onebot"]
+
+
+def test_read_modify_write_preserves_concurrent_changes(tmp_path: Path):
+    """write_platform_toolsets 应保留在 read 和 write 之间由另一个进程添加的 key。
+
+    整个 read-modify-write 在 _locked 内完成,所以不会丢失并发写入。
+    这里通过模拟:先写一个基础配置,然后手动在 read_modify_write 的 modify
+    回调里注入一个"外部"key,验证它不被覆盖。
+    """
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text("provider: openai\n", encoding="utf-8")
+
+    # Simulate: an external writer adds a key between our read and write.
+    # We do this by intercepting the modify callback to inject the external
+    # change (simulating a concurrent write that happened during our locked window).
+    import onebot_adapter.hermes_config as mod
+
+    original_read = mod.read_config
+
+    def patched_read(install_dir):
+        data = original_read(install_dir)
+        # Simulate a concurrent writer adding a key
+        data["concurrent_key"] = "preserved"
+        return data
+
+    mod.read_config = patched_read
+    try:
+        hc.write_platform_toolsets(str(d), ["web"])
+        data = hc.read_config(str(d))
+        assert data["provider"] == "openai"
+        assert "concurrent_key" in data
+        assert "web" in data["platform_toolsets"]["onebot"]
+    finally:
+        mod.read_config = original_read
+
+
 # ── write_platform_toolsets ──────────────────────────────────────────────
 
 
@@ -396,6 +478,44 @@ def test_list_available_toolsets_subprocess_path(monkeypatch, tmp_path: Path):
     assert "ctx7" in mcp_names
 
 
+def test_list_available_toolsets_clarify_description_augmented(monkeypatch, tmp_path: Path):
+    """clarify 工具集的 description 应被替换为含「建议关闭」的平台说明。"""
+    hermes_dir = tmp_path / "hermes"
+    agent_dir = hermes_dir / "hermes-agent"
+    venv_bin = agent_dir / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (hermes_dir / "config.yaml").write_text("mcp_servers: {}\n", encoding="utf-8")
+
+    # stub subprocess.run 返回含 clarify 的 JSON(host 原始 description 就是 "clarify")
+    class _FakeProc:
+        returncode = 0
+        stdout = (
+            '{"configurable": ['
+            '{"key": "web", "label": "Web", "description": "web_search", '
+            '"tools": ["web_search"], "is_plugin": false},'
+            '{"key": "clarify", "label": "❓ Clarifying Questions", '
+            '"description": "clarify", "tools": ["clarify"], "is_plugin": false}'
+            ']}'
+        )
+        stderr = ""
+
+    monkeypatch.setattr(hc.subprocess, "run", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(hc, "_agent_syspath", lambda d: [])
+
+    result = hc.list_available_toolsets(str(hermes_dir))
+    assert "error" not in result
+    configurable = result["configurable"]
+    clarify = next(t for t in configurable if t["key"] == "clarify")
+    web = next(t for t in configurable if t["key"] == "web")
+    # clarify description 被替换为平台说明(含「建议关闭」语义)
+    assert "建议" in clarify["description"]
+    assert "关闭" in clarify["description"]
+    assert clarify["description"] != "clarify"
+    # 其他工具集 description 不受影响
+    assert web["description"] == "web_search"
+
+
 def test_list_available_toolsets_subprocess_fails_to_syspath(monkeypatch, tmp_path: Path):
     """子进程失败时 fallback 到 sys.path 方案。"""
     hermes_dir = tmp_path / "hermes"
@@ -502,3 +622,83 @@ def test_install_default_toolsets_contains_core_and_plugin(tmp_path: Path):
     assert hc.PLUGIN_TOOLSET_KEY in current
     # default-off 工具不包含
     assert "moa" not in current
+
+
+# ── channel_prompts 读写 ──────────────────────────────────────────────────
+
+
+def test_read_channel_prompts_missing(hermes_dir: Path):
+    assert hc.read_channel_prompts(str(hermes_dir)) == {}
+
+
+def test_read_channel_prompts_present(tmp_path: Path):
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "config.yaml").write_text(
+        "platforms:\n"
+        "  onebot:\n"
+        "    channel_prompts:\n"
+        "      '42': '群42提示词'\n"
+        "      '43': '群43提示词'\n",
+        encoding="utf-8",
+    )
+    prompts = hc.read_channel_prompts(str(d))
+    assert prompts == {"42": "群42提示词", "43": "群43提示词"}
+
+
+def test_write_channel_prompts_creates_section(hermes_dir: Path):
+    hc.write_channel_prompts(str(hermes_dir), {"42": "A", "43": "B"})
+    prompts = hc.read_channel_prompts(str(hermes_dir))
+    assert prompts == {"42": "A", "43": "B"}
+
+
+def test_write_channel_prompts_preserves_other_keys(hermes_dir: Path):
+    hc.write_channel_prompts(str(hermes_dir), {"42": "X"})
+    data = hc.read_config(str(hermes_dir))
+    assert "platform_toolsets" in data
+    assert "provider" in data
+    assert data["platforms"]["onebot"]["channel_prompts"]["42"] == "X"
+
+
+def test_materialize_channel_prompts_skips_when_no_config(empty_hermes_dir: Path):
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    cfg = AdapterConfig(global_channel_prompt="默认", groups={"42": GroupConfig(group_id="42").to_dict()})
+    hc.materialize_channel_prompts(cfg, str(empty_hermes_dir))
+    assert not (empty_hermes_dir / "config.yaml").exists()
+
+
+def test_materialize_channel_prompts_writes_global_and_custom(hermes_dir: Path):
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    cfg = AdapterConfig(
+        global_channel_prompt="全局默认提示词",
+        groups={
+            "42": GroupConfig(group_id="42", custom_prompt="群42专属").to_dict(),
+            "43": GroupConfig(group_id="43", custom_prompt="").to_dict(),
+        },
+    )
+    hc.materialize_channel_prompts(cfg, str(hermes_dir))
+    prompts = hc.read_channel_prompts(str(hermes_dir))
+    assert prompts == {"42": "群42专属", "43": "全局默认提示词"}
+
+
+def test_materialize_channel_prompts_preserves_other_platforms(hermes_dir: Path):
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    # 先写入其他平台配置
+    yaml = YAML(typ="rt")
+    data = hc.read_config(str(hermes_dir))
+    from ruamel.yaml.comments import CommentedMap
+    platforms = data.get("platforms") or CommentedMap()
+    platforms["discord"] = CommentedMap({"token": "abc"})
+    data["platforms"] = platforms
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    (hermes_dir / "config.yaml").write_text(buf.getvalue(), encoding="utf-8")
+
+    cfg = AdapterConfig(global_channel_prompt="默认", groups={"42": GroupConfig(group_id="42").to_dict()})
+    hc.materialize_channel_prompts(cfg, str(hermes_dir))
+    data2 = hc.read_config(str(hermes_dir))
+    assert data2["platforms"]["discord"]["token"] == "abc"
+    assert data2["platforms"]["onebot"]["channel_prompts"]["42"] == "默认"

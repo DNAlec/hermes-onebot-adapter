@@ -15,7 +15,6 @@ OneBot ──WS──  适配器服务  ──WS── Hermes 插件 ── Herm
 
 - Python >= 3.11
 - [pipx](https://pipx.pypa.io/)（推荐）或 pip
-- ffmpeg（语音转码，可选）
 
 ## 快速开始
 
@@ -143,7 +142,7 @@ ws://127.0.0.1:3001
 
 ## OneBot API 工具
 
-插件自带 28 个 OneBot API 工具（toolset: `onebot`），LLM 可直接调用：
+插件自带 38 个 OneBot API 工具（toolset: `onebot`），LLM 可直接调用：
 
 - **只读**：获取群列表/成员/信息、好友列表、消息历史、合并转发内容
 - **消息**：发送消息、撤回、合并转发、戳一戳、表情回应
@@ -244,7 +243,6 @@ cd frontend && npm install && npm run dev   # 前端开发 (Vite 代理到 :1882
 
 - **后端**：aiohttp（WS 服务端/客户端、HTTP API、静态托管）
 - **前端**：Vue 3 + Vite + TypeScript + Vue Router
-- **语音转码**：ffmpeg（异步 subprocess）
 - **打包**：pyproject.toml + setuptools，`hermes-onebot-adapter` CLI entry point
 
 ## License
