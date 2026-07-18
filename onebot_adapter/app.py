@@ -20,7 +20,7 @@ import aiohttp
 import aiohttp.web
 
 from onebot_adapter import __version__
-from onebot_adapter.config import AdapterConfig, ConfigStore, ensure_tokens, load_config, save_config
+from onebot_adapter.config import AdapterConfig, ConfigStore, config_path, ensure_tokens, load_config, save_config
 from onebot_adapter.onebot.api import OneBotApi
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
@@ -541,6 +541,8 @@ class AdapterService:
 
 
 def run(host: str = "127.0.0.1", port: int | None = None, no_webui: bool = False) -> None:
+    cfg_path = config_path()
+    logger.info("loading config from %s (exists=%s)", cfg_path, cfg_path.exists())
     old_cfg = load_config()
     webui_token_was_empty = not old_cfg.webui_token
     cfg = ensure_tokens(old_cfg)
