@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import threading
+import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -481,12 +483,21 @@ def config_path() -> Path:
 def load_config(path: Path | None = None) -> AdapterConfig:
     target = path or config_path()
     if not target.exists():
+        logger.warning("config file not found at %s, using defaults", target)
         return AdapterConfig()
     try:
+        stat = target.stat()
         data = json.loads(target.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("config load failed (%s), using defaults: %s", target, exc)
+        logger.warning(
+            "config load failed (%s, mtime=%s, size=%s), using defaults: %s",
+            target,
+            getattr(stat, "st_mtime", "?"),
+            getattr(stat, "st_size", "?"),
+            exc,
+        )
         return AdapterConfig()
+    logger.info("config loaded from %s (mtime=%s, size=%d)", target, stat.st_mtime, stat.st_size)
     return AdapterConfig.from_dict(data)
 
 
@@ -531,13 +542,41 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+_MAX_BACKUPS = 5
+
+
+def _rotate_backups(target: Path, max_backups: int = _MAX_BACKUPS) -> None:
+    """轮转 ``{target.name}.bak.{timestamp}`` 备份,保留最近 *max_backups* 个。
+
+    备份按文件名中的时间戳排序(单调递增),超出上限的最旧备份被删除。
+    """
+    parent = target.parent
+    pattern = f"{target.name}.bak.*"
+    backups = sorted(parent.glob(pattern))
+    for old in backups[:-max_backups] if max_backups > 0 else backups:
+        try:
+            old.unlink()
+        except OSError as exc:
+            logger.warning("could not remove old backup %s: %s", old, exc)
+
+
 def save_config(cfg: AdapterConfig, path: Path | None = None) -> None:
     target = path or config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+    # 备份现有文件(若存在),避免静默覆盖丢失用户配置
+    if target.exists():
+        backup_path = target.with_name(f"{target.name}.bak.{int(time.time())}")
+        try:
+            shutil.copy2(target, backup_path)
+            logger.info("config backed up to %s", backup_path)
+            _rotate_backups(target)
+        except OSError as exc:
+            logger.warning("config backup failed (will still save): %s", exc)
     tmp = target.with_suffix(target.suffix + ".tmp")
     data = _inject_comments(cfg.to_dict())
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, target)
+    logger.info("config saved to %s (size=%d)", target, target.stat().st_size)
 
 
 def ensure_tokens(cfg: AdapterConfig, path: Path | None = None) -> AdapterConfig:
@@ -555,6 +594,11 @@ def ensure_tokens(cfg: AdapterConfig, path: Path | None = None) -> AdapterConfig
     if not cfg.webui_token:
         changes["webui_token"] = secrets.token_urlsafe(24)
     if changes:
+        logger.warning(
+            "tokens empty (%s), generating new ones; this overwrites %s",
+            list(changes.keys()),
+            path or config_path(),
+        )
         cfg = cfg.with_overrides(**changes)
         save_config(cfg, path)
     return cfg

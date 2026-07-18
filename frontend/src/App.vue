@@ -54,7 +54,7 @@ onUnmounted(() => {
           :href="updateInfo.changelog_url"
           target="_blank"
           rel="noopener"
-          title="有新版本 v{{ updateInfo.latest_version }}，点击查看更新日志"
+          :title="`有新版本 v${updateInfo.latest_version}，点击查看更新日志`"
         >
           v{{ updateInfo.latest_version }} →
         </a>
