@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -276,6 +277,22 @@ def _check_command_filter(
     )
 
 
+def _render_bot_blacklist_reject(config: AdapterConfig, entry: Any, user_id: str) -> str:
+    """Render the shared dynamic-blacklist rejection template."""
+    now = time.time()
+    values = {
+        "user_id": user_id,
+        "scope": entry.scope,
+        "remaining": entry.to_dict(now)["remaining"],
+        "expires_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.expires_at)),
+        "reason": entry.reason,
+    }
+    message = config.bot_blacklist_reject_message
+    for key, value in values.items():
+        message = message.replace("{" + key + "}", str(value))
+    return message
+
+
 # ── Main entry point ─────────────────────────────────────────────────────
 
 
@@ -294,6 +311,7 @@ async def parse_event(
     is_known_command_fn: Callable[[str], bool] | None = None,
     canonical_command_name_fn: Callable[[str], str] | None = None,
     media_delivery_mode: str = "passthrough",
+    bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
 ) -> NormalizedEvent | FilteredEvent | None:
     """Parse a OneBot 11 message event.
 
@@ -340,7 +358,13 @@ async def parse_event(
     """
     post_type = event.get("post_type")
     if post_type == "notice":
-        return await _parse_notice_event(event, self_id=self_id, config=config, name_resolver=name_resolver)
+        return await _parse_notice_event(
+            event,
+            self_id=self_id,
+            config=config,
+            name_resolver=name_resolver,
+            bot_blacklist_match_fn=bot_blacklist_match_fn,
+        )
     if post_type != "message":
         return None
 
@@ -424,6 +448,26 @@ async def parse_event(
         # 即使不要求 @ 触发，只要消息以 @bot 开头也会被去掉。
         if self_id and strip_first_mention:
             raw_segments = seg.strip_first_bot_mention(raw_segments, self_id)
+
+    # ── Bot-managed dynamic blacklist ────────────────────────────────
+    # Run after normal admission + group trigger gating so a blocked user does
+    # not make the bot reply to every unrelated group message. Admin status is
+    # evaluated from the live config on every event and always takes priority.
+    if config and config.bot_blacklist_enabled and not is_admin and bot_blacklist_match_fn is not None:
+        entry = bot_blacklist_match_fn(sender_id, group_id if is_group else None)
+        if entry is not None:
+            return FilteredEvent(
+                chat_id=chat_id,
+                chat_type="group" if is_group else "dm",
+                user_id=sender_id,
+                user_name=sender_name,
+                command_name="",
+                reject_message=_render_bot_blacklist_reject(config, entry, sender_id),
+                message_id=str(event.get("message_id", "")),
+                reply_to_message_id=str(event.get("message_id", "")) or None,
+                timestamp=float(event.get("time", 0) or 0),
+                filter_type="bot_blacklist",
+            )
 
     # ── /command filter ───────────────────────────────────────────────
     # After @bot stripping (group) or on raw segments (DM), check whether the
@@ -746,7 +790,8 @@ async def _parse_notice_event(
     self_id: str,
     config: AdapterConfig | None = None,
     name_resolver: NameResolver | None = None,
-) -> NormalizedEvent | None:
+    bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
+) -> NormalizedEvent | FilteredEvent | None:
     """Parse a OneBot 11 notice event into a synthetic NormalizedEvent.
 
     Handles three notice types (when enabled via config):
@@ -819,6 +864,24 @@ async def _parse_notice_event(
             if not config.is_dm_allowed(user_id):
                 return None
 
+        # Poke is a direct interaction with the bot, so apply the same
+        # bot-managed blacklist policy as a triggered text message. Static
+        # admission filtering above keeps its existing silent-drop priority.
+        is_admin = config.is_admin(user_id, group_id if is_group else None)
+        if config.bot_blacklist_enabled and not is_admin and bot_blacklist_match_fn is not None:
+            entry = bot_blacklist_match_fn(user_id, group_id if is_group else None)
+            if entry is not None:
+                return FilteredEvent(
+                    chat_id=f"group:{group_id}" if is_group else user_id,
+                    chat_type="group" if is_group else "dm",
+                    user_id=user_id,
+                    user_name="",
+                    command_name="",
+                    reject_message=_render_bot_blacklist_reject(config, entry, user_id),
+                    timestamp=timestamp,
+                    filter_type="bot_blacklist",
+                )
+
     # ── Resolve user name ──
     user_name = ""
     if name_resolver is not None and user_id:
@@ -854,7 +917,7 @@ async def _parse_notice_event(
         return None
 
     # ── Admin check (group only) ──
-    is_admin = config.is_admin(user_id, group_id) if is_group else False
+    is_admin = config.is_admin(user_id, group_id if is_group else None)
 
     logger.debug(
         "parse_notice: synthesized kind=%s chat_id=%s user_id=%s text=%r",

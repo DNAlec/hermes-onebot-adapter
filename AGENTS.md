@@ -143,4 +143,4 @@ OneBot 平台的工具集配置通过适配器 WebUI 管理（`/tools` 页），
 - **首次安装**：`installer.install()` 末尾调用 `write_platform_toolsets(default_onebot_toolsets())`，默认启用核心工具集（减去 `_DEFAULT_OFF_TOOLSETS`）+ `onebot` 插件 toolset。
 - **修改后需重启 Hermes 网关生效**（适配器只写文件，不触发热重载）。
 - **MCP 服务器**：WebUI 只控制 OneBot 平台的 MCP 白名单（写入 `platform_toolsets.onebot` 的 MCP server 名），不控制 MCP 的全局 `enabled` 标志（由 Hermes 端 `mcp_servers.<name>.enabled` 管理）。`no_mcp` sentinel 写入后向 OneBot 平台屏蔽全部 MCP。
-- **toolset key 约定**：插件在 `onebot_tools.py` 中用 `TOOLSET = "onebot"`（不是 `"hermes-onebot"`），这是 `toolsets.py:700` 自动生成路径按 `e.toolset == platform_name` 匹配的隐含约定。改名会导致 `resolve_toolset("hermes-onebot")` 走自动生成路径，返回 `_HERMES_CORE_TOOLS` + 38 个 QQ 工具。
+- **toolset key 约定**：插件在 `onebot_tools.py` 中用 `TOOLSET = "onebot"`（不是 `"hermes-onebot"`），这是 `toolsets.py:700` 自动生成路径按 `e.toolset == platform_name` 匹配的隐含约定。改名会导致 `resolve_toolset("hermes-onebot")` 走自动生成路径，返回 `_HERMES_CORE_TOOLS` + 40 个 QQ 工具。

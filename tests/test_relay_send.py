@@ -262,6 +262,34 @@ async def test_api_call_passthrough():
         await server.close()
 
 
+async def test_adapter_local_api_call_is_not_forwarded_to_onebot():
+    mock_api = MagicMock()
+    mock_api.call = AsyncMock()
+    local_call = AsyncMock(return_value={"entries": [], "count": 0})
+    cfg = AdapterConfig(hermes_ws_token="testtoken", hermes_ws_path="/hermes")
+    relay = HermesRelayServer(
+        cfg, mock_api, adapter_version="test", onebot_connected_fn=lambda: True,
+        local_api_call=local_call,
+    )
+    import aiohttp.web
+    app = aiohttp.web.Application()
+    relay.add_routes(app)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(api_call_message("adapter_get_bot_blacklist", "local1", {}))
+                result = await ws.receive_json(timeout=2)
+                assert result["success"] is True
+                assert result["data"] == {"entries": [], "count": 0}
+        local_call.assert_awaited_once_with("adapter_get_bot_blacklist", {})
+        mock_api.call.assert_not_awaited()
+    finally:
+        await server.close()
+
+
 async def test_ping_pong():
     app, _, _ = _make_relay_app()
     server = TestServer(app)

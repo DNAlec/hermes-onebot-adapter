@@ -167,7 +167,7 @@ class CommandInfo:
 
 @dataclass
 class FilteredEvent:
-    """A message event that was filtered by the command filter.
+    """A message event rejected by an adapter-side filter.
 
     Carries enough context for the adapter service to send a reject message
     back to the originating chat via the OneBot HTTP API, without going
@@ -185,6 +185,7 @@ class FilteredEvent:
     message_id: str = ""
     reply_to_message_id: str | None = None
     timestamp: float = 0.0
+    filter_type: str = "command"
 
 
 def ready_message(

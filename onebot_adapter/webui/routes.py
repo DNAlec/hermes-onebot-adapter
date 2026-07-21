@@ -82,6 +82,9 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_get("/api/usage/stats", _usage_stats(store, state))
     app.router.add_get("/api/usage/dimensions", _usage_dimensions(state))
     app.router.add_delete("/api/usage", _clear_usage(state))
+    # Bot-managed dynamic blacklist
+    app.router.add_get("/api/bot_blacklist", _get_bot_blacklist(state))
+    app.router.add_delete("/api/bot_blacklist/{entry_id}", _delete_bot_blacklist(state))
     app.router.add_get("/", _index)
     app.router.add_get("/{tail:.*}", _spa_handler)
 
@@ -287,6 +290,45 @@ def _get_config(store: ConfigStore):
     return handler
 
 
+def _get_bot_blacklist(state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        blacklist = state.get("bot_blacklist")
+        if blacklist is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("bot_blacklist_error", "bot blacklist unavailable")}, status=503,
+            )
+        try:
+            entries = blacklist.list(
+                scope=request.query.get("scope"),
+                group_id=request.query.get("group_id"),
+                user_id=request.query.get("user_id"),
+            )
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        return aiohttp.web.json_response({"entries": [entry.to_dict() for entry in entries]})
+
+    return handler
+
+
+def _delete_bot_blacklist(state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        blacklist = state.get("bot_blacklist")
+        if blacklist is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("bot_blacklist_error", "bot blacklist unavailable")}, status=503,
+            )
+        try:
+            entry_id = int(request.match_info["entry_id"])
+        except (TypeError, ValueError):
+            return aiohttp.web.json_response({"error": "invalid entry_id"}, status=400)
+        removed = blacklist.remove_id(entry_id)
+        if not removed:
+            return aiohttp.web.json_response({"error": "entry not found"}, status=404)
+        return aiohttp.web.json_response({"ok": True, "removed": True})
+
+    return handler
+
+
 def _put_config(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
@@ -314,6 +356,10 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             except Exception as exc:
                 return aiohttp.web.json_response({"error": f"failed to save config: {exc}"}, status=500)
             store.update(new_cfg)
+            if "bot_blacklist_max_duration_seconds" in data:
+                blacklist = state.get("bot_blacklist")
+                if blacklist is not None:
+                    blacklist.clamp(new_cfg.bot_blacklist_max_duration_seconds)
             # Materialize channel_prompts into Hermes config.yaml so the plugin
             # picks up the new global_channel_prompt on next connect/restart.
             try:

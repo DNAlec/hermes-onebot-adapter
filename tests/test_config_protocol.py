@@ -14,6 +14,8 @@ def test_config_defaults_validate():
     assert cfg.hermes_ws_token
     assert cfg.onebot_ws_token
     assert cfg.validate() == []
+    assert cfg.bot_blacklist_enabled is True
+    assert cfg.bot_blacklist_max_duration_seconds == 86400
 
 
 def test_config_default_tokens_empty_before_ensure():
