@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,10 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_put("/api/hermes_mode", _put_hermes_mode(store))
     app.router.add_post("/api/hermes_mode/refresh", _refresh_hermes_mode(state))
     app.router.add_get("/api/update_check", _update_check)
+    # Usage statistics
+    app.router.add_get("/api/usage/stats", _usage_stats(store, state))
+    app.router.add_get("/api/usage/dimensions", _usage_dimensions(state))
+    app.router.add_delete("/api/usage", _clear_usage(state))
     app.router.add_get("/", _index)
     app.router.add_get("/{tail:.*}", _spa_handler)
 
@@ -319,6 +324,104 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
         except Exception as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
         return aiohttp.web.json_response(_public_config(new_cfg))
+
+    return handler
+
+
+def _usage_range(request: aiohttp.web.Request) -> tuple[float, float]:
+    """Parse an optional half-open Unix timestamp range (default: last 7 days)."""
+    now = time.time()
+    try:
+        start = float(request.query.get("start", now - 7 * 86400))
+        end = float(request.query.get("end", now))
+    except (TypeError, ValueError) as exc:
+        raise aiohttp.web.HTTPBadRequest(text='{"error":"start and end must be Unix timestamps"}',
+                                         content_type="application/json") from exc
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+        raise aiohttp.web.HTTPBadRequest(text='{"error":"end must be greater than start"}',
+                                         content_type="application/json")
+    return start, end
+
+
+def _usage_stats(store: ConfigStore, state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        usage = state.get("usage_stats")
+        if usage is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("usage_stats_error", "usage statistics unavailable")}, status=503,
+            )
+        start, end = _usage_range(request)
+        scope = request.query.get("scope", "all")
+        bucket = request.query.get("bucket", "day")
+        group_id = request.query.get("group_id") or None
+        user_id = request.query.get("user_id") or None
+        if scope not in {"all", "dm", "group"}:
+            return aiohttp.web.json_response({"error": "scope must be all, dm, or group"}, status=400)
+        if bucket not in {"hour", "day"}:
+            return aiohttp.web.json_response({"error": "bucket must be hour or day"}, status=400)
+        if scope == "dm" and group_id is not None:
+            return aiohttp.web.json_response({"error": "group_id cannot be used with dm scope"}, status=400)
+        try:
+            tz_offset = int(request.query.get("tz_offset_minutes", "0"))
+        except ValueError:
+            return aiohttp.web.json_response({"error": "tz_offset_minutes must be an integer"}, status=400)
+        if not -1440 <= tz_offset <= 1440:
+            return aiohttp.web.json_response({"error": "tz_offset_minutes out of range"}, status=400)
+        try:
+            result = await usage.query(
+                start=start,
+                end=end,
+                scope=scope,
+                group_id=group_id,
+                user_id=user_id,
+                bucket=bucket,
+                tz_offset_minutes=tz_offset,
+            )
+        except Exception as exc:
+            logger.exception("usage statistics query failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=503)
+        return aiohttp.web.json_response({
+            "enabled": store.config.usage_stats_enabled,
+            "start": start,
+            "end": end,
+            "bucket": bucket,
+            **result,
+        })
+
+    return handler
+
+
+def _usage_dimensions(state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        usage = state.get("usage_stats")
+        if usage is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("usage_stats_error", "usage statistics unavailable")}, status=503,
+            )
+        start, end = _usage_range(request)
+        try:
+            result = await usage.dimensions(start, end)
+        except Exception as exc:
+            logger.exception("usage dimensions query failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=503)
+        return aiohttp.web.json_response(result)
+
+    return handler
+
+
+def _clear_usage(state: dict[str, Any]):
+    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+        usage = state.get("usage_stats")
+        if usage is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("usage_stats_error", "usage statistics unavailable")}, status=503,
+            )
+        try:
+            deleted = await usage.clear()
+        except Exception as exc:
+            logger.exception("clearing usage statistics failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=503)
+        return aiohttp.web.json_response({"ok": True, "deleted": deleted})
 
     return handler
 

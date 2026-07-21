@@ -181,6 +181,8 @@ class AdapterConfig:
     log_file_enabled: bool = True
     log_file_dir: str = ""
     log_retention_days: int = 3
+    usage_stats_enabled: bool = True
+    usage_stats_retention_days: int = 365
     message_show_group_id: bool = True
     seq_map_size: int = 4500
     reaction_emoji_enabled: bool = True
@@ -218,6 +220,8 @@ class AdapterConfig:
             errors.append("log_message_preview must be non-negative")
         if self.log_retention_days < 1:
             errors.append("log_retention_days must be at least 1")
+        if self.usage_stats_retention_days < 1:
+            errors.append("usage_stats_retention_days must be at least 1")
         for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port"):
             port_val = getattr(self, port_field)
             if not isinstance(port_val, int) or port_val < 1 or port_val > 65535:
@@ -519,6 +523,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
                                      "直连开启会被伪造 IP 绕过登录限流)",
         "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
+        "usage_stats_enabled": "用量统计开关;关闭后停止新增记录,已有历史仍可查询",
+        "usage_stats_retention_days": "用量统计保留天数(默认365),过期记录自动清理",
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
         "reaction_emoji_enabled": "消息送达 Hermes 后在原消息贴表情回应;群配置可单独覆盖",
         "reaction_emoji_id": "贴表情回应使用的表情ID(默认 124),QQ 表情编号",

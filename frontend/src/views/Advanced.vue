@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useConfig } from "../composables/useConfig";
-import { login } from "../api";
+import { clearUsageStats, login } from "../api";
 
 const { cfg, load, save: saveConfig } = useConfig();
 const saving = ref(false);
@@ -15,6 +15,7 @@ const confirmToken = ref("");
 const tokenMsg = ref("");
 const tokenMsgType = ref<"success" | "error">("success");
 const changingToken = ref(false);
+const clearingUsage = ref(false);
 
 onMounted(async () => {
   try {
@@ -37,6 +38,8 @@ async function save() {
       log_file_enabled: c.log_file_enabled,
       log_file_dir: c.log_file_dir,
       log_retention_days: c.log_retention_days,
+      usage_stats_enabled: c.usage_stats_enabled,
+      usage_stats_retention_days: c.usage_stats_retention_days,
       webui_port: c.webui_port,
       webui_token_lifetime_hours: c.webui_token_lifetime_hours,
       send_dedup_enabled: c.send_dedup_enabled,
@@ -49,6 +52,23 @@ async function save() {
     msg.value = "❌ " + (e.response?.data?.error || e.message);
     msgType.value = "error";
   } finally { saving.value = false; }
+}
+
+async function clearUsage() {
+  const confirmation = window.prompt("此操作不可恢复。请输入“清空”以删除全部用量统计数据：");
+  if (confirmation !== "清空") return;
+  clearingUsage.value = true;
+  msg.value = "";
+  try {
+    const result = await clearUsageStats();
+    msg.value = `✅ 已清空 ${result.deleted} 条统计记录`;
+    msgType.value = "success";
+  } catch (e: any) {
+    msg.value = "❌ " + (e.response?.data?.error || e.message);
+    msgType.value = "error";
+  } finally {
+    clearingUsage.value = false;
+  }
 }
 
 async function changeToken() {
@@ -193,6 +213,23 @@ async function changeToken() {
     </div>
 
     <div class="section">
+      <h3>用量统计</h3>
+      <p class="hint">记录成功通过消息过滤的元数据，不保存消息正文或媒体地址。关闭后停止新增，已有历史仍可查询。</p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.usage_stats_enabled" />
+        <span>启用用量统计</span>
+      </label>
+      <label>
+        数据保留天数
+        <input type="number" v-model.number="cfg.usage_stats_retention_days" min="1" step="1" />
+        <span class="hint">默认 365 天；缩短后保存配置会立即清理过期数据。</span>
+      </label>
+      <button @click="clearUsage" :disabled="clearingUsage" class="danger-btn">
+        {{ clearingUsage ? "清空中..." : "清空全部统计数据" }}
+      </button>
+    </div>
+
+    <div class="section">
       <h3>发送去重</h3>
       <p class="hint">Gateway 的 send_text 超时重试会导致同一条消息被多次发送到 QQ。启用后,适配器在 TTL 内对相同内容(chat_id+action+内容指纹+reply_to)的重复发送直接返回缓存结果,不再实际下发。</p>
       <label class="checkbox-row">
@@ -218,6 +255,8 @@ async function changeToken() {
 .section h3 { margin: 0 0 1rem; font-size: 1rem; border-bottom: 2px solid var(--primary); padding-bottom: 0.5rem; }
 .subsection { margin-top: 1.5rem; }
 .hint { display: block; font-size: 0.85rem; color: var(--text-muted); margin: 0.25rem 0 0.75rem; }
+.danger-btn { background: var(--danger); color: white; border: 0; border-radius: 5px; padding: 0.6rem 1rem; cursor: pointer; }
+.danger-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 label { display: block; margin-bottom: 1rem; font-weight: 500; font-size: 0.9rem; }
 input, select { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; margin-top: 0.25rem; }
 .checkbox-row { display: flex; align-items: center; gap: 0.5rem; }

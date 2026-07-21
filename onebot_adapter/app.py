@@ -29,6 +29,7 @@ from onebot_adapter.onebot.ws_forward import OneBotForwardClient
 from onebot_adapter.onebot.ws_reverse import OneBotReverseServer
 from onebot_adapter.relay.hermes_ws import HermesRelayServer
 from onebot_adapter.relay.protocol import parse_chat_id
+from onebot_adapter.usage_stats import UsageStatsStore
 from onebot_adapter.webui import routes as webui_routes
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ class AdapterService:
         self._webui_log_handler: logging.Handler | None = None
         self._probe_lock = asyncio.Lock()
         self._cleaning_up = False
+        self._usage_stats: UsageStatsStore | None = None
 
     def _init_components(self) -> None:
         cfg = self.store.config
@@ -249,6 +251,11 @@ class AdapterService:
 
     async def _on_onebot_event(self, event) -> None:
         self._update_status()
+        if self.store.config.usage_stats_enabled and self._usage_stats is not None:
+            try:
+                await self._usage_stats.record(event)
+            except Exception:
+                logger.exception("failed to record usage statistics")
         logger.debug(
             "app _on_onebot_event: relaying to Hermes chat_id=%s text_preview=%r",
             event.chat_id, (event.text or "")[:500],
@@ -352,6 +359,10 @@ class AdapterService:
             await self._onebot_reverse.stop()
         if self._relay:
             await self._relay.stop()
+        if self._usage_stats:
+            await self._usage_stats.close()
+            self._usage_stats = None
+            self._state.pop("usage_stats", None)
         if self._session and not self._session.closed:
             await self._session.close()
         # Detach + close log handlers so the file handle is released and a
@@ -391,6 +402,12 @@ class AdapterService:
 
         # File logging hot-reload
         self._update_file_logging(old, new)
+
+        if self._usage_stats and old.usage_stats_retention_days != new.usage_stats_retention_days:
+            await self._usage_stats.update_retention(
+                new.usage_stats_retention_days,
+                prune_now=new.usage_stats_retention_days < old.usage_stats_retention_days,
+            )
 
         # log_level hot-reload: update root logger + WebUI handler + file handler
         if old.log_level != new.log_level:
@@ -480,6 +497,19 @@ class AdapterService:
         )
         self._init_components()
         cfg = self.store.config
+
+        usage_path = config_path().parent / "usage_stats.sqlite3"
+        usage_stats = UsageStatsStore(usage_path, cfg.usage_stats_retention_days)
+        try:
+            await usage_stats.start()
+            self._usage_stats = usage_stats
+            self._state["usage_stats"] = usage_stats
+            self._state.pop("usage_stats_error", None)
+        except Exception as exc:
+            await usage_stats.close()
+            self._usage_stats = None
+            self._state["usage_stats_error"] = str(exc)
+            logger.exception("usage statistics unavailable")
 
         if not no_webui:
             # Attach WebUI log handler so /api/logs has content
