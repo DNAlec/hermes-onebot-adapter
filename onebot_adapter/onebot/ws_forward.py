@@ -46,6 +46,7 @@ class OneBotForwardClient:
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
+        bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
     ) -> None:
         self._config = config
         self._on_connect = on_connect
@@ -68,6 +69,7 @@ class OneBotForwardClient:
             seq_map=seq_map,
             name_resolver=name_resolver,
             ws_api_transport=ws_api_transport,
+            bot_blacklist_match_fn=bot_blacklist_match_fn,
         )
 
     def update_config(self, config: AdapterConfig) -> None:

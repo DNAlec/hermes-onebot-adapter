@@ -206,6 +206,13 @@ class AdapterConfig:
     command_permissions: dict[str, str] = field(default_factory=dict)  # {指令名: everyone|admin|disabled}
     command_reject_message: str = "⛔ 你没有权限使用此指令 /{cmd}"
 
+    # ── Bot 动态用户黑名单（独立于准入黑白名单）──
+    bot_blacklist_enabled: bool = True
+    bot_blacklist_max_duration_seconds: int = 86400
+    bot_blacklist_reject_message: str = (
+        "⛔ 你已被 bot 暂时拉黑，剩余时间：{remaining}。原因：{reason}"
+    )
+
     # ── notice 事件推送 ──
     notify_poke_enabled: bool = False               # 戳一戳(bot 被戳)推送开关
     notify_member_change_enabled: bool = False      # 群成员进退群推送开关
@@ -238,6 +245,14 @@ class AdapterConfig:
             errors.append("event_queue_max_per_chat must be at least 1")
         if self.event_queue_idle_timeout <= 0:
             errors.append("event_queue_idle_timeout must be positive")
+        if not isinstance(self.bot_blacklist_enabled, bool):
+            errors.append("bot_blacklist_enabled must be bool")
+        if not isinstance(self.bot_blacklist_max_duration_seconds, int) \
+                or isinstance(self.bot_blacklist_max_duration_seconds, bool) \
+                or self.bot_blacklist_max_duration_seconds <= 0:
+            errors.append("bot_blacklist_max_duration_seconds must be a positive integer")
+        if not isinstance(self.bot_blacklist_reject_message, str) or not self.bot_blacklist_reject_message:
+            errors.append("bot_blacklist_reject_message must not be empty")
         if self.media_delivery_mode not in _VALID_MEDIA_DELIVERY_MODES:
             errors.append(f"media_delivery_mode must be one of {sorted(_VALID_MEDIA_DELIVERY_MODES)}")
         if self.webui_token_lifetime_hours < 1:
@@ -538,6 +553,9 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
                                  " platforms.onebot.channel_prompts,需重启 Hermes 网关生效",
         "notify_poke_enabled": "戳一戳(bot 被戳)推送开关;开启后 bot 被戳会合成系统事件转发给 agent",
         "notify_member_change_enabled": "群成员进退群推送开关;开启后其他成员进群/退群会合成系统事件转发给 agent",
+        "bot_blacklist_enabled": "允许 bot 使用独立动态黑名单工具并在消息触发时拦截命中用户",
+        "bot_blacklist_max_duration_seconds": "bot 单次动态拉黑允许的最大秒数,默认86400(24小时)",
+        "bot_blacklist_reject_message": "动态拉黑提示模板;支持 {user_id}/{scope}/{remaining}/{expires_at}/{reason}",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():

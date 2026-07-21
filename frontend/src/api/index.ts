@@ -146,6 +146,10 @@ export interface Config {
   command_filter_unknown: boolean;
   command_permissions: Record<string, string>;
   command_reject_message: string;
+  // ── Bot 动态用户黑名单 ──
+  bot_blacklist_enabled: boolean;
+  bot_blacklist_max_duration_seconds: number;
+  bot_blacklist_reject_message: string;
   // ── notice 事件推送 ──
   notify_poke_enabled: boolean;
   notify_member_change_enabled: boolean;
@@ -209,6 +213,27 @@ export const getUsageDimensions = (start: number, end: number) =>
   }).then((r) => r.data);
 export const clearUsageStats = () =>
   api.delete<{ ok: boolean; deleted: number }>("/usage").then((r) => r.data);
+
+// ── Bot dynamic blacklist ──
+
+export interface BotBlacklistEntry {
+  id: number;
+  scope: "group" | "dm" | "global";
+  group_id: string;
+  user_id: string;
+  created_at: number;
+  duration_seconds: number;
+  expires_at: number;
+  remaining_seconds: number;
+  remaining: string;
+  reason: string;
+  created_by_user_id: string;
+}
+
+export const getBotBlacklist = () =>
+  api.get<{ entries: BotBlacklistEntry[] }>("/bot_blacklist").then((r) => r.data.entries);
+export const deleteBotBlacklistEntry = (entryId: number) =>
+  api.delete<{ ok: boolean; removed: boolean }>(`/bot_blacklist/${entryId}`).then((r) => r.data);
 
 // ── /command filter ──
 

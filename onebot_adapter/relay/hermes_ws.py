@@ -108,6 +108,7 @@ class HermesRelayServer:
         on_dispatch: Callable[[NormalizedEvent], Awaitable[None]] | None = None,
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
+        local_api_call: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = None,
     ) -> None:
         self._config = config
         self._api = api
@@ -119,6 +120,7 @@ class HermesRelayServer:
         self._on_dispatch = on_dispatch
         self._seq_map = seq_map
         self._name_resolver = name_resolver
+        self._local_api_call = local_api_call
         self._clients: set[aiohttp.web.WebSocketResponse] = set()
         self._ring_buffer: deque[tuple[float, NormalizedEvent]] = deque(
             maxlen=self._RING_BUFFER_SIZE,
@@ -1082,6 +1084,14 @@ class HermesRelayServer:
         params = data.get("params", {}) or {}
         logger.debug("relay api_call: action=%s req_id=%s", action, req_id)
         logger.debug("relay api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
+        if self._local_api_call is not None and action.startswith("adapter_"):
+            try:
+                result = await self._local_api_call(action, params)
+                await ws.send_json(result_message(req_id, True, data=result))
+            except Exception as exc:
+                logger.warning("local api_call %s failed: %s", action, exc)
+                await ws.send_json(result_message(req_id, False, error=str(exc)))
+            return
         # 拦截 real_seq → message_id 转换(适配器侧 SeqMap 查询)
         params = self._resolve_seq_params(action, params)
         try:

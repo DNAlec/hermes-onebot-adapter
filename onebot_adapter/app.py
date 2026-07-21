@@ -20,6 +20,7 @@ import aiohttp
 import aiohttp.web
 
 from onebot_adapter import __version__
+from onebot_adapter.bot_blacklist import BotBlacklistStore
 from onebot_adapter.config import AdapterConfig, ConfigStore, config_path, ensure_tokens, load_config, save_config
 from onebot_adapter.onebot.api import OneBotApi
 from onebot_adapter.onebot.name_resolver import NameResolver
@@ -72,6 +73,7 @@ class AdapterService:
         self._probe_lock = asyncio.Lock()
         self._cleaning_up = False
         self._usage_stats: UsageStatsStore | None = None
+        self._bot_blacklist: BotBlacklistStore | None = None
 
     def _init_components(self) -> None:
         cfg = self.store.config
@@ -92,6 +94,7 @@ class AdapterService:
             on_dispatch=self._maybe_react_delivered,
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
+            local_api_call=self._handle_local_api_call,
         )
         self._state["relay"] = self._relay
         self._onebot_reverse = OneBotReverseServer(
@@ -106,6 +109,7 @@ class AdapterService:
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
+            bot_blacklist_match_fn=self._match_bot_blacklist,
         )
         self._onebot_forward = OneBotForwardClient(
             cfg,
@@ -120,6 +124,7 @@ class AdapterService:
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
+            bot_blacklist_match_fn=self._match_bot_blacklist,
         )
         # Register config-change listener early so hot-reload via the WebUI
         # (which starts first) notifies components immediately — previously
@@ -322,15 +327,15 @@ class AdapterService:
             )
 
     async def _on_filtered_command(self, filtered) -> None:
-        """Handle a /command that was denied by the command filter.
+        """Handle an event denied by an adapter-side filter.
 
         Sends the reject message back to the originating chat via the OneBot
         HTTP API (through the relay) and does NOT forward the event to the
         Hermes plugin.
         """
         logger.debug(
-            "app _on_filtered_command: chat_id=%s cmd=%s user=%s",
-            filtered.chat_id, filtered.command_name, filtered.user_id,
+            "app filtered event: type=%s chat_id=%s cmd=%s user=%s",
+            filtered.filter_type, filtered.chat_id, filtered.command_name, filtered.user_id,
         )
         if self._relay:
             await self._relay.send_reject_message(
@@ -338,6 +343,68 @@ class AdapterService:
                 message=filtered.reject_message or "⛔ 指令被过滤",
                 reply_to=filtered.reply_to_message_id,
             )
+
+    def _match_bot_blacklist(self, user_id: str, group_id: str | None):
+        cfg = self.store.config
+        if self._bot_blacklist is None or cfg.is_admin(user_id, group_id):
+            return None
+        return self._bot_blacklist.match(user_id=user_id, group_id=group_id)
+
+    async def _handle_local_api_call(self, action: str, params: dict[str, Any]) -> Any:
+        if action not in {"adapter_get_bot_blacklist", "adapter_edit_bot_blacklist"}:
+            raise ValueError(f"unknown adapter action: {action}")
+        cfg = self.store.config
+        store = self._bot_blacklist
+        if store is None:
+            raise RuntimeError("bot blacklist store unavailable")
+        if not cfg.bot_blacklist_enabled:
+            raise RuntimeError("bot 动态黑名单功能已关闭")
+        if action == "adapter_get_bot_blacklist":
+            entries = store.list(
+                scope=params.get("scope"), group_id=params.get("group_id"), user_id=params.get("user_id"),
+            )
+            return {"entries": [entry.to_dict() for entry in entries], "count": len(entries)}
+
+        operation = str(params.get("operation", ""))
+        scope = str(params.get("scope", ""))
+        user_id = str(params.get("user_id", "")).strip()
+        group_id = str(params.get("group_id", "")).strip()
+        if operation == "remove":
+            removed = store.remove(scope=scope, user_id=user_id, group_id=group_id)
+            return {"removed": removed, "scope": scope, "group_id": group_id, "user_id": user_id}
+        if operation != "set":
+            raise ValueError("action must be 'set' or 'remove'")
+
+        if cfg.is_admin(user_id, group_id if scope == "group" else None):
+            raise PermissionError("无法拉黑 WebUI 中配置的全局管理员或对应群管理员")
+        try:
+            requested_duration = int(params.get("duration_seconds", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("duration_seconds must be an integer") from exc
+        if requested_duration <= 0:
+            raise ValueError("duration_seconds must be positive")
+        actual_duration = min(requested_duration, cfg.bot_blacklist_max_duration_seconds)
+        entry = store.set(
+            scope=scope,
+            group_id=group_id,
+            user_id=user_id,
+            duration_seconds=actual_duration,
+            reason=str(params.get("reason", "")),
+            created_by_user_id=str(params.get("created_by_user_id", "")),
+        )
+        result = entry.to_dict()
+        result["requested_duration_seconds"] = requested_duration
+        result["actual_duration_seconds"] = actual_duration
+        result["clamped"] = actual_duration != requested_duration
+        if result["clamped"]:
+            result["notice"] = (
+                f"请求时长 {requested_duration} 秒超过允许上限，已调整为 {actual_duration} 秒"
+            )
+        if scope == "global":
+            exempt_groups = [gid for gid in cfg.groups if user_id in cfg.get_group_config(gid).admins]
+            if exempt_groups:
+                result["exempt_admin_groups"] = exempt_groups
+        return result
 
     async def _on_hermes_startup(self, app: aiohttp.web.Application) -> None:
         cfg = self.store.config
@@ -363,6 +430,10 @@ class AdapterService:
             await self._usage_stats.close()
             self._usage_stats = None
             self._state.pop("usage_stats", None)
+        if self._bot_blacklist:
+            self._bot_blacklist.close()
+            self._bot_blacklist = None
+            self._state.pop("bot_blacklist", None)
         if self._session and not self._session.closed:
             await self._session.close()
         # Detach + close log handlers so the file handle is released and a
@@ -408,6 +479,10 @@ class AdapterService:
                 new.usage_stats_retention_days,
                 prune_now=new.usage_stats_retention_days < old.usage_stats_retention_days,
             )
+        if self._bot_blacklist and old.bot_blacklist_max_duration_seconds != new.bot_blacklist_max_duration_seconds:
+            clamped = self._bot_blacklist.clamp(new.bot_blacklist_max_duration_seconds)
+            if clamped:
+                logger.info("bot blacklist max duration reduced/clamped entries: %d", clamped)
 
         # log_level hot-reload: update root logger + WebUI handler + file handler
         if old.log_level != new.log_level:
@@ -495,8 +570,22 @@ class AdapterService:
             timeout=aiohttp.ClientTimeout(total=30),
             headers={"User-Agent": f"hermes-onebot-adapter/{__version__}"},
         )
-        self._init_components()
         cfg = self.store.config
+
+        blacklist_path = config_path().parent / "bot_blacklist.sqlite3"
+        try:
+            self._bot_blacklist = BotBlacklistStore(blacklist_path)
+            self._bot_blacklist.start()
+            self._state["bot_blacklist"] = self._bot_blacklist
+            self._state.pop("bot_blacklist_error", None)
+        except Exception as exc:
+            if self._bot_blacklist is not None:
+                self._bot_blacklist.close()
+            self._bot_blacklist = None
+            self._state["bot_blacklist_error"] = str(exc)
+            logger.exception("bot blacklist unavailable")
+
+        self._init_components()
 
         usage_path = config_path().parent / "usage_stats.sqlite3"
         usage_stats = UsageStatsStore(usage_path, cfg.usage_stats_retention_days)

@@ -44,6 +44,7 @@ class OneBotHandler:
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
+        bot_blacklist_match_fn: Any | None = None,
     ) -> None:
         self.label = label
         self._config = config
@@ -55,6 +56,7 @@ class OneBotHandler:
         self._seq_map = seq_map
         self._name_resolver = name_resolver or NameResolver(api)
         self._ws_api_transport = ws_api_transport
+        self._bot_blacklist_match_fn = bot_blacklist_match_fn
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the handler."""
@@ -89,6 +91,7 @@ class OneBotHandler:
             name_resolver=self._name_resolver,
             is_known_command_fn=self._is_known_command_fn,
             canonical_command_name_fn=self._canonical_command_name_fn,
+            bot_blacklist_match_fn=self._bot_blacklist_match_fn,
         )
         if parsed is None:
             logger.debug("OneBot %s event ignored (post_type=%s)", self.label, data.get("post_type"))
@@ -96,8 +99,8 @@ class OneBotHandler:
         # FilteredEvent → reject message via callback, don't forward to Hermes
         if isinstance(parsed, FilteredEvent):
             logger.debug(
-                "OneBot %s command filtered: chat_id=%s cmd=%s",
-                self.label, parsed.chat_id, parsed.command_name,
+                "OneBot %s event filtered: type=%s chat_id=%s cmd=%s",
+                self.label, parsed.filter_type, parsed.chat_id, parsed.command_name,
             )
             if self._on_filtered:
                 try:

@@ -324,6 +324,47 @@ async def _fetch_custom_face(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
+async def _get_bot_blacklist(args: dict, **_) -> str:
+    """Query the adapter-local dynamic blacklist."""
+    try:
+        data = await _api_call(
+            "adapter_get_bot_blacklist",
+            scope=args.get("scope"),
+            group_id=args.get("group_id"),
+            user_id=args.get("user_id"),
+        )
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _edit_bot_blacklist(args: dict, **_) -> str:
+    """Set or remove an adapter-local dynamic blacklist entry."""
+    try:
+        action = str(args.get("action", ""))
+        scope = str(args.get("scope", ""))
+        group_id = args.get("group_id")
+        if scope == "group" and not group_id:
+            return tool_error("scope=group 时必须提供 group_id")
+        if action == "set" and (not args.get("duration_seconds") or not str(args.get("reason", "")).strip()):
+            return tool_error("action=set 时必须提供正数 duration_seconds 和非空 reason")
+        data = await _api_call(
+            "adapter_edit_bot_blacklist",
+            operation=action,
+            scope=scope,
+            group_id=group_id,
+            user_id=args.get("user_id"),
+            duration_seconds=args.get("duration_seconds"),
+            reason=args.get("reason"),
+            created_by_user_id=_current_user_id(),
+        )
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MESSAGING TOOLS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -761,6 +802,30 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_fetch_custom_face", "获取自定义表情列表(返回表情 URL 数组)。",
         {"count": _int("返回数量(默认48)")},
         [],
+    )),
+    ("onebot_get_bot_blacklist", _get_bot_blacklist, _schema(
+        "onebot_get_bot_blacklist",
+        "查看 bot 独立维护的临时用户黑名单。可按作用域、群号或用户筛选；不传筛选条件时返回全部有效记录。",
+        {
+            "scope": _str("可选：group（指定群）、dm（私聊）或 global（全部会话）"),
+            "group_id": _str("群号；筛选 group 作用域时填写"),
+            "user_id": _str("QQ号；留空则不过滤用户"),
+        },
+        [],
+    )),
+    ("onebot_edit_bot_blacklist", _edit_bot_blacklist, _schema(
+        "onebot_edit_bot_blacklist",
+        "新增、覆盖或解除 bot 的临时用户黑名单。action=set 时填写时长和原因；"
+        "超过 WebUI 配置的最大时长会自动截短。不能拉黑全局管理员或目标群的群管理员。",
+        {
+            "action": _str("set（新增/覆盖）或 remove（解除）"),
+            "scope": _str("group（指定群）、dm（私聊）或 global（全部会话）"),
+            "group_id": _str("群号；scope=group 时必填"),
+            "user_id": _str("目标 QQ 号"),
+            "duration_seconds": _int("拉黑秒数；action=set 时必填"),
+            "reason": _str("拉黑原因；action=set 时必填，会显示在拦截提示中"),
+        },
+        ["action", "scope", "user_id"],
     )),
     # ── Messaging ──
     ("onebot_send_message", _send_message, _schema(
