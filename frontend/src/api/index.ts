@@ -125,6 +125,8 @@ export interface Config {
   log_file_enabled: boolean;
   log_file_dir: string;
   log_retention_days: number;
+  usage_stats_enabled: boolean;
+  usage_stats_retention_days: number;
   message_show_group_id: boolean;
   seq_map_size: number;
   reaction_emoji_enabled: boolean;
@@ -170,6 +172,43 @@ export const putGroup = (groupId: string, cfg: Partial<GroupConfig>) =>
 export const deleteGroup = (groupId: string) =>
   api.delete(`/groups/${groupId}`).then((r) => r.data);
 export const syncGroups = () => api.post("/groups/sync").then((r) => r.data);
+
+// ── Usage statistics ──
+
+export interface UsageDimension {
+  id: string;
+  name: string;
+}
+
+export interface UsageStats {
+  enabled: boolean;
+  start: number;
+  end: number;
+  bucket: "hour" | "day";
+  summary: { total: number; active_groups: number; active_users: number };
+  trend: { bucket_start: number; count: number }[];
+  top_groups: (UsageDimension & { count: number })[];
+  top_users: (UsageDimension & { count: number })[];
+}
+
+export interface UsageQuery {
+  start: number;
+  end: number;
+  scope: "all" | "dm" | "group";
+  group_id?: string;
+  user_id?: string;
+  bucket: "hour" | "day";
+  tz_offset_minutes: number;
+}
+
+export const getUsageStats = (params: UsageQuery) =>
+  api.get<UsageStats>("/usage/stats", { params }).then((r) => r.data);
+export const getUsageDimensions = (start: number, end: number) =>
+  api.get<{ groups: UsageDimension[]; users: UsageDimension[] }>("/usage/dimensions", {
+    params: { start, end },
+  }).then((r) => r.data);
+export const clearUsageStats = () =>
+  api.delete<{ ok: boolean; deleted: number }>("/usage").then((r) => r.data);
 
 // ── /command filter ──
 
