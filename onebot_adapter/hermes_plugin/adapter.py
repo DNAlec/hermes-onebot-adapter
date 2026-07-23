@@ -276,10 +276,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._onebot_connected = False
         self._self_id = ""
         self._media_delivery_mode = "passthrough"
-        self._current_is_admin = False
-        self._current_group_id = ""
-        self._current_user_id = ""
         self._plugin_version = _read_plugin_version()
+        self._completed_deliveries: dict[str, None] = {}
 
         # Inject self into onebot_tools so tool handlers can call _api_call
         try:
@@ -311,10 +309,14 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             )
             return False
 
+        if self._session is not None and not self._session.closed:
+            await self.disconnect()
         self._session = aiohttp.ClientSession()
         try:
             await self._ws_connect()
         except Exception as exc:
+            await self._session.close()
+            self._session = None
             logger.error("OneBot: failed to connect to adapter service: %s", exc)
             self._set_fatal_error("connect_failed", str(exc), retryable=True)
             return False
@@ -340,16 +342,17 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         assert self._session is not None
         url = self._adapter_url
         if "?" in url:
-            url += f"&token={self._adapter_token}"
+            url += "&role=consumer"
         else:
-            url += f"?token={self._adapter_token}"
+            url += "?role=consumer"
         # heartbeat=30 enables aiohttp-level PING/PONG keepalive so that a
         # silent network drop (NAT idle reaping, suspend/resume, Wi-Fi roam)
         # is detected within ~30s rather than waiting minutes for OS TCP
         # keepalive.  Without this, an idle plugin↔relay WS can sit dead and
         # undetected until the next send attempt, at which point the watchdog
         # kicks off a 1→30s exponential backoff reconnect (~2-3 min total).
-        self._ws = await self._session.ws_connect(url, heartbeat=30)
+        headers = {"Authorization": f"Bearer {self._adapter_token}"} if self._adapter_token else {}
+        self._ws = await self._session.ws_connect(url, headers=headers, heartbeat=30)
 
     def _spawn_push(self, coro: Any) -> None:
         """Schedule a fire-and-forget push task, tracked for clean cancel."""
@@ -554,6 +557,14 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         event = data.get("event")
         if event != "message":
             return
+        delivery_ids = [
+            str(x) for x in (data.get("delivery_ids") or [data.get("delivery_id")])
+            if x
+        ]
+        if delivery_ids and all(x in self._completed_deliveries for x in delivery_ids):
+            await self._ack_deliveries(delivery_ids)
+            await self._send_duplicate_idle(data)
+            return
 
         logger.debug(
             "OneBot plugin recv event: chat_id=%s text_len=%d",
@@ -578,12 +589,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # receives it as a parameter rather than reading instance attributes
         # that could be overwritten by a concurrent _handle_event call.
         msg_ctx = (is_admin, group_id, user_id)
-        # Also set instance attributes for backward compat with code that
-        # reads them directly (e.g. outside the _dispatch_event task).
-        self._current_is_admin = is_admin
-        self._current_group_id = group_id
-        self._current_user_id = user_id
-
         timestamp = (
             datetime.fromtimestamp(float(data["timestamp"]), tz=UTC)
             if data.get("timestamp")
@@ -651,11 +656,16 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # the self-deadlock.  This mirrors the normal-message path
         # (``_start_session_processing`` → ``create_task``) which was never
         # affected.
-        task = asyncio.create_task(self._dispatch_event(message_event, msg_ctx))
+        task = asyncio.create_task(self._dispatch_event(message_event, msg_ctx, delivery_ids))
         self._event_tasks.add(task)
         task.add_done_callback(self._event_tasks.discard)
 
-    async def _dispatch_event(self, message_event: Any, msg_ctx: tuple[bool, str, str]) -> None:
+    async def _dispatch_event(
+        self,
+        message_event: Any,
+        msg_ctx: tuple[bool, str, str],
+        delivery_ids: list[str] | None = None,
+    ) -> None:
         """Run ``handle_message`` off the receive loop.
 
         Sets the per-message contextvar from *msg_ctx* (passed as a parameter,
@@ -676,6 +686,36 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.exception("OneBot: handle_message raised in background task")
         finally:
             _msg_context.reset(token)
+            if delivery_ids:
+                for delivery_id in delivery_ids:
+                    self._completed_deliveries[delivery_id] = None
+                while len(self._completed_deliveries) > 512:
+                    self._completed_deliveries.pop(next(iter(self._completed_deliveries)))
+                await self._ack_deliveries(delivery_ids)
+
+    async def _ack_deliveries(self, delivery_ids: list[str]) -> None:
+        ws = self._ws
+        if not delivery_ids or ws is None or ws.closed:
+            return
+        try:
+            await ws.send_json({"type": "event_ack", "v": 1, "delivery_ids": delivery_ids})
+        except Exception:
+            logger.warning("OneBot: event ack send failed", exc_info=True)
+
+    async def _send_duplicate_idle(self, data: dict[str, Any]) -> None:
+        """Release a replay-created busy slot when a delivery was already done."""
+        chat_id = str(data.get("chat_id", ""))
+        if not chat_id.startswith("group:"):
+            return
+        try:
+            if self.config.extra.get("group_sessions_per_user", True):
+                return
+        except Exception:
+            return
+        ws = self._ws
+        if ws is not None and not ws.closed:
+            gid = chat_id[len("group:"):]
+            await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
 
     async def _cache_media_items(self, raw_items: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
         """Download media referenced by *raw_items* and cache them locally.
@@ -848,7 +888,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         Combines the builtin ``COMMAND_REGISTRY`` (central registry in
         ``hermes_cli.commands``) with plugin-registered commands from
         ``hermes_cli.plugins.get_plugin_commands()``.  Returns a list of
-        plain dicts matching :class:`CommandInfo` shape.  Returns an empty
+        plain command metadata dicts.  Returns an empty
         list if the Hermes host APIs are unavailable (standalone mode).
         """
         try:
@@ -1081,7 +1121,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_voice failed: %s", exc)
-            return SendResult(success=False, error=str(exc))
+            return SendResult(success=False, error=str(exc), retryable=True)
 
     async def send_video(
         self,
@@ -1103,7 +1143,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_video failed: %s", exc)
-            return SendResult(success=False, error=str(exc))
+            return SendResult(success=False, error=str(exc), retryable=True)
 
     async def send_document(
         self,
@@ -1128,7 +1168,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             return _result_to_send_result(result)
         except Exception as exc:
             logger.warning("send_document failed: %s", exc)
-            return SendResult(success=False, error=str(exc))
+            return SendResult(success=False, error=str(exc), retryable=True)
 
     async def _api_call(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         logger.debug("OneBot plugin api_call: action=%s", action)
@@ -1240,8 +1280,10 @@ async def _standalone_send(
     req_id = str(uuid.uuid4())
     try:
         async with aiohttp.ClientSession() as session:
+            separator = "&" if "?" in ws_url else "?"
+            rpc_url = f"{ws_url}{separator}role=rpc"
             async with session.ws_connect(
-                ws_url, headers={"Authorization": f"Bearer {token}"} if token else {},
+                rpc_url, headers={"Authorization": f"Bearer {token}"} if token else {},
                 timeout=aiohttp.ClientWSTimeout(ws_close=30),
             ) as ws:
                 # Ignore inbound frames (ready, ring-buffer replay, etc.)

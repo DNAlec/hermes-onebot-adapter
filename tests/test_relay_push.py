@@ -77,6 +77,41 @@ async def test_ring_buffer_replay_on_reconnect():
         await server.close()
 
 
+async def test_event_ack_removes_replay_entry():
+    relay, _, _ = _make_relay()
+    event = _make_event("acked")
+    await relay.push_event(event)
+    assert len(relay._ring_buffer) == 1
+    relay._handle_event_ack({"delivery_ids": [event.delivery_id]})
+    assert not relay._ring_buffer
+
+
+async def test_rpc_connection_does_not_replay_or_become_consumer():
+    relay, _, _ = _make_relay()
+    app = aiohttp.web.Application()
+    relay.add_routes(app)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        await relay.push_event(_make_event("buffered"))
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken&role=rpc") as ws:
+                assert (await ws.receive_json(timeout=2))["type"] == "ready"
+                assert not relay.has_clients
+                with pytest.raises(asyncio.TimeoutError):
+                    await ws.receive_json(timeout=0.1)
+    finally:
+        await server.close()
+
+
+async def test_all_consumer_sends_failed_reports_dropped():
+    relay, _, _ = _make_relay()
+    ws = MagicMock()
+    ws.send_json = AsyncMock(side_effect=ConnectionError("closed"))
+    relay._clients.add(ws)
+    assert await relay.push_event(_make_event("lost")) == "dropped"
+
+
 async def test_ring_buffer_evicts_old_events():
     relay, _, _ = _make_relay()
     buffer_size = HermesRelayServer._RING_BUFFER_SIZE

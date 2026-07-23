@@ -190,15 +190,6 @@ async def test_cache_expiry_triggers_new_fetch():
     assert call_count == 2
 
 
-async def test_invalidate_clears_cache():
-    api = _mock_api(group_member_responses={(42, 333): {"card": "Inv", "nickname": "I"}})
-    resolver = NameResolver(api)
-    await resolver.resolve("333", "42")
-    assert "42:333" in resolver._cache
-    resolver.invalidate("333", "42")
-    assert "42:333" not in resolver._cache
-
-
 async def test_empty_user_id_returns_empty():
     api = MagicMock()
     resolver = NameResolver(api)

@@ -1,4 +1,6 @@
-from onebot_adapter.config import AdapterConfig, ConfigStore, ensure_tokens
+import pytest
+
+from onebot_adapter.config import AdapterConfig, ConfigLoadError, ConfigStore, ensure_tokens
 from onebot_adapter.relay.protocol import (
     NormalizedEvent,
     event_message,
@@ -60,6 +62,16 @@ def test_config_roundtrip(tmp_path):
     loaded = load_config(p)
     assert loaded.self_id == "123456"
     assert loaded.seq_map_size == 100
+
+
+def test_load_config_invalid_json_does_not_fall_back(tmp_path):
+    from onebot_adapter.config import load_config
+
+    p = tmp_path / "cfg.json"
+    p.write_text("{broken", encoding="utf-8")
+    with pytest.raises(ConfigLoadError):
+        load_config(p)
+    assert p.read_text(encoding="utf-8") == "{broken"
 
 
 def test_config_store_patch_and_notify():
@@ -227,23 +239,6 @@ def test_config_is_admin_with_empty_string_group_id():
     assert cfg.is_admin("100") is True
     # Valid group admin
     assert cfg.is_admin("200", group_id="42") is True
-
-
-def test_config_from_dict_migrates_platform_hint():
-    """from_dict should migrate legacy platform_hint → global_channel_prompt."""
-    cfg = AdapterConfig.from_dict({"platform_hint": "旧提示词", "onebot_ws_token": "t", "hermes_ws_token": "t"})
-    assert cfg.global_channel_prompt == "旧提示词"
-
-
-def test_config_from_dict_global_channel_prompt_takes_precedence():
-    """If both platform_hint and global_channel_prompt are present, the new name wins."""
-    cfg = AdapterConfig.from_dict({
-        "platform_hint": "旧提示词",
-        "global_channel_prompt": "新提示词",
-        "onebot_ws_token": "t",
-        "hermes_ws_token": "t",
-    })
-    assert cfg.global_channel_prompt == "新提示词"
 
 
 # ── notice 事件推送配置 ────────────────────────────────────────────────

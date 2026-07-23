@@ -4,6 +4,17 @@
 
 ### 新增
 - **Bot 动态用户黑名单**：默认开启，新增 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具，支持群聊、私聊和全局临时拉黑，记录原因、发起用户与到期时间；管理员自动豁免。记录独立持久化到 SQLite，WebUI 可配置最大时长和提示模板、查看并人工解除记录
+- **可靠事件投递**：Hermes 事件新增 delivery ID/ack；独立 cron 发送使用 `role=rpc` WS，不再参与事件重放或群聊队列状态
+
+### 变更
+- 配置文件损坏或字段非法时启动 fail-fast，不再回退默认配置并覆盖原文件
+- WebUI Dashboard 与 ECharts 拆分为懒加载 chunk，降低首屏包体积
+- 移除 `platform_hint` 旧字段迁移及无生产调用的协议/缓存辅助接口
+
+### 修复
+- 修复 ring buffer 重连重复投递、队列合并污染缓冲事件及全客户端发送失败仍报告成功
+- 修复配置热更新乱序、插件连接失败 session 泄漏、self-id 探测任务泄漏和工具管理员上下文串线
+- 修复 per-group lock 长期增长及陈旧 OneBot HTTP API 文档
 
 ## [1.1.0b] - 2026-07-17
 

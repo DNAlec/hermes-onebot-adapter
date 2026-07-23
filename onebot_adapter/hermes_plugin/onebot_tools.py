@@ -1,14 +1,14 @@
 """Plugin-bundled OneBot API tools for Hermes Agent.
 
-These tools let the LLM call the OneBot 11 HTTP API directly (send messages
+These tools let the LLM call OneBot 11 actions (send messages
 to arbitrary groups, manage group members, fetch histories, etc.) by routing
 through the adapter service's WS ``api_call`` channel.
 
 Registration is done via ``ctx.register_tool(...)`` at plugin load time —
 no dependency on the host's ``tools/qq_tool.py``.
 
-Admin gating: tools that mutate group state (kick, mute, ban, etc.) check
-``_current_is_admin`` which is set per-message by the adapter.
+Admin gating uses a per-message ``ContextVar`` so concurrent messages cannot
+share or overwrite authorization state.
 """
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def _check_admin() -> str | None:
     if _adapter is None:
         return "OneBot adapter not initialized"
     ctx = _msg_context.get()
-    is_admin = ctx[0] if ctx is not None else getattr(_adapter, "_current_is_admin", False)
+    is_admin = ctx[0] if ctx is not None else False
     if not is_admin:
         return "此操作需要管理员权限"
     return None
@@ -111,7 +111,7 @@ def _current_group_id() -> str:
     ctx = _msg_context.get()
     if ctx is not None:
         return ctx[1]
-    return getattr(_adapter, "_current_group_id", "") if _adapter else ""
+    return ctx[1] if ctx is not None else ""
 
 
 def _current_user_id() -> str:
@@ -119,7 +119,7 @@ def _current_user_id() -> str:
     ctx = _msg_context.get()
     if ctx is not None:
         return ctx[2]
-    return getattr(_adapter, "_current_user_id", "") if _adapter else ""
+    return ctx[2] if ctx is not None else ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════

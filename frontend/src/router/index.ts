@@ -1,5 +1,4 @@
 import { createRouter, createWebHistory } from "vue-router";
-import Dashboard from "../views/Dashboard.vue";
 import Login from "../views/Login.vue";
 import { getToken, clearToken } from "../api";
 
@@ -7,7 +6,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/login", name: "login", component: Login },
-    { path: "/", name: "dashboard", component: Dashboard },
+    { path: "/", name: "dashboard", component: () => import("../views/Dashboard.vue") },
     { path: "/connections", name: "connections", component: () => import("../views/ConnectionManagement.vue") },
     { path: "/chat", name: "chat", component: () => import("../views/Chat.vue") },
     { path: "/commands", name: "commands", component: () => import("../views/Commands.vue") },

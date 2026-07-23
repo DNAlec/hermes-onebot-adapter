@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from onebot_adapter.hermes_plugin.adapter import _msg_context
 from onebot_adapter.hermes_plugin.onebot_tools import (
     _ADMIN_TOOL_NAMES,
     _TOOLS,
@@ -21,9 +22,7 @@ class MockAdapter:
     """Minimal adapter mock for testing tool handlers."""
 
     def __init__(self, is_admin: bool = False, group_id: str = "", user_id: str = ""):
-        self._current_is_admin = is_admin
-        self._current_group_id = group_id
-        self._current_user_id = user_id
+        _msg_context.set((is_admin, group_id, user_id))
         self._api_calls: list[tuple[str, dict]] = []
         self._api_results: dict[str, Any] = {}
 
@@ -58,8 +57,10 @@ def _has_error(result: str) -> bool:
 def reset_adapter():
     """Reset the module-level adapter before each test."""
     set_adapter(None)
+    _msg_context.set(None)
     yield
     set_adapter(None)
+    _msg_context.set(None)
 
 
 def _tool_handler(name: str):

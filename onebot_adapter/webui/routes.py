@@ -356,10 +356,6 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             except Exception as exc:
                 return aiohttp.web.json_response({"error": f"failed to save config: {exc}"}, status=500)
             store.update(new_cfg)
-            if "bot_blacklist_max_duration_seconds" in data:
-                blacklist = state.get("bot_blacklist")
-                if blacklist is not None:
-                    blacklist.clamp(new_cfg.bot_blacklist_max_duration_seconds)
             # Materialize channel_prompts into Hermes config.yaml so the plugin
             # picks up the new global_channel_prompt on next connect/restart.
             try:
