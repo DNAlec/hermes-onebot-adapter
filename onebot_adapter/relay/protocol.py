@@ -44,6 +44,7 @@ TypeKind = Literal[
     "hermes_mode_report",
     "mode_refresh",
     "plugin_info",
+    "event_ack",
 ]
 
 ChatType = Literal["dm", "group"]
@@ -82,18 +83,6 @@ class MediaItem:
             "index": self.index,
         }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MediaItem:
-        return cls(
-            kind=data.get("kind", ""),
-            url=data.get("url", ""),
-            mime=data.get("mime", ""),
-            name=data.get("name", ""),
-            file_id=data.get("file_id", ""),
-            index=int(data.get("index", 0)),
-        )
-
-
 @dataclass
 class NormalizedEvent:
     """OneBot 11 event reduced to a Hermes-neutral shape.
@@ -126,6 +115,8 @@ class NormalizedEvent:
     media_items: list[MediaItem] = field(default_factory=list)
     is_system_notice: bool = False  # True=合成系统事件(notice 转文本),插件侧据此设 internal=True
     rate_limit_eligible: bool = True  # 仅适配器内部使用,不写入 plugin 协议
+    delivery_id: str = ""
+    delivery_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -143,26 +134,8 @@ class NormalizedEvent:
             "real_seq": self.real_seq,
             "media_items": [m.to_dict() for m in self.media_items],
             "is_system_notice": self.is_system_notice,
-        }
-
-
-@dataclass
-class CommandInfo:
-    """A slash command registered in Hermes (builtin or plugin)."""
-
-    name: str
-    description: str = ""
-    source: str = ""           # "builtin" | plugin name | "context-engine:..."
-    aliases: list[str] = field(default_factory=list)
-    args_hint: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "source": self.source,
-            "aliases": list(self.aliases),
-            "args_hint": self.args_hint,
+            "delivery_id": self.delivery_id,
+            "delivery_ids": list(self.delivery_ids or ([self.delivery_id] if self.delivery_id else [])),
         }
 
 
@@ -171,7 +144,7 @@ class FilteredEvent:
     """A message event rejected by an adapter-side filter.
 
     Carries enough context for the adapter service to send a reject message
-    back to the originating chat via the OneBot HTTP API, without going
+    back to the originating chat via the OneBot WS API, without going
     through the Hermes plugin.  This is a process-internal Python object —
     it is never serialised onto the wire (the adapter's ``on_filtered``
     callback receives it directly).
@@ -235,19 +208,8 @@ def error_message(code: str, message: str) -> dict[str, Any]:
     return envelope("error", code=code, message=message)
 
 
-def ping_message() -> dict[str, Any]:
-    return envelope("ping")
-
-
 def pong_message() -> dict[str, Any]:
     return envelope("pong")
-
-
-def commands_snapshot_message(commands: list[CommandInfo]) -> dict[str, Any]:
-    """A->P: adapter service ← Hermes plugin.  Plugin pushes the full list of
-    slash commands registered in Hermes so the adapter can filter /commands
-    before forwarding messages to the plugin."""
-    return envelope("commands_snapshot", commands=[c.to_dict() for c in commands])
 
 
 def commands_refresh_message() -> dict[str, Any]:
@@ -283,13 +245,6 @@ def mode_refresh_message() -> dict[str, Any]:
     """A->P: adapter service → Hermes plugin.  Ask the plugin to re-read
     Hermes config and push a fresh ``hermes_mode_report`` frame."""
     return envelope("mode_refresh")
-
-
-def plugin_info_message(plugin_version: str) -> dict[str, Any]:
-    """P->A: Hermes plugin → adapter service.  Plugin reports its own version
-    (read from ``plugin.yaml`` at startup) so the adapter can detect version
-    mismatches and warn the user in the WebUI."""
-    return envelope("plugin_info", plugin_version=plugin_version)
 
 
 def parse_chat_id(chat_id: str) -> tuple[bool, int]:

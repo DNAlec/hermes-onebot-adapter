@@ -473,7 +473,7 @@ async def parse_event(
     # After @bot stripping (group) or on raw segments (DM), check whether the
     # message is a /command and whether the sender has permission to use it.
     # This runs *before* media placeholder rendering.  Returns a FilteredEvent
-    # when denied; the caller sends the reject message via the OneBot HTTP API
+    # when denied; the caller sends the reject message via the OneBot WS API
     # and skips Hermes forwarding.
     if config and config.resolve_command_filter_enabled(group_id if is_group else None):
         filtered = _check_command_filter(

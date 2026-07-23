@@ -627,28 +627,9 @@ def test_install_default_toolsets_contains_core_and_plugin(tmp_path: Path):
 # ── channel_prompts 读写 ──────────────────────────────────────────────────
 
 
-def test_read_channel_prompts_missing(hermes_dir: Path):
-    assert hc.read_channel_prompts(str(hermes_dir)) == {}
-
-
-def test_read_channel_prompts_present(tmp_path: Path):
-    d = tmp_path / "hermes"
-    d.mkdir()
-    (d / "config.yaml").write_text(
-        "platforms:\n"
-        "  onebot:\n"
-        "    channel_prompts:\n"
-        "      '42': '群42提示词'\n"
-        "      '43': '群43提示词'\n",
-        encoding="utf-8",
-    )
-    prompts = hc.read_channel_prompts(str(d))
-    assert prompts == {"42": "群42提示词", "43": "群43提示词"}
-
-
 def test_write_channel_prompts_creates_section(hermes_dir: Path):
     hc.write_channel_prompts(str(hermes_dir), {"42": "A", "43": "B"})
-    prompts = hc.read_channel_prompts(str(hermes_dir))
+    prompts = hc.read_config(str(hermes_dir))["platforms"]["onebot"]["channel_prompts"]
     assert prompts == {"42": "A", "43": "B"}
 
 
@@ -679,7 +660,7 @@ def test_materialize_channel_prompts_writes_global_and_custom(hermes_dir: Path):
         },
     )
     hc.materialize_channel_prompts(cfg, str(hermes_dir))
-    prompts = hc.read_channel_prompts(str(hermes_dir))
+    prompts = hc.read_config(str(hermes_dir))["platforms"]["onebot"]["channel_prompts"]
     assert prompts == {"42": "群42专属", "43": "全局默认提示词"}
 
 

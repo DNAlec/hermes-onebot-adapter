@@ -219,9 +219,3 @@ class NameResolver:
         except Exception as exc:
             logger.warning("name resolution failed for user %s: %s", user_id, exc)
             return ""
-
-    def invalidate(self, user_id: str, group_id: str = "") -> None:
-        """Manually invalidate cache for a user."""
-        cache_key = f"{group_id}:{user_id}" if group_id else f"dm:{user_id}"
-        self._cache.pop(cache_key, None)
-        self._locks.pop(cache_key, None)

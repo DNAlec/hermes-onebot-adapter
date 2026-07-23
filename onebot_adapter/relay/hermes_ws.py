@@ -19,6 +19,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 import aiohttp
@@ -126,7 +127,7 @@ class HermesRelayServer:
             maxlen=self._RING_BUFFER_SIZE,
         )
         # Slash-command registry pushed by the Hermes plugin.  Maps lowercase
-        # command name → CommandInfo dict.  Empty until the first
+        # command name → command metadata dict.  Empty until the first
         # ``commands_snapshot`` frame is received.
         self._commands: dict[str, dict[str, Any]] = {}
         self._commands_aliases: dict[str, str] = {}  # alias → canonical name
@@ -392,11 +393,19 @@ class HermesRelayServer:
             return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         ws = aiohttp.web.WebSocketResponse()
         await ws.prepare(request)
-        self._clients.add(ws)
+        role = request.query.get("role", "consumer")
+        is_consumer = role != "rpc"
+        if is_consumer:
+            # The gateway has exactly one event-consumer connection.  Closing
+            # an overlapping stale connection prevents duplicate event
+            # delivery during reconnect races.
+            for old_ws in list(self._clients):
+                await old_ws.close(code=1001, message=b"replaced by new consumer")
+            self._clients.add(ws)
         my_tasks: set[asyncio.Task] = set()
-        if self._on_connect:
+        if is_consumer and self._on_connect:
             self._on_connect()
-        logger.info("Hermes plugin WS connected from %s", request.remote)
+        logger.info("Hermes %s WS connected from %s", role, request.remote)
         await ws.send_json(
             ready_message(
                 onebot_connected=self._onebot_connected_fn(),
@@ -406,7 +415,7 @@ class HermesRelayServer:
             )
         )
         # Replay buffered events so a reconnecting plugin doesn't miss messages.
-        replay_ok = await self._replay_ring_buffer(ws)
+        replay_ok = await self._replay_ring_buffer(ws) if is_consumer else True
         if not replay_ok:
             logger.warning("relay: closing plugin WS after ring buffer replay failure")
             await ws.close()
@@ -422,8 +431,9 @@ class HermesRelayServer:
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
         finally:
-            self._clients.discard(ws)
-            if self._on_disconnect:
+            if is_consumer:
+                self._clients.discard(ws)
+            if is_consumer and self._on_disconnect:
                 self._on_disconnect()
             # Cancel this client's in-flight tasks: they hold references to
             # the now-closed ws and would otherwise log misleading "send
@@ -438,7 +448,7 @@ class HermesRelayServer:
             # no one remains to fire idle frames, so busy slots would otherwise
             # hang until the watchdog times them out.  Clearing immediately
             # lets a reconnecting plugin start fresh.
-            if not self._clients:
+            if is_consumer and not self._clients:
                 if self._busy_groups:
                     logger.info(
                         "relay: last plugin disconnected, clearing %d busy group(s)",
@@ -448,7 +458,7 @@ class HermesRelayServer:
                 self._queues.clear()
                 self._plugin_version = None
                 self._version_mismatch = True
-            logger.info("Hermes plugin WS disconnected")
+            logger.info("Hermes %s WS disconnected", role)
         return ws
 
     # ── Inbound push (adapter -> plugin) ───────────────────────────────
@@ -473,6 +483,10 @@ class HermesRelayServer:
         # Skip slash commands from the ring buffer — control commands like
         # /restart, /stop, /update must not be replayed to a reconnecting
         # plugin, otherwise they create an infinite restart loop.
+        if not event.delivery_id:
+            event.delivery_id = uuid.uuid4().hex
+        if not event.delivery_ids:
+            event.delivery_ids = [event.delivery_id]
         if not (event.text or "").startswith("/"):
             self._ring_buffer.append((time.monotonic(), event))
         return await self._enqueue_or_broadcast(event)
@@ -520,6 +534,7 @@ class HermesRelayServer:
                     # No client received the event — roll back the busy claim so
                     # the next message (or reconnect replay) can try again.
                     self._busy_groups.pop(gid, None)
+                    self._schedule_group_lock_cleanup(gid)
                 return result
             # Group busy — enqueue (all users, including the busy user).
             busy_user_id, _ = busy
@@ -551,8 +566,8 @@ class HermesRelayServer:
                 event.chat_id, (event.text or "")[:120],
             )
             return "dropped"
-        await self._broadcast_event(event)
-        return "broadcast"
+        delivered = await self._broadcast_event(event)
+        return "dropped" if delivered is False else "broadcast"
 
     def _get_group_lock(self, gid: str) -> asyncio.Lock:
         """Get or create a per-group lock for queue state protection.
@@ -566,6 +581,20 @@ class HermesRelayServer:
             lock = asyncio.Lock()
             self._group_locks[gid] = lock
         return lock
+
+    def _schedule_group_lock_cleanup(self, gid: str) -> None:
+        """Drop idle per-group locks after the current critical section exits."""
+        def _cleanup() -> None:
+            lock = self._group_locks.get(gid)
+            if (
+                lock is not None
+                and not lock.locked()
+                and gid not in self._busy_groups
+                and not self._queues.get(gid)
+            ):
+                self._group_locks.pop(gid, None)
+
+        asyncio.get_running_loop().call_soon(_cleanup)
 
     @staticmethod
     def _group_id_of(event: NormalizedEvent) -> str | None:
@@ -610,6 +639,7 @@ class HermesRelayServer:
                     )
                     async with self._get_group_lock(gid):
                         self._dequeue_and_dispatch(gid)
+                    self._schedule_group_lock_cleanup(gid)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -643,14 +673,35 @@ class HermesRelayServer:
                 self._queues.pop(gid, None)
             return
         nxt = q.popleft()
+        # Queue entries also live in the replay buffer.  Never mutate the
+        # original object while constructing a merged dispatch.
+        nxt = replace(
+            nxt,
+            media_items=list(nxt.media_items),
+            delivery_ids=list(nxt.delivery_ids or ([nxt.delivery_id] if nxt.delivery_id else [])),
+        )
         # Merge consecutive messages from the same user
         merged_count = 1
-        while q and q[0].user_id == nxt.user_id:
+        while (
+            q
+            and q[0].user_id == nxt.user_id
+            and not nxt.media_items
+            and not q[0].media_items
+            and not nxt.reply_to_message_id
+            and not q[0].reply_to_message_id
+            and not nxt.is_system_notice
+            and not q[0].is_system_notice
+        ):
             next_msg = q.popleft()
             if next_msg.text:
                 nxt.text = (nxt.text or "") + "\n\n" + next_msg.text
             nxt.timestamp = next_msg.timestamp
             nxt.message_id = next_msg.message_id
+            nxt.real_seq = next_msg.real_seq
+            nxt.delivery_ids.extend(
+                next_msg.delivery_ids
+                or ([next_msg.delivery_id] if next_msg.delivery_id else [])
+            )
             merged_count += 1
         if merged_count > 1:
             logger.info(
@@ -666,8 +717,14 @@ class HermesRelayServer:
         # was actually delivered (at least one client received it).
         async def _dispatch_nxt() -> None:
             delivered = await self._broadcast_event(nxt)
-            if delivered and self._on_dispatch is not None:
+            if delivered is not False and self._on_dispatch is not None:
                 await self._on_dispatch(nxt)
+            elif delivered is False:
+                async with self._get_group_lock(gid):
+                    current = self._busy_groups.get(gid)
+                    if current and current[0] == nxt.user_id:
+                        self._busy_groups.pop(gid, None)
+                self._schedule_group_lock_cleanup(gid)
 
         task = asyncio.create_task(_dispatch_nxt())
         self._text_tasks.add(task)
@@ -706,6 +763,7 @@ class HermesRelayServer:
                 gid,
             )
             self._dequeue_and_dispatch(gid)
+        self._schedule_group_lock_cleanup(gid)
 
     async def _handle_idle(self, data: dict[str, Any]) -> None:
         """Handle an ``idle`` frame from the Hermes plugin.
@@ -735,6 +793,7 @@ class HermesRelayServer:
                 return
             logger.info("relay idle: gid=%s — dispatching next queued", gid)
             self._dequeue_and_dispatch(gid)
+        self._schedule_group_lock_cleanup(gid)
 
     async def _broadcast_event(self, event: NormalizedEvent) -> bool:
         """Broadcast *event* to all connected plugin clients.
@@ -862,7 +921,27 @@ class HermesRelayServer:
         if mtype == "plugin_info":
             self._store_plugin_version(str(data.get("plugin_version", "")))
             return
+        if mtype == "event_ack":
+            self._handle_event_ack(data)
+            return
         await ws.send_json(error_message("unknown_type", f"unknown type {mtype!r}"))
+
+    def _handle_event_ack(self, data: dict[str, Any]) -> None:
+        """Remove successfully processed deliveries from the replay buffer."""
+        acked = {str(x) for x in (data.get("delivery_ids") or []) if x}
+        single = str(data.get("delivery_id", "") or "")
+        if single:
+            acked.add(single)
+        if not acked:
+            return
+        for entry in list(self._ring_buffer):
+            event = entry[1]
+            ids = set(event.delivery_ids or ([event.delivery_id] if event.delivery_id else []))
+            if ids and ids.issubset(acked):
+                try:
+                    self._ring_buffer.remove(entry)
+                except ValueError:
+                    pass
 
     async def _handle_send(self, ws: aiohttp.web.WebSocketResponse, data: dict[str, Any]) -> None:
         req_id = data.get("req_id", str(uuid.uuid4()))
@@ -1148,7 +1227,7 @@ class HermesRelayServer:
         return params
 
     async def send_reject_message(self, chat_id: str, message: str, reply_to: str | None = None) -> bool:
-        """Send a reject reply directly via the OneBot HTTP API (bypassing
+        """Send a reject reply directly via the OneBot WS API (bypassing
         the Hermes plugin).  Used by the command filter to notify users that
         their /command was denied.  Returns True on success."""
         try:

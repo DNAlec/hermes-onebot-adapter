@@ -22,7 +22,15 @@ import aiohttp.web
 
 from onebot_adapter import __version__
 from onebot_adapter.bot_blacklist import BotBlacklistStore
-from onebot_adapter.config import AdapterConfig, ConfigStore, config_path, ensure_tokens, load_config, save_config
+from onebot_adapter.config import (
+    AdapterConfig,
+    ConfigLoadError,
+    ConfigStore,
+    config_path,
+    ensure_tokens,
+    load_config,
+    save_config,
+)
 from onebot_adapter.onebot.api import OneBotApi
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
@@ -77,6 +85,9 @@ class AdapterService:
         self._usage_stats: UsageStatsStore | None = None
         self._bot_blacklist: BotBlacklistStore | None = None
         self._rate_limiter = MessageRateLimiter()
+        self._config_change_lock = asyncio.Lock()
+        self._applied_config = self.store.config
+        self._probe_task: asyncio.Task[None] | None = None
 
     def _init_components(self) -> None:
         cfg = self.store.config
@@ -230,7 +241,8 @@ class AdapterService:
         """
         self._update_status()
         if not self._self_id_probed and self.store.config.self_id == "":
-            asyncio.create_task(self._probe_self_id_guarded())
+            if self._probe_task is None or self._probe_task.done():
+                self._probe_task = asyncio.create_task(self._probe_self_id_guarded())
 
     async def _probe_self_id_guarded(self) -> None:
         """Concurrent-safe wrapper: only one probe at a time."""
@@ -376,7 +388,7 @@ class AdapterService:
         """Handle an event denied by an adapter-side filter.
 
         Sends the reject message back to the originating chat via the OneBot
-        HTTP API (through the relay) and does NOT forward the event to the
+        WS API channel (through the relay) and does NOT forward the event to the
         Hermes plugin.
         """
         logger.debug(
@@ -454,6 +466,7 @@ class AdapterService:
 
     async def _on_hermes_startup(self, app: aiohttp.web.Application) -> None:
         cfg = self.store.config
+        self._applied_config = cfg
         logger.info(
             "OneBot adapter %s | onebot_mode=%s onebot_port=%d hermes_ws_port=%d webui_port=%d",
             __version__, cfg.onebot_mode, cfg.onebot_reverse_ws_port, cfg.hermes_ws_port, cfg.webui_port,
@@ -466,6 +479,11 @@ class AdapterService:
         if self._cleaning_up:
             return
         self._cleaning_up = True
+        await self.store.close_notifications()
+        if self._probe_task is not None and not self._probe_task.done():
+            self._probe_task.cancel()
+            await asyncio.gather(self._probe_task, return_exceptions=True)
+        self._probe_task = None
         if self._onebot_forward:
             await self._onebot_forward.stop()
         if self._onebot_reverse:
@@ -498,6 +516,15 @@ class AdapterService:
         logger.info("OneBot adapter stopped")
 
     async def _on_config_change(self, old: AdapterConfig, new: AdapterConfig) -> None:
+        async with self._config_change_lock:
+            current = self.store.config
+            target = new if current == old else current
+            if target == self._applied_config:
+                return
+            await self._apply_config_change(self._applied_config, target)
+            self._applied_config = target
+
+    async def _apply_config_change(self, old: AdapterConfig, new: AdapterConfig) -> None:
         """Handle config changes from the WebUI (hot-reload).
 
         Registered as an async callback — the ConfigStore schedules it via
@@ -710,9 +737,18 @@ class AdapterService:
 def run(host: str = "127.0.0.1", port: int | None = None, no_webui: bool = False) -> None:
     cfg_path = config_path()
     logger.info("loading config from %s (exists=%s)", cfg_path, cfg_path.exists())
-    old_cfg = load_config()
+    try:
+        old_cfg = load_config()
+    except ConfigLoadError as exc:
+        raise SystemExit(str(exc)) from exc
     webui_token_was_empty = not old_cfg.webui_token
     cfg = ensure_tokens(old_cfg)
+    try:
+        errors = cfg.validate()
+    except Exception as exc:
+        raise SystemExit(f"invalid configuration: {exc}") from exc
+    if errors:
+        raise SystemExit("invalid configuration: " + "; ".join(errors))
     store = ConfigStore(cfg)
     if port and not no_webui:
         store.patch(webui_port=port)

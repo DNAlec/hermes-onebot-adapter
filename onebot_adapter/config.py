@@ -18,6 +18,10 @@ from onebot_adapter._async_utils import log_task_exception
 logger = logging.getLogger(__name__)
 
 
+class ConfigLoadError(RuntimeError):
+    """Raised when an existing configuration cannot be read safely."""
+
+
 CONFIG_ENV = "ONEBOT_ADAPTER_CONFIG"
 DEFAULT_CONFIG_PATH = Path.home() / ".onebot_adapter" / "config.json"
 
@@ -58,8 +62,7 @@ DEFAULT_CHANNEL_PROMPT = (
     "  私聊前缀无 # 序号;拿不到 real_seq 时回退显示全局消息 ID(message_id)\n"
     "- @ 段显示为 @QQ号(昵称);未知用户为 @QQ号(未知用户)\n"
     "- 媒体占位符: [图1] [视频1] [语音1] [文件1:report.pdf],编号全局连续\n"
-    "- 媒体跳过/失败: [图1](已跳过:超出数量限制:已下载10个达到上限10) 或 "
-    "[图1](已跳过:下载失败) 或 [语音1](语音转换失败,保留原始格式)\n"
+    "- 媒体缓存失败时仍保留对应占位符；文件没有 URL 时可使用 onebot_get_file 工具获取\n"
     "- 引用回复:被引用消息在 reply_to_text 字段(独立于主 text),格式 [昵称(QQ号)#群内序号]: 文本\n"
     "- 合并转发:\n"
     "  [合并转发开始:1]\n"
@@ -577,9 +580,6 @@ class AdapterConfig:
     def from_dict(cls, data: dict[str, Any]) -> AdapterConfig:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
-        # Migrate legacy field name: platform_hint -> global_channel_prompt
-        if "platform_hint" in data and "global_channel_prompt" not in filtered:
-            filtered["global_channel_prompt"] = data["platform_hint"]
         return cls(**filtered)
 
     def with_overrides(self, **changes: Any) -> AdapterConfig:
@@ -598,20 +598,24 @@ def load_config(path: Path | None = None) -> AdapterConfig:
     if not target.exists():
         logger.warning("config file not found at %s, using defaults", target)
         return AdapterConfig()
+    stat = None
     try:
         stat = target.stat()
         data = json.loads(target.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning(
-            "config load failed (%s, mtime=%s, size=%s), using defaults: %s",
-            target,
-            getattr(stat, "st_mtime", "?"),
-            getattr(stat, "st_size", "?"),
-            exc,
+        if not isinstance(data, dict):
+            raise ConfigLoadError("configuration root must be a JSON object")
+        cfg = AdapterConfig.from_dict(data)
+        logger.info("config loaded from %s (mtime=%s, size=%d)", target, stat.st_mtime, stat.st_size)
+        return cfg
+    except ConfigLoadError:
+        raise
+    except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        message = (
+            f"config load failed at {target} "
+            f"(mtime={getattr(stat, 'st_mtime', '?')}, size={getattr(stat, 'st_size', '?')}): {exc}"
         )
-        return AdapterConfig()
-    logger.info("config loaded from %s (mtime=%s, size=%d)", target, stat.st_mtime, stat.st_size)
-    return AdapterConfig.from_dict(data)
+        logger.error(message)
+        raise ConfigLoadError(message) from exc
 
 
 def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
@@ -740,6 +744,7 @@ class ConfigStore:
         self._cfg = cfg or AdapterConfig()
         self._lock = threading.Lock()
         self._listeners: list = []
+        self._listener_tasks: set[asyncio.Task] = set()
 
     @property
     def config(self) -> AdapterConfig:
@@ -758,6 +763,8 @@ class ConfigStore:
                     try:
                         loop = asyncio.get_running_loop()
                         task = loop.create_task(result)
+                        self._listener_tasks.add(task)
+                        task.add_done_callback(self._listener_tasks.discard)
                         task.add_done_callback(log_task_exception)
                     except RuntimeError:
                         result.close()
@@ -775,3 +782,11 @@ class ConfigStore:
     def on_change(self, cb) -> None:
         with self._lock:
             self._listeners.append(cb)
+
+    async def close_notifications(self) -> None:
+        """Cancel and await outstanding asynchronous change listeners."""
+        for task in list(self._listener_tasks):
+            task.cancel()
+        if self._listener_tasks:
+            await asyncio.gather(*self._listener_tasks, return_exceptions=True)
+        self._listener_tasks.clear()
