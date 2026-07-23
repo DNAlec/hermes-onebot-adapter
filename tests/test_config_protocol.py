@@ -91,6 +91,7 @@ def test_normalized_event_is_system_notice_default():
     assert ev.is_system_notice is False
     d = ev.to_dict()
     assert d["is_system_notice"] is False
+    assert "rate_limit_eligible" not in d
 
 
 def test_normalized_event_is_system_notice_true():

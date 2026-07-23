@@ -39,6 +39,10 @@ COMMAND_PERM_DISABLED = "disabled"
 _VALID_COMMAND_PERM_LEVELS = {COMMAND_PERM_EVERYONE, COMMAND_PERM_ADMIN, COMMAND_PERM_DISABLED}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
+RATE_LIMIT_SLIDING_WINDOW = "sliding_window"
+RATE_LIMIT_TOKEN_BUCKET = "token_bucket"
+_VALID_RATE_LIMIT_ALGORITHMS = {RATE_LIMIT_SLIDING_WINDOW, RATE_LIMIT_TOKEN_BUCKET}
+
 DEFAULT_CHANNEL_PROMPT = (
     "# 平台特性\n"
     "你正通过 OneBot(QQ) 对话。QQ 不渲染 Markdown,仅纯文本(系统会自动剥离 Markdown 语法,但请尽量直接输出纯文本)。\n"
@@ -114,6 +118,10 @@ class GroupConfig:
     # ── notice 事件推送（None=跟随全局）──
     notify_poke_enabled: bool | None = None            # 戳一戳(bot 被戳)推送,None=跟随全局
     notify_member_change_enabled: bool | None = None   # 群成员进退群推送,None=跟随全局
+    # ── 群聊消息限流（None=跟随全局群聊限流配置）──
+    group_rate_limit_algorithm: str | None = None
+    group_rate_limit_messages: int | None = None
+    group_rate_limit_window_seconds: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -197,6 +205,19 @@ class AdapterConfig:
     event_queue_max_per_chat: int = 50          # 单群排队上限,超限拒绝入队
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
 
+    # ── 入站消息限流（限额 0=禁用该维度）──
+    rate_limit_enabled: bool = False
+    global_rate_limit_algorithm: str = RATE_LIMIT_SLIDING_WINDOW
+    global_rate_limit_messages: int = 0
+    global_rate_limit_window_seconds: float = 0.0
+    group_rate_limit_algorithm: str = RATE_LIMIT_SLIDING_WINDOW
+    group_rate_limit_messages: int = 0
+    group_rate_limit_window_seconds: float = 0.0
+    user_rate_limit_algorithm: str = RATE_LIMIT_SLIDING_WINDOW
+    user_rate_limit_messages: int = 0
+    user_rate_limit_window_seconds: float = 0.0
+    rate_limit_reject_message: str = "⛔ 消息发送过于频繁，请在 {retry_after} 秒后重试"
+
     # ── 媒体投递 ──
     media_delivery_mode: str = MEDIA_DELIVERY_CACHE  # "passthrough"(URL 占位符) | "cache"(默认,插件侧下载落盘)
 
@@ -245,6 +266,24 @@ class AdapterConfig:
             errors.append("event_queue_max_per_chat must be at least 1")
         if self.event_queue_idle_timeout <= 0:
             errors.append("event_queue_idle_timeout must be positive")
+        if not isinstance(self.rate_limit_enabled, bool):
+            errors.append("rate_limit_enabled must be bool")
+        for scope in ("global", "group", "user"):
+            algorithm = getattr(self, f"{scope}_rate_limit_algorithm")
+            messages = getattr(self, f"{scope}_rate_limit_messages")
+            window = getattr(self, f"{scope}_rate_limit_window_seconds")
+            if algorithm not in _VALID_RATE_LIMIT_ALGORITHMS:
+                errors.append(
+                    f"{scope}_rate_limit_algorithm must be one of {sorted(_VALID_RATE_LIMIT_ALGORITHMS)}"
+                )
+            if not isinstance(messages, int) or isinstance(messages, bool) or messages < 0:
+                errors.append(f"{scope}_rate_limit_messages must be a non-negative integer")
+            if not isinstance(window, (int, float)) or isinstance(window, bool) or window < 0:
+                errors.append(f"{scope}_rate_limit_window_seconds must be non-negative")
+            elif isinstance(messages, int) and not isinstance(messages, bool) and messages > 0 and window <= 0:
+                errors.append(f"{scope}_rate_limit_window_seconds must be positive when the limit is enabled")
+        if not isinstance(self.rate_limit_reject_message, str) or not self.rate_limit_reject_message:
+            errors.append("rate_limit_reject_message must not be empty")
         if not isinstance(self.bot_blacklist_enabled, bool):
             errors.append("bot_blacklist_enabled must be bool")
         if not isinstance(self.bot_blacklist_max_duration_seconds, int) \
@@ -293,6 +332,45 @@ class AdapterConfig:
                 errors.append(f"group {gid} notify_poke_enabled must be bool or null")
             if gc.notify_member_change_enabled is not None and not isinstance(gc.notify_member_change_enabled, bool):
                 errors.append(f"group {gid} notify_member_change_enabled must be bool or null")
+            if (
+                gc.group_rate_limit_algorithm is not None
+                and gc.group_rate_limit_algorithm not in _VALID_RATE_LIMIT_ALGORITHMS
+            ):
+                errors.append(
+                    f"group {gid} group_rate_limit_algorithm must be one of "
+                    f"{sorted(_VALID_RATE_LIMIT_ALGORITHMS)} or null"
+                )
+            if (
+                gc.group_rate_limit_messages is not None
+                and (
+                    not isinstance(gc.group_rate_limit_messages, int)
+                    or isinstance(gc.group_rate_limit_messages, bool)
+                    or gc.group_rate_limit_messages < 0
+                )
+            ):
+                errors.append(f"group {gid} group_rate_limit_messages must be a non-negative integer or null")
+            if (
+                gc.group_rate_limit_window_seconds is not None
+                and (
+                    not isinstance(gc.group_rate_limit_window_seconds, (int, float))
+                    or isinstance(gc.group_rate_limit_window_seconds, bool)
+                    or gc.group_rate_limit_window_seconds < 0
+                )
+            ):
+                errors.append(f"group {gid} group_rate_limit_window_seconds must be non-negative or null")
+            resolved_messages = self.resolve_group_rate_limit_messages(gid)
+            resolved_window = self.resolve_group_rate_limit_window_seconds(gid)
+            if (
+                isinstance(resolved_messages, int)
+                and not isinstance(resolved_messages, bool)
+                and isinstance(resolved_window, (int, float))
+                and not isinstance(resolved_window, bool)
+                and resolved_messages > 0
+                and resolved_window <= 0
+            ):
+                errors.append(
+                    f"group {gid} group_rate_limit_window_seconds must be positive when the limit is enabled"
+                )
             if gc.command_permissions is not None:
                 for cmd, perm in gc.command_permissions.items():
                     if perm not in _VALID_COMMAND_PERM_LEVELS:
@@ -383,6 +461,22 @@ class AdapterConfig:
             if gc.reaction_emoji_enabled is not None:
                 return gc.reaction_emoji_enabled
         return self.reaction_emoji_enabled
+
+    def resolve_group_rate_limit_algorithm(self, group_id: str) -> str:
+        gc = self.get_group_config(group_id)
+        return gc.group_rate_limit_algorithm or self.group_rate_limit_algorithm
+
+    def resolve_group_rate_limit_messages(self, group_id: str) -> int:
+        gc = self.get_group_config(group_id)
+        if gc.group_rate_limit_messages is not None:
+            return gc.group_rate_limit_messages
+        return self.group_rate_limit_messages
+
+    def resolve_group_rate_limit_window_seconds(self, group_id: str) -> float:
+        gc = self.get_group_config(group_id)
+        if gc.group_rate_limit_window_seconds is not None:
+            return gc.group_rate_limit_window_seconds
+        return self.group_rate_limit_window_seconds
 
     # ── notice 事件推送解析 ──
 
@@ -547,6 +641,17 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
                               "是否对群消息排队串行处理",
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
+        "rate_limit_enabled": "入站消息限流总开关;全局/群聊/个人三个维度同时检查,管理员豁免",
+        "global_rate_limit_algorithm": "全局限流算法:sliding_window(滑动窗口)|token_bucket(令牌桶)",
+        "global_rate_limit_messages": "全局限流消息数;0=禁用该维度",
+        "global_rate_limit_window_seconds": "全局限流窗口秒数",
+        "group_rate_limit_algorithm": "群聊限流算法;群配置可单独覆盖",
+        "group_rate_limit_messages": "每个群聊的限流消息数;0=禁用该维度;群配置可覆盖",
+        "group_rate_limit_window_seconds": "群聊限流窗口秒数;群配置可覆盖",
+        "user_rate_limit_algorithm": "个人限流算法;同一QQ在私聊和所有群共享计数",
+        "user_rate_limit_messages": "每个QQ的限流消息数;0=禁用该维度",
+        "user_rate_limit_window_seconds": "个人限流窗口秒数",
+        "rate_limit_reject_message": "限流提示模板;支持 {scope}/{retry_after}/{user_id}",
         "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
         "media_delivery_mode": "可选值: passthrough(URL 占位符直传) | cache(插件侧下载落盘到 ~/.hermes/cache/,默认)",
         "global_channel_prompt": "全局提示词;保存时物化写入 Hermes config.yaml 的"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import logging
+import math
 import os
 import signal
 from collections import deque
@@ -28,8 +29,9 @@ from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.onebot.ws_api import WsApiTransport
 from onebot_adapter.onebot.ws_forward import OneBotForwardClient
 from onebot_adapter.onebot.ws_reverse import OneBotReverseServer
+from onebot_adapter.rate_limit import MessageRateLimiter
 from onebot_adapter.relay.hermes_ws import HermesRelayServer
-from onebot_adapter.relay.protocol import parse_chat_id
+from onebot_adapter.relay.protocol import FilteredEvent, parse_chat_id
 from onebot_adapter.usage_stats import UsageStatsStore
 from onebot_adapter.webui import routes as webui_routes
 
@@ -74,6 +76,7 @@ class AdapterService:
         self._cleaning_up = False
         self._usage_stats: UsageStatsStore | None = None
         self._bot_blacklist: BotBlacklistStore | None = None
+        self._rate_limiter = MessageRateLimiter()
 
     def _init_components(self) -> None:
         cfg = self.store.config
@@ -256,6 +259,49 @@ class AdapterService:
 
     async def _on_onebot_event(self, event) -> None:
         self._update_status()
+        cfg = self.store.config
+        group_id: str | None = None
+        try:
+            is_group, numeric_id = parse_chat_id(event.chat_id)
+            if is_group:
+                group_id = str(numeric_id)
+        except (TypeError, ValueError):
+            pass
+        if (
+            event.rate_limit_eligible
+            and not cfg.is_admin(event.user_id, group_id)
+        ):
+            decision = await self._rate_limiter.check(
+                cfg,
+                user_id=event.user_id,
+                group_id=group_id,
+            )
+            if not decision.allowed:
+                scope_labels = {"global": "全局", "group": "群聊", "user": "个人"}
+                retry_after = max(1, math.ceil(decision.retry_after))
+                message = cfg.rate_limit_reject_message
+                replacements = {
+                    "{scope}": scope_labels.get(decision.scope, decision.scope),
+                    "{retry_after}": str(retry_after),
+                    "{user_id}": str(event.user_id),
+                }
+                for placeholder, value in replacements.items():
+                    message = message.replace(placeholder, value)
+                await self._on_filtered_command(
+                    FilteredEvent(
+                        chat_id=event.chat_id,
+                        chat_type=event.chat_type,
+                        user_id=event.user_id,
+                        user_name=event.user_name,
+                        command_name="",
+                        reject_message=message,
+                        message_id=event.message_id,
+                        reply_to_message_id=event.message_id or None,
+                        timestamp=event.timestamp,
+                        filter_type="rate_limit",
+                    )
+                )
+                return
         if self.store.config.usage_stats_enabled and self._usage_stats is not None:
             try:
                 await self._usage_stats.record(event)
@@ -470,6 +516,8 @@ class AdapterService:
         if self._seq_map and old.seq_map_size != new.seq_map_size:
             self._seq_map.update_maxlen(new.seq_map_size)
             logger.info("SeqMap size changed: %d -> %d", old.seq_map_size, new.seq_map_size)
+        if old.rate_limit_enabled and not new.rate_limit_enabled:
+            self._rate_limiter.clear()
 
         # File logging hot-reload
         self._update_file_logging(old, new)
