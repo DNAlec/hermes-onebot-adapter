@@ -144,6 +144,17 @@ async function saveGlobal() {
       event_queue_enabled: c.event_queue_enabled,
       event_queue_max_per_chat: c.event_queue_max_per_chat,
       event_queue_idle_timeout: c.event_queue_idle_timeout,
+      rate_limit_enabled: c.rate_limit_enabled,
+      global_rate_limit_algorithm: c.global_rate_limit_algorithm,
+      global_rate_limit_messages: c.global_rate_limit_messages,
+      global_rate_limit_window_seconds: c.global_rate_limit_window_seconds,
+      group_rate_limit_algorithm: c.group_rate_limit_algorithm,
+      group_rate_limit_messages: c.group_rate_limit_messages,
+      group_rate_limit_window_seconds: c.group_rate_limit_window_seconds,
+      user_rate_limit_algorithm: c.user_rate_limit_algorithm,
+      user_rate_limit_messages: c.user_rate_limit_messages,
+      user_rate_limit_window_seconds: c.user_rate_limit_window_seconds,
+      rate_limit_reject_message: c.rate_limit_reject_message,
       media_delivery_mode: c.media_delivery_mode,
       global_channel_prompt: c.global_channel_prompt,
       notify_poke_enabled: c.notify_poke_enabled,
@@ -186,6 +197,9 @@ function addGroup() {
     reaction_emoji_enabled: null,
     command_filter_enabled: null, command_filter_unknown: null, command_permissions: null,
     notify_poke_enabled: null, notify_member_change_enabled: null,
+    group_rate_limit_algorithm: null,
+    group_rate_limit_messages: null,
+    group_rate_limit_window_seconds: null,
   };
   showEditor.value = true;
 }
@@ -240,6 +254,19 @@ function addTag(list: string[], value: string) {
 }
 function removeTag(list: string[], idx: number) {
   list.splice(idx, 1);
+}
+
+function toggleGroupRateLimitOverride(enabled: boolean) {
+  if (!editingGroup.value) return;
+  if (!enabled) {
+    editingGroup.value.group_rate_limit_algorithm = null;
+    editingGroup.value.group_rate_limit_messages = null;
+    editingGroup.value.group_rate_limit_window_seconds = null;
+    return;
+  }
+  editingGroup.value.group_rate_limit_algorithm = cfg.value?.group_rate_limit_algorithm || "sliding_window";
+  editingGroup.value.group_rate_limit_messages = cfg.value?.group_rate_limit_messages || 0;
+  editingGroup.value.group_rate_limit_window_seconds = cfg.value?.group_rate_limit_window_seconds || 0;
 }
 
 const cmdPermsError = ref("");
@@ -341,6 +368,59 @@ function resetHint() {
           <span class="hint">消息进入排队队列时贴的表情，空=不贴（默认 123）</span>
         </label>
       </div>
+    </div>
+
+    <!-- 入站消息限流 -->
+    <div v-if="cfg" class="section">
+      <h3>入站消息限流</h3>
+      <p class="hint">
+        现有准入和指令过滤通过后再计数。全局、群聊、个人三个维度同时生效，命中任一维度即回复原消息并拦截。
+        全局管理员和对应群管理员不受限流；个人计数在私聊和所有群之间共享。限额 0 表示禁用该维度。
+      </p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.rate_limit_enabled" />
+        <span>启用消息限流</span>
+      </label>
+      <div class="grid2 rate-limit-grid">
+        <fieldset>
+          <legend>全局总量</legend>
+          <label>算法
+            <select v-model="cfg.global_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限 <input type="number" v-model.number="cfg.global_rate_limit_messages" min="0" /></label>
+          <label>窗口（秒） <input type="number" v-model.number="cfg.global_rate_limit_window_seconds" min="0" step="0.1" /></label>
+        </fieldset>
+        <fieldset>
+          <legend>每个群聊</legend>
+          <label>算法
+            <select v-model="cfg.group_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限 <input type="number" v-model.number="cfg.group_rate_limit_messages" min="0" /></label>
+          <label>窗口（秒） <input type="number" v-model.number="cfg.group_rate_limit_window_seconds" min="0" step="0.1" /></label>
+        </fieldset>
+        <fieldset>
+          <legend>每个用户</legend>
+          <label>算法
+            <select v-model="cfg.user_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限 <input type="number" v-model.number="cfg.user_rate_limit_messages" min="0" /></label>
+          <label>窗口（秒） <input type="number" v-model.number="cfg.user_rate_limit_window_seconds" min="0" step="0.1" /></label>
+        </fieldset>
+      </div>
+      <label class="full">
+        拦截提示模板
+        <input v-model="cfg.rate_limit_reject_message" />
+        <span class="hint">支持 {scope}、{retry_after}、{user_id}；等待时间向上取整为秒。</span>
+      </label>
     </div>
 
     <!-- Bot 动态用户黑名单 -->
@@ -685,6 +765,32 @@ function resetHint() {
         </label>
 
         <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);" />
+        <h4 style="margin: 0 0 0.75rem; font-size: 0.95rem;">群聊消息限流</h4>
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            :checked="editingGroup.group_rate_limit_messages !== null"
+            @change="toggleGroupRateLimitOverride(($event.target as HTMLInputElement).checked)"
+          />
+          <span>覆盖全局群聊限流配置</span>
+        </label>
+        <template v-if="editingGroup.group_rate_limit_messages !== null">
+          <label>算法
+            <select v-model="editingGroup.group_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限
+            <input type="number" v-model.number="editingGroup.group_rate_limit_messages" min="0" />
+            <span class="hint">0 表示仅在此群禁用群聊维度；全局和个人维度仍会生效。</span>
+          </label>
+          <label>窗口（秒）
+            <input type="number" v-model.number="editingGroup.group_rate_limit_window_seconds" min="0" step="0.1" />
+          </label>
+        </template>
+
+        <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);" />
         <h4 style="margin: 0 0 0.75rem; font-size: 0.95rem;">消息显示</h4>
 
         <label>
@@ -778,6 +884,8 @@ function resetHint() {
 .section-header h3 { margin: 0; border: none; padding: 0; }
 .actions { display: flex; gap: 0.5rem; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+.rate-limit-grid fieldset { border: 1px solid var(--border); border-radius: 6px; padding: 0.9rem; display: grid; gap: 0.75rem; }
+.rate-limit-grid legend { color: var(--primary); font-weight: 600; padding: 0 0.35rem; }
 label { display: block; margin-bottom: 0.75rem; font-weight: 500; font-size: 0.9rem; }
 label.full { width: 100%; }
 .grid2 > label.full { grid-column: 1 / -1; }

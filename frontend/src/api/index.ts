@@ -92,6 +92,9 @@ export interface GroupConfig {
   command_permissions: Record<string, string> | null;
   notify_poke_enabled: boolean | null;
   notify_member_change_enabled: boolean | null;
+  group_rate_limit_algorithm: string | null;
+  group_rate_limit_messages: number | null;
+  group_rate_limit_window_seconds: number | null;
 }
 
 export interface Config {
@@ -139,6 +142,18 @@ export interface Config {
   event_queue_enabled: boolean;
   event_queue_max_per_chat: number;
   event_queue_idle_timeout: number;
+  // ── 入站消息限流 ──
+  rate_limit_enabled: boolean;
+  global_rate_limit_algorithm: string;
+  global_rate_limit_messages: number;
+  global_rate_limit_window_seconds: number;
+  group_rate_limit_algorithm: string;
+  group_rate_limit_messages: number;
+  group_rate_limit_window_seconds: number;
+  user_rate_limit_algorithm: string;
+  user_rate_limit_messages: number;
+  user_rate_limit_window_seconds: number;
+  rate_limit_reject_message: string;
   // ── 媒体投递 ──
   media_delivery_mode: string;
   // ── /指令过滤 ──

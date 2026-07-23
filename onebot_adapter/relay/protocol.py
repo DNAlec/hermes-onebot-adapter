@@ -125,6 +125,7 @@ class NormalizedEvent:
     real_seq: str = ""
     media_items: list[MediaItem] = field(default_factory=list)
     is_system_notice: bool = False  # True=合成系统事件(notice 转文本),插件侧据此设 internal=True
+    rate_limit_eligible: bool = True  # 仅适配器内部使用,不写入 plugin 协议
 
     def to_dict(self) -> dict[str, Any]:
         return {

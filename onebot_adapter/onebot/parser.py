@@ -935,4 +935,5 @@ async def _parse_notice_event(
         is_admin=is_admin,
         chat_name=chat_name,
         is_system_notice=True,
+        rate_limit_eligible=kind == "poke",
     )
