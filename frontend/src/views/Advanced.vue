@@ -38,6 +38,8 @@ async function save() {
       log_file_enabled: c.log_file_enabled,
       log_file_dir: c.log_file_dir,
       log_retention_days: c.log_retention_days,
+      log_file_message_mode: c.log_file_message_mode,
+      log_file_max_bytes: c.log_file_max_bytes,
       usage_stats_enabled: c.usage_stats_enabled,
       usage_stats_retention_days: c.usage_stats_retention_days,
       webui_port: c.webui_port,
@@ -190,6 +192,20 @@ async function changeToken() {
         日志保留天数
         <input type="number" v-model.number="cfg.log_retention_days" min="1" max="365" />
         <span class="hint">日志文件按天轮转，超过此天数的自动删除（默认3天）</span>
+      </label>
+      <label>
+        文件日志消息正文
+        <select v-model="cfg.log_file_message_mode">
+          <option value="none">不记录正文</option>
+          <option value="preview">仅记录截断预览（推荐）</option>
+          <option value="full">记录完整正文</option>
+        </select>
+        <span class="hint">只影响收发消息正文；错误、连接和审计日志仍正常记录</span>
+      </label>
+      <label>
+        单个日志文件上限（字节）
+        <input type="number" v-model.number="cfg.log_file_max_bytes" min="1024" step="1048576" />
+        <span class="hint">达到上限或跨日时轮转，默认 10485760（10 MiB）</span>
       </label>
       <label>
         日志级别

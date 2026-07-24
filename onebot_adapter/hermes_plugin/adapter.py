@@ -96,6 +96,28 @@ _AUDIO_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".opus", ".flac", ".silk"}
 _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 
 
+def _safe_log_json(value: Any, limit: int = 2000) -> str:
+    """Render protocol diagnostics without tokens, message bodies, or signed URL queries."""
+    def scrub(item: Any, key: str = "") -> Any:
+        lowered = key.lower()
+        if any(part in lowered for part in ("token", "authorization", "password", "secret", "cookie")):
+            return "<redacted>"
+        if lowered in {"text", "content", "caption", "reply_to_text"}:
+            return f"<text len={len(str(item))}>"
+        if isinstance(item, dict):
+            return {str(k): scrub(v, str(k)) for k, v in item.items()}
+        if isinstance(item, list):
+            return [scrub(v) for v in item]
+        if isinstance(item, str) and "://" in item and "?" in item:
+            return item.split("?", 1)[0] + "?<redacted>"
+        return item
+
+    try:
+        return json.dumps(scrub(value), ensure_ascii=False, default=str)[:limit]
+    except (TypeError, ValueError):
+        return "<unserializable>"
+
+
 def _ext_from_url(url: str, fallback: str = "") -> str:
     """Extract a media extension from a URL's path, or *fallback* if none.
 
@@ -515,7 +537,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.warning("OneBot: non-JSON frame ignored")
             return
         mtype = data.get("type")
-        logger.debug("OneBot plugin recv from adapter: type=%s raw=%s", mtype, raw[:2000])
+        logger.debug("OneBot plugin recv from adapter: type=%s frame=%s", mtype, _safe_log_json(data))
 
         if mtype == "ready":
             self._onebot_connected = data.get("onebot_connected", False)
@@ -682,8 +704,13 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         token = _msg_context.set(msg_ctx)
         try:
             await self.handle_message(message_event)
-        except Exception:
+        except Exception as exc:
             logger.exception("OneBot: handle_message raised in background task")
+            await self._report_plugin_status(
+                level="error",
+                event="handle_message_failed",
+                message=f"{type(exc).__name__}: {exc}",
+            )
         finally:
             _msg_context.reset(token)
             if delivery_ids:
@@ -692,6 +719,23 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 while len(self._completed_deliveries) > 512:
                     self._completed_deliveries.pop(next(iter(self._completed_deliveries)))
                 await self._ack_deliveries(delivery_ids)
+
+    async def _report_plugin_status(self, *, level: str, event: str, message: str) -> None:
+        """Best-effort health summary for the adapter WebUI and persistent log."""
+        ws = self._ws
+        if ws is None or ws.closed:
+            return
+        try:
+            await ws.send_json({
+                "type": "plugin_status",
+                "v": 1,
+                "level": level,
+                "event": event[:80],
+                "message": message[:500],
+                "timestamp": datetime.now(UTC).timestamp(),
+            })
+        except Exception:
+            logger.debug("OneBot: failed to report plugin status", exc_info=True)
 
     async def _ack_deliveries(self, delivery_ids: list[str]) -> None:
         ws = self._ws
@@ -1017,7 +1061,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.debug(
                 "OneBot plugin _rpc: frame_type=%s action=%s req_id=%s payload_keys=%s frame=%s",
                 frame_type, action, req_id, list(payload.keys()),
-                json.dumps(msg, ensure_ascii=False)[:2000],
+                _safe_log_json(msg),
             )
             await self._ws.send_json(msg)
             try:
@@ -1172,13 +1216,13 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
     async def _api_call(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         logger.debug("OneBot plugin api_call: action=%s", action)
-        logger.debug("OneBot plugin api_call params: %s", json.dumps(params, ensure_ascii=False)[:2000])
+        logger.debug("OneBot plugin api_call params: %s", _safe_log_json(params))
         result = await self._rpc("api_call", action, params)
         if result.get("success"):
             logger.debug(
                 "OneBot plugin api_call result: action=%s success=%s data=%s",
                 action, result.get("success"),
-                json.dumps(result.get("data"), ensure_ascii=False)[:2000],
+                _safe_log_json(result.get("data")),
             )
         return result
 

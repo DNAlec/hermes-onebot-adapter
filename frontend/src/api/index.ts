@@ -62,6 +62,12 @@ export interface Status {
   adapter_version: string;
   plugin_version: string | null;
   version_mismatch: boolean;
+  latest_plugin_status: {
+    level: "info" | "warning" | "error";
+    event: string;
+    message: string;
+    timestamp: number;
+  } | null;
   onebot_connected: boolean;
   hermes_plugin_connected: boolean;
   onebot_mode: string;
@@ -128,6 +134,8 @@ export interface Config {
   log_file_enabled: boolean;
   log_file_dir: string;
   log_retention_days: number;
+  log_file_message_mode: "none" | "preview" | "full";
+  log_file_max_bytes: number;
   usage_stats_enabled: boolean;
   usage_stats_retention_days: number;
   message_show_group_id: boolean;
