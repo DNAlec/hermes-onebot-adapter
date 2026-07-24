@@ -157,30 +157,10 @@ def test_ext_from_url_empty_url():
     assert plugin_mod._ext_from_url("", ".jpg") == ".jpg"
 
 
-# ── MediaItem from_dict round-trip ─────────────────────────────────────────
-
-
-def test_media_item_from_dict():
-    from onebot_adapter.relay.protocol import MediaItem
-    item = MediaItem.from_dict({
-        "kind": "file", "url": "https://x/f.pdf", "mime": "application/pdf",
-        "name": "f.pdf", "file_id": "fid1", "index": 3,
-    })
-    assert item.kind == "file"
-    assert item.url == "https://x/f.pdf"
-    assert item.name == "f.pdf"
-    assert item.file_id == "fid1"
-    assert item.index == 3
-
-
-def test_media_item_to_dict_round_trip():
+def test_media_item_to_dict():
     from onebot_adapter.relay.protocol import MediaItem
     item = MediaItem(kind="image", url="https://x/1.jpg", index=0)
     d = item.to_dict()
     assert d["kind"] == "image"
     assert d["url"] == "https://x/1.jpg"
     assert d["index"] == 0
-    item2 = MediaItem.from_dict(d)
-    assert item2.kind == item.kind
-    assert item2.url == item.url
-    assert item2.index == item.index

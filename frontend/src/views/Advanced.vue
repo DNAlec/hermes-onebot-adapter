@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useConfig } from "../composables/useConfig";
-import { login } from "../api";
+import { clearUsageStats, login } from "../api";
 
 const { cfg, load, save: saveConfig } = useConfig();
 const saving = ref(false);
@@ -15,6 +15,7 @@ const confirmToken = ref("");
 const tokenMsg = ref("");
 const tokenMsgType = ref<"success" | "error">("success");
 const changingToken = ref(false);
+const clearingUsage = ref(false);
 
 onMounted(async () => {
   try {
@@ -37,6 +38,10 @@ async function save() {
       log_file_enabled: c.log_file_enabled,
       log_file_dir: c.log_file_dir,
       log_retention_days: c.log_retention_days,
+      log_file_message_mode: c.log_file_message_mode,
+      log_file_max_bytes: c.log_file_max_bytes,
+      usage_stats_enabled: c.usage_stats_enabled,
+      usage_stats_retention_days: c.usage_stats_retention_days,
       webui_port: c.webui_port,
       webui_token_lifetime_hours: c.webui_token_lifetime_hours,
       send_dedup_enabled: c.send_dedup_enabled,
@@ -49,6 +54,23 @@ async function save() {
     msg.value = "❌ " + (e.response?.data?.error || e.message);
     msgType.value = "error";
   } finally { saving.value = false; }
+}
+
+async function clearUsage() {
+  const confirmation = window.prompt("此操作不可恢复。请输入“清空”以删除全部用量统计数据：");
+  if (confirmation !== "清空") return;
+  clearingUsage.value = true;
+  msg.value = "";
+  try {
+    const result = await clearUsageStats();
+    msg.value = `✅ 已清空 ${result.deleted} 条统计记录`;
+    msgType.value = "success";
+  } catch (e: any) {
+    msg.value = "❌ " + (e.response?.data?.error || e.message);
+    msgType.value = "error";
+  } finally {
+    clearingUsage.value = false;
+  }
 }
 
 async function changeToken() {
@@ -172,6 +194,20 @@ async function changeToken() {
         <span class="hint">日志文件按天轮转，超过此天数的自动删除（默认3天）</span>
       </label>
       <label>
+        文件日志消息正文
+        <select v-model="cfg.log_file_message_mode">
+          <option value="none">不记录正文</option>
+          <option value="preview">仅记录截断预览（推荐）</option>
+          <option value="full">记录完整正文</option>
+        </select>
+        <span class="hint">只影响收发消息正文；错误、连接和审计日志仍正常记录</span>
+      </label>
+      <label>
+        单个日志文件上限（字节）
+        <input type="number" v-model.number="cfg.log_file_max_bytes" min="1024" step="1048576" />
+        <span class="hint">达到上限或跨日时轮转，默认 10485760（10 MiB）</span>
+      </label>
+      <label>
         日志级别
         <select v-model="cfg.log_level">
           <option value="DEBUG">DEBUG</option>
@@ -190,6 +226,23 @@ async function changeToken() {
         <input type="number" v-model.number="cfg.seq_map_size" min="100" max="5000" />
         <span class="hint">real_seq→message_id 全局 FIFO 上限（默认 4500，与 NapCat 5000 对齐）</span>
       </label>
+    </div>
+
+    <div class="section">
+      <h3>用量统计</h3>
+      <p class="hint">记录成功通过消息过滤的元数据，不保存消息正文或媒体地址。关闭后停止新增，已有历史仍可查询。</p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.usage_stats_enabled" />
+        <span>启用用量统计</span>
+      </label>
+      <label>
+        数据保留天数
+        <input type="number" v-model.number="cfg.usage_stats_retention_days" min="1" step="1" />
+        <span class="hint">默认 365 天；缩短后保存配置会立即清理过期数据。</span>
+      </label>
+      <button @click="clearUsage" :disabled="clearingUsage" class="danger-btn">
+        {{ clearingUsage ? "清空中..." : "清空全部统计数据" }}
+      </button>
     </div>
 
     <div class="section">
@@ -218,6 +271,8 @@ async function changeToken() {
 .section h3 { margin: 0 0 1rem; font-size: 1rem; border-bottom: 2px solid var(--primary); padding-bottom: 0.5rem; }
 .subsection { margin-top: 1.5rem; }
 .hint { display: block; font-size: 0.85rem; color: var(--text-muted); margin: 0.25rem 0 0.75rem; }
+.danger-btn { background: var(--danger); color: white; border: 0; border-radius: 5px; padding: 0.6rem 1rem; cursor: pointer; }
+.danger-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 label { display: block; margin-bottom: 1rem; font-weight: 500; font-size: 0.9rem; }
 input, select { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; margin-top: 0.25rem; }
 .checkbox-row { display: flex; align-items: center; gap: 0.5rem; }

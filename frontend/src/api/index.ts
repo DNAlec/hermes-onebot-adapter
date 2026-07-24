@@ -62,6 +62,12 @@ export interface Status {
   adapter_version: string;
   plugin_version: string | null;
   version_mismatch: boolean;
+  latest_plugin_status: {
+    level: "info" | "warning" | "error";
+    event: string;
+    message: string;
+    timestamp: number;
+  } | null;
   onebot_connected: boolean;
   hermes_plugin_connected: boolean;
   onebot_mode: string;
@@ -92,6 +98,9 @@ export interface GroupConfig {
   command_permissions: Record<string, string> | null;
   notify_poke_enabled: boolean | null;
   notify_member_change_enabled: boolean | null;
+  group_rate_limit_algorithm: string | null;
+  group_rate_limit_messages: number | null;
+  group_rate_limit_window_seconds: number | null;
 }
 
 export interface Config {
@@ -125,6 +134,10 @@ export interface Config {
   log_file_enabled: boolean;
   log_file_dir: string;
   log_retention_days: number;
+  log_file_message_mode: "none" | "preview" | "full";
+  log_file_max_bytes: number;
+  usage_stats_enabled: boolean;
+  usage_stats_retention_days: number;
   message_show_group_id: boolean;
   seq_map_size: number;
   reaction_emoji_enabled: boolean;
@@ -137,6 +150,18 @@ export interface Config {
   event_queue_enabled: boolean;
   event_queue_max_per_chat: number;
   event_queue_idle_timeout: number;
+  // ── 入站消息限流 ──
+  rate_limit_enabled: boolean;
+  global_rate_limit_algorithm: string;
+  global_rate_limit_messages: number;
+  global_rate_limit_window_seconds: number;
+  group_rate_limit_algorithm: string;
+  group_rate_limit_messages: number;
+  group_rate_limit_window_seconds: number;
+  user_rate_limit_algorithm: string;
+  user_rate_limit_messages: number;
+  user_rate_limit_window_seconds: number;
+  rate_limit_reject_message: string;
   // ── 媒体投递 ──
   media_delivery_mode: string;
   // ── /指令过滤 ──
@@ -144,6 +169,10 @@ export interface Config {
   command_filter_unknown: boolean;
   command_permissions: Record<string, string>;
   command_reject_message: string;
+  // ── Bot 动态用户黑名单 ──
+  bot_blacklist_enabled: boolean;
+  bot_blacklist_max_duration_seconds: number;
+  bot_blacklist_reject_message: string;
   // ── notice 事件推送 ──
   notify_poke_enabled: boolean;
   notify_member_change_enabled: boolean;
@@ -170,6 +199,64 @@ export const putGroup = (groupId: string, cfg: Partial<GroupConfig>) =>
 export const deleteGroup = (groupId: string) =>
   api.delete(`/groups/${groupId}`).then((r) => r.data);
 export const syncGroups = () => api.post("/groups/sync").then((r) => r.data);
+
+// ── Usage statistics ──
+
+export interface UsageDimension {
+  id: string;
+  name: string;
+}
+
+export interface UsageStats {
+  enabled: boolean;
+  start: number;
+  end: number;
+  bucket: "hour" | "day";
+  summary: { total: number; active_groups: number; active_users: number };
+  trend: { bucket_start: number; count: number }[];
+  top_groups: (UsageDimension & { count: number })[];
+  top_users: (UsageDimension & { count: number })[];
+}
+
+export interface UsageQuery {
+  start: number;
+  end: number;
+  scope: "all" | "dm" | "group";
+  group_id?: string;
+  user_id?: string;
+  bucket: "hour" | "day";
+  tz_offset_minutes: number;
+}
+
+export const getUsageStats = (params: UsageQuery) =>
+  api.get<UsageStats>("/usage/stats", { params }).then((r) => r.data);
+export const getUsageDimensions = (start: number, end: number) =>
+  api.get<{ groups: UsageDimension[]; users: UsageDimension[] }>("/usage/dimensions", {
+    params: { start, end },
+  }).then((r) => r.data);
+export const clearUsageStats = () =>
+  api.delete<{ ok: boolean; deleted: number }>("/usage").then((r) => r.data);
+
+// ── Bot dynamic blacklist ──
+
+export interface BotBlacklistEntry {
+  id: number;
+  scope: "group" | "dm" | "global";
+  group_id: string;
+  user_id: string;
+  created_at: number;
+  duration_seconds: number;
+  expires_at: number;
+  remaining_seconds: number;
+  remaining: string;
+  reason: string;
+  created_by_user_id: string;
+}
+
+export const getBotBlacklist = () =>
+  api.get<{ entries: BotBlacklistEntry[] }>("/bot_blacklist").then((r) => r.data.entries);
+export const deleteBotBlacklistEntry = (entryId: number) =>
+  api.delete<{ ok: boolean; removed: boolean }>(`/bot_blacklist/${entryId}`).then((r) => r.data);
 
 // ── /command filter ──
 

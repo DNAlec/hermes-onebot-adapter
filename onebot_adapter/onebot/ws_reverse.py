@@ -36,6 +36,7 @@ class OneBotReverseServer:
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
+        bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
     ) -> None:
         self._config = config
         self._on_connect = on_connect
@@ -55,6 +56,7 @@ class OneBotReverseServer:
             seq_map=seq_map,
             name_resolver=name_resolver,
             ws_api_transport=ws_api_transport,
+            bot_blacklist_match_fn=bot_blacklist_match_fn,
         )
 
     def update_config(self, config: AdapterConfig) -> None:
@@ -68,6 +70,7 @@ class OneBotReverseServer:
     async def _handler_endpoint(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
         token = request.query.get("token") or bearer_token(request.headers.get("Authorization", ""))
         if not self._config.onebot_ws_token or token != self._config.onebot_ws_token:
+            logger.warning("OneBot reverse WS unauthorized remote=%s", request.remote)
             return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         ws = aiohttp.web.WebSocketResponse()
         await ws.prepare(request)
@@ -99,7 +102,10 @@ class OneBotReverseServer:
                 self.connected = False
                 if self._on_disconnect:
                     self._on_disconnect()
-            logger.info("OneBot reverse WS disconnected")
+            logger.info(
+                "OneBot reverse WS disconnected close_code=%s exception=%r",
+                ws.close_code, ws.exception(),
+            )
         return ws
 
     async def stop(self) -> None:

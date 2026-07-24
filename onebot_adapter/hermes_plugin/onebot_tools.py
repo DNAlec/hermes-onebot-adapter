@@ -1,14 +1,14 @@
 """Plugin-bundled OneBot API tools for Hermes Agent.
 
-These tools let the LLM call the OneBot 11 HTTP API directly (send messages
+These tools let the LLM call OneBot 11 actions (send messages
 to arbitrary groups, manage group members, fetch histories, etc.) by routing
 through the adapter service's WS ``api_call`` channel.
 
 Registration is done via ``ctx.register_tool(...)`` at plugin load time —
 no dependency on the host's ``tools/qq_tool.py``.
 
-Admin gating: tools that mutate group state (kick, mute, ban, etc.) check
-``_current_is_admin`` which is set per-message by the adapter.
+Admin gating uses a per-message ``ContextVar`` so concurrent messages cannot
+share or overwrite authorization state.
 """
 from __future__ import annotations
 
@@ -40,13 +40,17 @@ except ImportError:
     _msg_context = _contextvars_mod.ContextVar("_msg_context", default=None)
 
 
-def _api_call(action: str, **params: Any) -> Any:
+async def _api_call(action: str, **params: Any) -> Any:
     """Return an awaitable that calls the adapter's _api_call method."""
     if _adapter is None:
         raise RuntimeError("OneBot adapter not initialized")
     # Convert kwargs to a params dict, dropping None values
     clean = {k: v for k, v in params.items() if v is not None}
-    return _adapter._api_call(action, clean)
+    try:
+        return await _adapter._api_call(action, clean)
+    except Exception:
+        logger.warning("OneBot tool API call failed action=%s", action, exc_info=True)
+        raise
 
 
 # ── Schema helpers ───────────────────────────────────────────────────────
@@ -100,7 +104,7 @@ def _check_admin() -> str | None:
     if _adapter is None:
         return "OneBot adapter not initialized"
     ctx = _msg_context.get()
-    is_admin = ctx[0] if ctx is not None else getattr(_adapter, "_current_is_admin", False)
+    is_admin = ctx[0] if ctx is not None else False
     if not is_admin:
         return "此操作需要管理员权限"
     return None
@@ -111,7 +115,7 @@ def _current_group_id() -> str:
     ctx = _msg_context.get()
     if ctx is not None:
         return ctx[1]
-    return getattr(_adapter, "_current_group_id", "") if _adapter else ""
+    return ctx[1] if ctx is not None else ""
 
 
 def _current_user_id() -> str:
@@ -119,7 +123,7 @@ def _current_user_id() -> str:
     ctx = _msg_context.get()
     if ctx is not None:
         return ctx[2]
-    return getattr(_adapter, "_current_user_id", "") if _adapter else ""
+    return ctx[2] if ctx is not None else ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -318,6 +322,47 @@ async def _get_profile_like(args: dict, **_) -> str:
 async def _fetch_custom_face(args: dict, **_) -> str:
     try:
         data = await _api_call("fetch_custom_face", count=int(args.get("count", 48)))
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _get_bot_blacklist(args: dict, **_) -> str:
+    """Query the adapter-local dynamic blacklist."""
+    try:
+        data = await _api_call(
+            "adapter_get_bot_blacklist",
+            scope=args.get("scope"),
+            group_id=args.get("group_id"),
+            user_id=args.get("user_id"),
+        )
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _edit_bot_blacklist(args: dict, **_) -> str:
+    """Set or remove an adapter-local dynamic blacklist entry."""
+    try:
+        action = str(args.get("action", ""))
+        scope = str(args.get("scope", ""))
+        group_id = args.get("group_id")
+        if scope == "group" and not group_id:
+            return tool_error("scope=group 时必须提供 group_id")
+        if action == "set" and (not args.get("duration_seconds") or not str(args.get("reason", "")).strip()):
+            return tool_error("action=set 时必须提供正数 duration_seconds 和非空 reason")
+        data = await _api_call(
+            "adapter_edit_bot_blacklist",
+            operation=action,
+            scope=scope,
+            group_id=group_id,
+            user_id=args.get("user_id"),
+            duration_seconds=args.get("duration_seconds"),
+            reason=args.get("reason"),
+            created_by_user_id=_current_user_id(),
+        )
         return tool_result(data)
     except Exception as e:
         logger.warning("tool call failed: %s", e)
@@ -761,6 +806,30 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_fetch_custom_face", "获取自定义表情列表(返回表情 URL 数组)。",
         {"count": _int("返回数量(默认48)")},
         [],
+    )),
+    ("onebot_get_bot_blacklist", _get_bot_blacklist, _schema(
+        "onebot_get_bot_blacklist",
+        "查看 bot 独立维护的临时用户黑名单。可按作用域、群号或用户筛选；不传筛选条件时返回全部有效记录。",
+        {
+            "scope": _str("可选：group（指定群）、dm（私聊）或 global（全部会话）"),
+            "group_id": _str("群号；筛选 group 作用域时填写"),
+            "user_id": _str("QQ号；留空则不过滤用户"),
+        },
+        [],
+    )),
+    ("onebot_edit_bot_blacklist", _edit_bot_blacklist, _schema(
+        "onebot_edit_bot_blacklist",
+        "新增、覆盖或解除 bot 的临时用户黑名单。action=set 时填写时长和原因；"
+        "超过 WebUI 配置的最大时长会自动截短。不能拉黑全局管理员或目标群的群管理员。",
+        {
+            "action": _str("set（新增/覆盖）或 remove（解除）"),
+            "scope": _str("group（指定群）、dm（私聊）或 global（全部会话）"),
+            "group_id": _str("群号；scope=group 时必填"),
+            "user_id": _str("目标 QQ 号"),
+            "duration_seconds": _int("拉黑秒数；action=set 时必填"),
+            "reason": _str("拉黑原因；action=set 时必填，会显示在拦截提示中"),
+        },
+        ["action", "scope", "user_id"],
     )),
     # ── Messaging ──
     ("onebot_send_message", _send_message, _schema(

@@ -1,14 +1,22 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
-import { RouterView, RouterLink, useRouter } from "vue-router";
-import { getStatus, getUpdateCheck, type Status, type UpdateInfo, clearToken } from "./api";
+import { ref, onMounted, onUnmounted, watch } from "vue";
+import { RouterView, RouterLink, useRouter, type RouteLocationNormalized } from "vue-router";
+import { getStatus, getUpdateCheck, getToken, type Status, type UpdateInfo, clearToken } from "./api";
 
 const status = ref<Status | null>(null);
 const updateInfo = ref<UpdateInfo | null>(null);
 let timer: number | undefined;
 const router = useRouter();
 
+function isPublicRoute(route: RouteLocationNormalized): boolean {
+  return route.name === "login";
+}
+
 async function refreshStatus() {
+  if (!getToken() || isPublicRoute(router.currentRoute.value)) {
+    status.value = null;
+    return;
+  }
   try {
     status.value = await getStatus();
   } catch {
@@ -17,6 +25,7 @@ async function refreshStatus() {
 }
 
 async function checkUpdate() {
+  if (!getToken() || isPublicRoute(router.currentRoute.value)) return;
   try {
     const info = await getUpdateCheck();
     if (info.has_update) {
@@ -24,6 +33,18 @@ async function checkUpdate() {
     }
   } catch {
     // silently ignore
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  timer = window.setInterval(refreshStatus, 5000);
+}
+
+function stopPolling() {
+  if (timer) {
+    clearInterval(timer);
+    timer = undefined;
   }
 }
 
@@ -35,11 +56,27 @@ function logout() {
 onMounted(() => {
   refreshStatus();
   checkUpdate();
-  timer = window.setInterval(refreshStatus, 5000);
+  startPolling();
 });
 onUnmounted(() => {
-  if (timer) clearInterval(timer);
+  stopPolling();
 });
+
+// Stop polling on the login page (no token → 401 audit spam); resume once
+// the user navigates to an authenticated route with a token present.
+watch(
+  () => router.currentRoute.value.name,
+  () => {
+    const onLogin = isPublicRoute(router.currentRoute.value);
+    if (onLogin || !getToken()) {
+      stopPolling();
+      status.value = null;
+    } else if (!timer) {
+      refreshStatus();
+      startPolling();
+    }
+  },
+);
 </script>
 
 <template>
@@ -54,7 +91,7 @@ onUnmounted(() => {
           :href="updateInfo.changelog_url"
           target="_blank"
           rel="noopener"
-          title="有新版本 v{{ updateInfo.latest_version }}，点击查看更新日志"
+          :title="`有新版本 v${updateInfo.latest_version}，点击查看更新日志`"
         >
           v{{ updateInfo.latest_version }} →
         </a>

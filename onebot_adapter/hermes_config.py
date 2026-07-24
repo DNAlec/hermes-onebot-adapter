@@ -255,32 +255,6 @@ def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -
     _read_modify_write(hermes_install_dir, modify=_modify)
 
 
-# ── channel_prompts 读写(供 WebUI 管理全局/群聊提示词)──────────────────
-
-
-def read_channel_prompts(hermes_install_dir: str | None) -> dict[str, str]:
-    """读取 ``platforms.onebot.channel_prompts``。
-
-    返回 ``{group_id: prompt}`` dict;文件/节点不存在返回空 dict。
-    YAML 解析失败也返回空 dict 并记 warning。
-    """
-    try:
-        data = read_config(hermes_install_dir)
-    except HermesConfigParseError as exc:
-        logger.warning("read_channel_prompts: config parse failed: %s", exc)
-        return {}
-    platforms = data.get("platforms") or {}
-    if not hasattr(platforms, "get"):
-        return {}
-    onebot_cfg = platforms.get(PLATFORM) or {}
-    if not hasattr(onebot_cfg, "get"):
-        return {}
-    prompts = onebot_cfg.get("channel_prompts") or {}
-    if not hasattr(prompts, "items"):
-        return {}
-    return {str(k): str(v) for k, v in prompts.items()}
-
-
 def write_channel_prompts(hermes_install_dir: str | None, prompts: dict[str, str]) -> None:
     """写入 ``platforms.onebot.channel_prompts``。
 
