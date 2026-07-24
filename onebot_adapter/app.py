@@ -10,41 +10,106 @@ from __future__ import annotations
 import asyncio
 import errno
 import logging
+import math
 import os
 import signal
+import time
 from collections import deque
-from logging.handlers import TimedRotatingFileHandler
+from logging.handlers import BaseRotatingHandler
 from typing import Any
 
 import aiohttp
 import aiohttp.web
 
 from onebot_adapter import __version__
-from onebot_adapter.config import AdapterConfig, ConfigStore, ensure_tokens, load_config, save_config
+from onebot_adapter.bot_blacklist import BotBlacklistStore
+from onebot_adapter.config import (
+    AdapterConfig,
+    ConfigLoadError,
+    ConfigStore,
+    config_path,
+    ensure_tokens,
+    load_config,
+    save_config,
+)
 from onebot_adapter.onebot.api import OneBotApi
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.onebot.ws_api import WsApiTransport
 from onebot_adapter.onebot.ws_forward import OneBotForwardClient
 from onebot_adapter.onebot.ws_reverse import OneBotReverseServer
+from onebot_adapter.rate_limit import MessageRateLimiter
 from onebot_adapter.relay.hermes_ws import HermesRelayServer
-from onebot_adapter.relay.protocol import parse_chat_id
+from onebot_adapter.relay.protocol import FilteredEvent, parse_chat_id
+from onebot_adapter.usage_stats import UsageStatsStore
 from onebot_adapter.webui import routes as webui_routes
 
 logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("onebot_adapter.audit")
 
 
 class _ExcludeLogFormatPreview(logging.Filter):
     """Filter that rejects log records emitted by the ``log_format`` module
-    logger (truncated recv/send preview lines).  Those events are also
-    emitted in full (untruncated) form by the dedicated ``onebot_adapter.file``
-    logger, which propagates to the parent ``onebot_adapter`` logger and
-    reaches the file handler.  Without this filter the file would contain
-    both the truncated preview and the full line for every recv/send event.
+        logger (truncated recv/send preview lines).  Persistent message copies
+        are emitted by the dedicated non-propagating ``onebot_adapter.file``
+        logger, which has the file handler attached directly.  Without this
+        filter the file would contain both message-flow records.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         return not record.name.endswith(".onebot.log_format")
+
+
+class _DailySizeRotatingFileHandler(BaseRotatingHandler):
+    """Rotate at the first record of a new day or when the file reaches a size cap."""
+
+    def __init__(self, filename: str, *, max_bytes: int, retention_days: int) -> None:
+        super().__init__(filename, mode="a", encoding="utf-8", delay=True)
+        self.max_bytes = max_bytes
+        self.retention_days = retention_days
+        if os.path.exists(filename):
+            self._current_day = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(filename)))
+        else:
+            self._current_day = time.strftime("%Y-%m-%d")
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:
+        if time.strftime("%Y-%m-%d") != self._current_day:
+            return True
+        if self.stream is None:
+            self.stream = self._open()
+        self.stream.seek(0, os.SEEK_END)
+        rendered = (self.format(record) + self.terminator).encode(self.encoding or "utf-8", errors="replace")
+        return self.stream.tell() + len(rendered) >= self.max_bytes
+
+    def doRollover(self) -> None:
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+        if os.path.exists(self.baseFilename) and os.path.getsize(self.baseFilename):
+            stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+            destination = f"{self.baseFilename}.{stamp}"
+            sequence = 1
+            while os.path.exists(destination):
+                destination = f"{self.baseFilename}.{stamp}.{sequence}"
+                sequence += 1
+            os.replace(self.baseFilename, destination)
+        self._current_day = time.strftime("%Y-%m-%d")
+        cutoff = time.time() - self.retention_days * 86400
+        directory = os.path.dirname(self.baseFilename)
+        prefix = os.path.basename(self.baseFilename) + "."
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            names = []
+        for name in names:
+            path = os.path.join(directory, name)
+            if not name.startswith(prefix):
+                continue
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.unlink(path)
+            except OSError:
+                logger.warning("could not remove expired log file %s", path, exc_info=True)
 
 
 
@@ -70,6 +135,12 @@ class AdapterService:
         self._webui_log_handler: logging.Handler | None = None
         self._probe_lock = asyncio.Lock()
         self._cleaning_up = False
+        self._usage_stats: UsageStatsStore | None = None
+        self._bot_blacklist: BotBlacklistStore | None = None
+        self._rate_limiter = MessageRateLimiter()
+        self._config_change_lock = asyncio.Lock()
+        self._applied_config = self.store.config
+        self._probe_task: asyncio.Task[None] | None = None
 
     def _init_components(self) -> None:
         cfg = self.store.config
@@ -90,6 +161,7 @@ class AdapterService:
             on_dispatch=self._maybe_react_delivered,
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
+            local_api_call=self._handle_local_api_call,
         )
         self._state["relay"] = self._relay
         self._onebot_reverse = OneBotReverseServer(
@@ -104,6 +176,7 @@ class AdapterService:
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
+            bot_blacklist_match_fn=self._match_bot_blacklist,
         )
         self._onebot_forward = OneBotForwardClient(
             cfg,
@@ -118,6 +191,7 @@ class AdapterService:
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
+            bot_blacklist_match_fn=self._match_bot_blacklist,
         )
         # Register config-change listener early so hot-reload via the WebUI
         # (which starts first) notifies components immediately — previously
@@ -132,9 +206,10 @@ class AdapterService:
         that ALL modules under the package (relay, onebot.*, webui, etc.)
         propagate their log records into ``adapter.log``.  A filter excludes
         the truncated preview lines emitted by ``onebot_adapter.onebot.log_format``'s
-        module logger — those events are already written to the file in full
-        (untruncated) form by the dedicated ``onebot_adapter.file`` logger,
-        so accepting the truncated copies here would duplicate recv/send lines.
+        module logger — persistent message copies are written through the
+        dedicated ``onebot_adapter.file`` logger according to
+        ``log_file_message_mode``, so accepting the preview copies here would
+        duplicate recv/send lines.
         """
         if self._file_handler is not None:
             logging.getLogger("onebot_adapter").removeHandler(self._file_handler)
@@ -142,6 +217,9 @@ class AdapterService:
             self._file_handler.close()
             self._file_handler = None
 
+        file_logger = logging.getLogger("onebot_adapter.file")
+        # Full/persistent message records must never reach root (console/WebUI).
+        file_logger.propagate = False
         if not cfg.log_file_enabled:
             return
 
@@ -149,20 +227,20 @@ class AdapterService:
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "adapter.log")
 
-        handler = TimedRotatingFileHandler(
-            log_path, when="midnight", interval=1,
-            backupCount=cfg.log_retention_days,
-            encoding="utf-8",
+        handler = _DailySizeRotatingFileHandler(
+            log_path,
+            max_bytes=cfg.log_file_max_bytes,
+            retention_days=cfg.log_retention_days,
         )
         handler.setLevel(getattr(logging, cfg.log_level.upper(), logging.INFO))
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s: %(message)s"
         ))
-        # Skip the truncated preview lines from the log_format module logger;
-        # the full untruncated versions are emitted by the "onebot_adapter.file"
-        # logger and will reach this handler via propagation.
+        # Skip the console/WebUI preview records from log_format; the dedicated
+        # file logger emits the configured persistent message copy directly.
         handler.addFilter(_ExcludeLogFormatPreview())
         logging.getLogger("onebot_adapter").addHandler(handler)
+        file_logger.addHandler(handler)
         self._file_handler = handler
 
     def _update_file_logging(self, old: AdapterConfig, new: AdapterConfig) -> None:
@@ -171,6 +249,7 @@ class AdapterService:
             old.log_file_enabled != new.log_file_enabled
             or old.log_file_dir != new.log_file_dir
             or old.log_retention_days != new.log_retention_days
+            or old.log_file_max_bytes != new.log_file_max_bytes
         )
         if changed:
             self._setup_file_logging(new)
@@ -220,7 +299,8 @@ class AdapterService:
         """
         self._update_status()
         if not self._self_id_probed and self.store.config.self_id == "":
-            asyncio.create_task(self._probe_self_id_guarded())
+            if self._probe_task is None or self._probe_task.done():
+                self._probe_task = asyncio.create_task(self._probe_self_id_guarded())
 
     async def _probe_self_id_guarded(self) -> None:
         """Concurrent-safe wrapper: only one probe at a time."""
@@ -249,6 +329,54 @@ class AdapterService:
 
     async def _on_onebot_event(self, event) -> None:
         self._update_status()
+        cfg = self.store.config
+        group_id: str | None = None
+        try:
+            is_group, numeric_id = parse_chat_id(event.chat_id)
+            if is_group:
+                group_id = str(numeric_id)
+        except (TypeError, ValueError):
+            pass
+        if (
+            event.rate_limit_eligible
+            and not cfg.is_admin(event.user_id, group_id)
+        ):
+            decision = await self._rate_limiter.check(
+                cfg,
+                user_id=event.user_id,
+                group_id=group_id,
+            )
+            if not decision.allowed:
+                scope_labels = {"global": "全局", "group": "群聊", "user": "个人"}
+                retry_after = max(1, math.ceil(decision.retry_after))
+                message = cfg.rate_limit_reject_message
+                replacements = {
+                    "{scope}": scope_labels.get(decision.scope, decision.scope),
+                    "{retry_after}": str(retry_after),
+                    "{user_id}": str(event.user_id),
+                }
+                for placeholder, value in replacements.items():
+                    message = message.replace(placeholder, value)
+                await self._on_filtered_command(
+                    FilteredEvent(
+                        chat_id=event.chat_id,
+                        chat_type=event.chat_type,
+                        user_id=event.user_id,
+                        user_name=event.user_name,
+                        command_name="",
+                        reject_message=message,
+                        message_id=event.message_id,
+                        reply_to_message_id=event.message_id or None,
+                        timestamp=event.timestamp,
+                        filter_type="rate_limit",
+                    )
+                )
+                return
+        if self.store.config.usage_stats_enabled and self._usage_stats is not None:
+            try:
+                await self._usage_stats.record(event)
+            except Exception:
+                logger.exception("failed to record usage statistics")
         logger.debug(
             "app _on_onebot_event: relaying to Hermes chat_id=%s text_preview=%r",
             event.chat_id, (event.text or "")[:500],
@@ -315,15 +443,15 @@ class AdapterService:
             )
 
     async def _on_filtered_command(self, filtered) -> None:
-        """Handle a /command that was denied by the command filter.
+        """Handle an event denied by an adapter-side filter.
 
         Sends the reject message back to the originating chat via the OneBot
-        HTTP API (through the relay) and does NOT forward the event to the
+        WS API channel (through the relay) and does NOT forward the event to the
         Hermes plugin.
         """
         logger.debug(
-            "app _on_filtered_command: chat_id=%s cmd=%s user=%s",
-            filtered.chat_id, filtered.command_name, filtered.user_id,
+            "app filtered event: type=%s chat_id=%s cmd=%s user=%s",
+            filtered.filter_type, filtered.chat_id, filtered.command_name, filtered.user_id,
         )
         if self._relay:
             await self._relay.send_reject_message(
@@ -332,8 +460,80 @@ class AdapterService:
                 reply_to=filtered.reply_to_message_id,
             )
 
+    def _match_bot_blacklist(self, user_id: str, group_id: str | None):
+        cfg = self.store.config
+        if self._bot_blacklist is None or cfg.is_admin(user_id, group_id):
+            return None
+        return self._bot_blacklist.match(user_id=user_id, group_id=group_id)
+
+    async def _handle_local_api_call(self, action: str, params: dict[str, Any]) -> Any:
+        if action not in {"adapter_get_bot_blacklist", "adapter_edit_bot_blacklist"}:
+            raise ValueError(f"unknown adapter action: {action}")
+        cfg = self.store.config
+        store = self._bot_blacklist
+        if store is None:
+            raise RuntimeError("bot blacklist store unavailable")
+        if not cfg.bot_blacklist_enabled:
+            raise RuntimeError("bot 动态黑名单功能已关闭")
+        if action == "adapter_get_bot_blacklist":
+            entries = store.list(
+                scope=params.get("scope"), group_id=params.get("group_id"), user_id=params.get("user_id"),
+            )
+            return {"entries": [entry.to_dict() for entry in entries], "count": len(entries)}
+
+        operation = str(params.get("operation", ""))
+        scope = str(params.get("scope", ""))
+        user_id = str(params.get("user_id", "")).strip()
+        group_id = str(params.get("group_id", "")).strip()
+        if operation == "remove":
+            removed = store.remove(scope=scope, user_id=user_id, group_id=group_id)
+            audit_logger.info(
+                "bot blacklist entry removed source=agent scope=%s group_id=%s user_id=%s removed=%s",
+                scope, group_id, user_id, removed,
+            )
+            return {"removed": removed, "scope": scope, "group_id": group_id, "user_id": user_id}
+        if operation != "set":
+            raise ValueError("action must be 'set' or 'remove'")
+
+        if cfg.is_admin(user_id, group_id if scope == "group" else None):
+            raise PermissionError("无法拉黑 WebUI 中配置的全局管理员或对应群管理员")
+        try:
+            requested_duration = int(params.get("duration_seconds", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("duration_seconds must be an integer") from exc
+        if requested_duration <= 0:
+            raise ValueError("duration_seconds must be positive")
+        actual_duration = min(requested_duration, cfg.bot_blacklist_max_duration_seconds)
+        entry = store.set(
+            scope=scope,
+            group_id=group_id,
+            user_id=user_id,
+            duration_seconds=actual_duration,
+            reason=str(params.get("reason", "")),
+            created_by_user_id=str(params.get("created_by_user_id", "")),
+        )
+        audit_logger.warning(
+            "bot blacklist entry set source=agent scope=%s group_id=%s user_id=%s duration_seconds=%d "
+            "created_by_user_id=%s",
+            scope, group_id, user_id, actual_duration, str(params.get("created_by_user_id", "")),
+        )
+        result = entry.to_dict()
+        result["requested_duration_seconds"] = requested_duration
+        result["actual_duration_seconds"] = actual_duration
+        result["clamped"] = actual_duration != requested_duration
+        if result["clamped"]:
+            result["notice"] = (
+                f"请求时长 {requested_duration} 秒超过允许上限，已调整为 {actual_duration} 秒"
+            )
+        if scope == "global":
+            exempt_groups = [gid for gid in cfg.groups if user_id in cfg.get_group_config(gid).admins]
+            if exempt_groups:
+                result["exempt_admin_groups"] = exempt_groups
+        return result
+
     async def _on_hermes_startup(self, app: aiohttp.web.Application) -> None:
         cfg = self.store.config
+        self._applied_config = cfg
         logger.info(
             "OneBot adapter %s | onebot_mode=%s onebot_port=%d hermes_ws_port=%d webui_port=%d",
             __version__, cfg.onebot_mode, cfg.onebot_reverse_ws_port, cfg.hermes_ws_port, cfg.webui_port,
@@ -346,14 +546,30 @@ class AdapterService:
         if self._cleaning_up:
             return
         self._cleaning_up = True
+        await self.store.close_notifications()
+        if self._probe_task is not None and not self._probe_task.done():
+            self._probe_task.cancel()
+            await asyncio.gather(self._probe_task, return_exceptions=True)
+        self._probe_task = None
         if self._onebot_forward:
             await self._onebot_forward.stop()
         if self._onebot_reverse:
             await self._onebot_reverse.stop()
         if self._relay:
             await self._relay.stop()
+        if self._usage_stats:
+            await self._usage_stats.close()
+            self._usage_stats = None
+            self._state.pop("usage_stats", None)
+        if self._bot_blacklist:
+            self._bot_blacklist.close()
+            self._bot_blacklist = None
+            self._state.pop("bot_blacklist", None)
         if self._session and not self._session.closed:
             await self._session.close()
+        for runner in self._runners:
+            await runner.cleanup()
+        logger.info("OneBot adapter stopped")
         # Detach + close log handlers so the file handle is released and a
         # subsequent serve() in the same process doesn't double-attach them.
         if self._webui_log_handler is not None:
@@ -365,11 +581,17 @@ class AdapterService:
             logging.getLogger("onebot_adapter.file").removeHandler(self._file_handler)
             self._file_handler.close()
             self._file_handler = None
-        for runner in self._runners:
-            await runner.cleanup()
-        logger.info("OneBot adapter stopped")
 
     async def _on_config_change(self, old: AdapterConfig, new: AdapterConfig) -> None:
+        async with self._config_change_lock:
+            current = self.store.config
+            target = new if current == old else current
+            if target == self._applied_config:
+                return
+            await self._apply_config_change(self._applied_config, target)
+            self._applied_config = target
+
+    async def _apply_config_change(self, old: AdapterConfig, new: AdapterConfig) -> None:
         """Handle config changes from the WebUI (hot-reload).
 
         Registered as an async callback — the ConfigStore schedules it via
@@ -388,9 +610,21 @@ class AdapterService:
         if self._seq_map and old.seq_map_size != new.seq_map_size:
             self._seq_map.update_maxlen(new.seq_map_size)
             logger.info("SeqMap size changed: %d -> %d", old.seq_map_size, new.seq_map_size)
+        if old.rate_limit_enabled and not new.rate_limit_enabled:
+            self._rate_limiter.clear()
 
         # File logging hot-reload
         self._update_file_logging(old, new)
+
+        if self._usage_stats and old.usage_stats_retention_days != new.usage_stats_retention_days:
+            await self._usage_stats.update_retention(
+                new.usage_stats_retention_days,
+                prune_now=new.usage_stats_retention_days < old.usage_stats_retention_days,
+            )
+        if self._bot_blacklist and old.bot_blacklist_max_duration_seconds != new.bot_blacklist_max_duration_seconds:
+            clamped = self._bot_blacklist.clamp(new.bot_blacklist_max_duration_seconds)
+            if clamped:
+                logger.info("bot blacklist max duration reduced/clamped entries: %d", clamped)
 
         # log_level hot-reload: update root logger + WebUI handler + file handler
         if old.log_level != new.log_level:
@@ -443,7 +677,13 @@ class AdapterService:
             try:
                 info = await self._api.get_login_info()
                 self.store.patch(self_id=str(info.get("user_id", "")))
-                save_config(self.store.config)
+                save_config(
+                    self.store.config,
+                    source="onebot",
+                    reason="onebot.self_id_probe",
+                    actor="adapter_service",
+                    submitted_fields=["self_id"],
+                )
                 self._self_id_probed = True
                 logger.info("OneBot self_id probed: %s", self.store.config.self_id)
                 # Notify already-connected plugins of the new self_id
@@ -478,21 +718,44 @@ class AdapterService:
             timeout=aiohttp.ClientTimeout(total=30),
             headers={"User-Agent": f"hermes-onebot-adapter/{__version__}"},
         )
-        self._init_components()
         cfg = self.store.config
-
+        # Install handlers before initialising persistent stores/components so
+        # startup failures are visible in both the WebUI buffer and file.
         if not no_webui:
-            # Attach WebUI log handler so /api/logs has content
             from onebot_adapter.webui.log_handler import attach_log_handler
             self._webui_log_handler = attach_log_handler(self._state, level=cfg.log_level)
-        # Ensure root logger level matches config so handler actually receives records
         logging.getLogger().setLevel(getattr(logging, cfg.log_level.upper(), logging.INFO))
-        # Suppress noisy third-party loggers from the WebUI log buffer
         for noisy in ("aiohttp.access", "aiohttp.web", "aiohttp.server", "aiohttp.websocket", "asyncio"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
-
-        # Attach file handler for persistent logging
         self._setup_file_logging(cfg)
+
+        blacklist_path = config_path().parent / "bot_blacklist.sqlite3"
+        try:
+            self._bot_blacklist = BotBlacklistStore(blacklist_path)
+            self._bot_blacklist.start()
+            self._state["bot_blacklist"] = self._bot_blacklist
+            self._state.pop("bot_blacklist_error", None)
+        except Exception as exc:
+            if self._bot_blacklist is not None:
+                self._bot_blacklist.close()
+            self._bot_blacklist = None
+            self._state["bot_blacklist_error"] = str(exc)
+            logger.exception("bot blacklist unavailable")
+
+        self._init_components()
+
+        usage_path = config_path().parent / "usage_stats.sqlite3"
+        usage_stats = UsageStatsStore(usage_path, cfg.usage_stats_retention_days)
+        try:
+            await usage_stats.start()
+            self._usage_stats = usage_stats
+            self._state["usage_stats"] = usage_stats
+            self._state.pop("usage_stats_error", None)
+        except Exception as exc:
+            await usage_stats.close()
+            self._usage_stats = None
+            self._state["usage_stats_error"] = str(exc)
+            logger.exception("usage statistics unavailable")
 
         loop = asyncio.get_running_loop()
 
@@ -541,17 +804,31 @@ class AdapterService:
 
 
 def run(host: str = "127.0.0.1", port: int | None = None, no_webui: bool = False) -> None:
-    old_cfg = load_config()
+    # Bootstrap console logging before configuration I/O so load/generation
+    # failures do not disappear before the configured handlers exist.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    cfg_path = config_path()
+    logger.info("loading config from %s (exists=%s)", cfg_path, cfg_path.exists())
+    try:
+        old_cfg = load_config()
+    except ConfigLoadError as exc:
+        raise SystemExit(str(exc)) from exc
     webui_token_was_empty = not old_cfg.webui_token
     cfg = ensure_tokens(old_cfg)
+    try:
+        errors = cfg.validate()
+    except Exception as exc:
+        raise SystemExit(f"invalid configuration: {exc}") from exc
+    if errors:
+        raise SystemExit("invalid configuration: " + "; ".join(errors))
     store = ConfigStore(cfg)
     if port and not no_webui:
         store.patch(webui_port=port)
         cfg = store.config
-    logging.basicConfig(
-        level=getattr(logging, cfg.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    logging.getLogger().setLevel(getattr(logging, cfg.log_level.upper(), logging.INFO))
     if webui_token_was_empty and not no_webui:
         logger.info(
             "WebUI 鉴权 token 已自动生成: %s\n"

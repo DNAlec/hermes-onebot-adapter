@@ -1,4 +1,5 @@
 
+import json
 import time
 
 import pytest
@@ -6,7 +7,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from conftest import make_session_token
 
 from onebot_adapter.app import AdapterService
-from onebot_adapter.config import AdapterConfig, ConfigStore
+from onebot_adapter.bot_blacklist import BotBlacklistStore
+from onebot_adapter.config import AdapterConfig, ConfigStore, config_path
 
 _TOKEN = "secret"
 _EPOCH = 0
@@ -52,6 +54,73 @@ async def test_config_get_put(client):
     resp = await client.put("/api/config", json={"self_id": "999", "seq_map_size": 100}, headers=_auth())
     assert resp.status == 200
     assert (await resp.json())["seq_map_size"] == 100
+
+
+async def test_config_put_audit_records_direct_client_not_untrusted_xff(client):
+    resp = await client.put(
+        "/api/config",
+        json={"seq_map_size": 101},
+        headers={**_auth(), "X-Forwarded-For": "198.51.100.10"},
+    )
+    assert resp.status == 200
+
+    audit_path = config_path().parent / "logs" / "config-audit.log"
+    event = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert event["reason"] == "webui.config_patch"
+    assert event["http_method"] == "PUT"
+    assert event["http_path"] == "/api/config"
+    assert event["client_ip"] != "198.51.100.10"
+    assert event["submitted_fields"] == ["seq_map_size"]
+
+
+async def test_config_put_audit_uses_trusted_xff(client):
+    resp = await client.put(
+        "/api/config",
+        json={"webui_trust_proxy_headers": True},
+        headers=_auth(),
+    )
+    assert resp.status == 200
+    resp = await client.put(
+        "/api/config",
+        json={"seq_map_size": 102},
+        headers={**_auth(), "X-Forwarded-For": "198.51.100.11, 10.0.0.1"},
+    )
+    assert resp.status == 200
+
+    audit_path = config_path().parent / "logs" / "config-audit.log"
+    event = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert event["client_ip"] == "198.51.100.11"
+
+
+async def test_bot_blacklist_list_and_delete_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(tmp_path / "cfg.json"))
+    service = AdapterService(ConfigStore(AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", webui_token=_TOKEN,
+        webui_token_lifetime_hours=24, webui_token_epoch=_EPOCH,
+    )))
+    blacklist = BotBlacklistStore(tmp_path / "bot_blacklist.sqlite3")
+    blacklist.start()
+    entry = blacklist.set(
+        scope="dm", user_id="100", duration_seconds=3600,
+        reason="test", created_by_user_id="200",
+    )
+    service._state["bot_blacklist"] = blacklist
+    server = TestServer(service.build_webui_app())
+    await server.start_server()
+    web_client = TestClient(server)
+    try:
+        assert (await web_client.get("/api/bot_blacklist")).status == 401
+        response = await web_client.get("/api/bot_blacklist", headers=_auth())
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["entries"][0]["reason"] == "test"
+        response = await web_client.delete(f"/api/bot_blacklist/{entry.id}", headers=_auth())
+        assert response.status == 200
+        assert blacklist.list() == []
+    finally:
+        await web_client.close()
+        await server.close()
+        blacklist.close()
 
 
 async def test_config_get_does_not_expose_webui_token(client):

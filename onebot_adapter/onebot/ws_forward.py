@@ -46,6 +46,7 @@ class OneBotForwardClient:
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
+        bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
     ) -> None:
         self._config = config
         self._on_connect = on_connect
@@ -68,6 +69,7 @@ class OneBotForwardClient:
             seq_map=seq_map,
             name_resolver=name_resolver,
             ws_api_transport=ws_api_transport,
+            bot_blacklist_match_fn=bot_blacklist_match_fn,
         )
 
     def update_config(self, config: AdapterConfig) -> None:
@@ -199,4 +201,7 @@ class OneBotForwardClient:
                 self._ws_api_transport.unregister(ws)
             if self._on_disconnect:
                 self._on_disconnect()
-            logger.info("OneBot forward WS disconnected")
+            logger.info(
+                "OneBot forward WS disconnected close_code=%s exception=%r",
+                ws.close_code, ws.exception(),
+            )

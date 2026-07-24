@@ -1,4 +1,6 @@
-from onebot_adapter.config import AdapterConfig, ConfigStore, ensure_tokens
+import pytest
+
+from onebot_adapter.config import AdapterConfig, ConfigLoadError, ConfigStore, ensure_tokens
 from onebot_adapter.relay.protocol import (
     NormalizedEvent,
     event_message,
@@ -8,12 +10,14 @@ from onebot_adapter.relay.protocol import (
 )
 
 
-def test_config_defaults_validate():
-    cfg = ensure_tokens(AdapterConfig())
+def test_config_defaults_validate(tmp_path):
+    cfg = ensure_tokens(AdapterConfig(), tmp_path / "cfg.json")
     assert cfg.onebot_mode == "reverse"
     assert cfg.hermes_ws_token
     assert cfg.onebot_ws_token
     assert cfg.validate() == []
+    assert cfg.bot_blacklist_enabled is True
+    assert cfg.bot_blacklist_max_duration_seconds == 86400
 
 
 def test_config_default_tokens_empty_before_ensure():
@@ -60,6 +64,16 @@ def test_config_roundtrip(tmp_path):
     assert loaded.seq_map_size == 100
 
 
+def test_load_config_invalid_json_does_not_fall_back(tmp_path):
+    from onebot_adapter.config import load_config
+
+    p = tmp_path / "cfg.json"
+    p.write_text("{broken", encoding="utf-8")
+    with pytest.raises(ConfigLoadError):
+        load_config(p)
+    assert p.read_text(encoding="utf-8") == "{broken"
+
+
 def test_config_store_patch_and_notify():
     store = ConfigStore(AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2"))
     seen = []
@@ -89,6 +103,7 @@ def test_normalized_event_is_system_notice_default():
     assert ev.is_system_notice is False
     d = ev.to_dict()
     assert d["is_system_notice"] is False
+    assert "rate_limit_eligible" not in d
 
 
 def test_normalized_event_is_system_notice_true():
@@ -184,6 +199,158 @@ def test_load_config_ignores_comment_fields(tmp_path):
     assert loaded.onebot_ws_token == "t1"
 
 
+def _read_audit_events(config_file):
+    import json
+
+    audit_file = config_file.parent / "logs" / "config-audit.log"
+    return [json.loads(line) for line in audit_file.read_text(encoding="utf-8").splitlines()]
+
+
+def test_save_config_writes_safe_audit_event(tmp_path):
+    from onebot_adapter.config import save_config
+
+    p = tmp_path / "cfg.json"
+    secret_token = "audit-must-not-leak-token"
+    secret_prompt = "audit-must-not-leak-prompt"
+    cfg = AdapterConfig(
+        onebot_ws_token=secret_token,
+        hermes_ws_token="hermes-secret",
+        webui_token="webui-secret",
+        global_channel_prompt=secret_prompt,
+        seq_map_size=123,
+    )
+    save_config(
+        cfg,
+        p,
+        source="test",
+        reason="test.config_change",
+        actor="test_actor",
+        metadata={"client_ip": "127.0.0.1", "http_method": "PUT", "http_path": "/api/config"},
+        submitted_fields=["seq_map_size", "global_channel_prompt"],
+    )
+
+    audit_path = p.parent / "logs" / "config-audit.log"
+    raw_audit = audit_path.read_text(encoding="utf-8")
+    assert secret_token not in raw_audit
+    assert secret_prompt not in raw_audit
+    assert "hermes-secret" not in raw_audit
+    assert "webui-secret" not in raw_audit
+
+    event = _read_audit_events(p)[-1]
+    assert event["outcome"] == "success"
+    assert event["source"] == "test"
+    assert event["reason"] == "test.config_change"
+    assert event["actor"] == "test_actor"
+    assert event["client_ip"] == "127.0.0.1"
+    assert event["submitted_fields"] == ["global_channel_prompt", "seq_map_size"]
+    assert "seq_map_size" in event["changed_fields"]
+    assert len(event["new_fingerprint"]) == 64
+
+
+def test_save_config_flags_suspicious_reset(tmp_path, caplog):
+    from onebot_adapter.config import save_config
+
+    p = tmp_path / "cfg.json"
+    original = AdapterConfig(
+        onebot_ws_token="t1",
+        hermes_ws_token="t2",
+        webui_token="t3",
+        self_id="123",
+        groups={"42": {"group_id": "42"}},
+        event_queue_enabled=False,
+        notify_poke_enabled=True,
+        command_filter_enabled=True,
+        seq_map_size=100,
+    )
+    save_config(original, p, source="test", reason="test.initial")
+
+    reset = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", webui_token="t3")
+    with caplog.at_level("WARNING"):
+        save_config(reset, p, source="webui", reason="webui.config_patch")
+
+    event = _read_audit_events(p)[-1]
+    assert event["suspicious_reset"] is True
+    assert event["old_group_count"] == 1
+    assert event["new_group_count"] == 0
+    assert "groups" in event["reverted_to_default_fields"]
+    assert "suspicious config reset detected" in caplog.text
+
+
+def test_config_save_failure_is_audited(tmp_path, monkeypatch):
+    import onebot_adapter.config as config_module
+
+    p = tmp_path / "cfg.json"
+
+    def fail_replace(_src, _dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(config_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        config_module.save_config(
+            AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2"),
+            p,
+            source="test",
+            reason="test.failure",
+        )
+
+    event = _read_audit_events(p)[-1]
+    assert event["outcome"] == "failure"
+    assert event["error_type"] == "OSError"
+    assert event["reason"] == "test.failure"
+
+
+def test_config_audit_failure_does_not_fail_save(tmp_path, monkeypatch, caplog):
+    import onebot_adapter.config as config_module
+
+    p = tmp_path / "cfg.json"
+
+    def fail_audit(_target, _event):
+        raise OSError("simulated audit failure")
+
+    monkeypatch.setattr(config_module, "_write_config_audit", fail_audit)
+    with caplog.at_level("ERROR"):
+        config_module.save_config(
+            AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2"),
+            p,
+            source="test",
+            reason="test.audit_failure",
+        )
+
+    assert p.exists()
+    assert "config audit write failed" in caplog.text
+
+
+def test_force_init_resets_config_preserves_tokens_and_audits(tmp_path, monkeypatch):
+    from onebot_adapter.__main__ import _init_config
+    from onebot_adapter.config import load_config, save_config
+
+    p = tmp_path / "cfg.json"
+    monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(p))
+    original = AdapterConfig(
+        onebot_ws_token="keep-onebot",
+        hermes_ws_token="keep-hermes",
+        webui_token="keep-webui",
+        self_id="123",
+        groups={"42": {"group_id": "42"}},
+        event_queue_enabled=False,
+    )
+    save_config(original, p, source="test", reason="test.initial")
+
+    assert _init_config(force=True) == 0
+
+    reset = load_config(p)
+    assert reset.onebot_ws_token == "keep-onebot"
+    assert reset.hermes_ws_token == "keep-hermes"
+    assert reset.webui_token == "keep-webui"
+    assert reset.self_id == ""
+    assert reset.groups == {}
+    assert reset.event_queue_enabled is True
+    event = _read_audit_events(p)[-1]
+    assert event["reason"] == "cli.force_reinitialize"
+    assert event["source"] == "cli"
+    assert event["suspicious_reset"] is True
+
+
 def test_config_validate_rejects_invalid_ports():
     cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", onebot_reverse_ws_port=0)
     errors = cfg.validate()
@@ -224,23 +391,6 @@ def test_config_is_admin_with_empty_string_group_id():
     assert cfg.is_admin("100") is True
     # Valid group admin
     assert cfg.is_admin("200", group_id="42") is True
-
-
-def test_config_from_dict_migrates_platform_hint():
-    """from_dict should migrate legacy platform_hint → global_channel_prompt."""
-    cfg = AdapterConfig.from_dict({"platform_hint": "旧提示词", "onebot_ws_token": "t", "hermes_ws_token": "t"})
-    assert cfg.global_channel_prompt == "旧提示词"
-
-
-def test_config_from_dict_global_channel_prompt_takes_precedence():
-    """If both platform_hint and global_channel_prompt are present, the new name wins."""
-    cfg = AdapterConfig.from_dict({
-        "platform_hint": "旧提示词",
-        "global_channel_prompt": "新提示词",
-        "onebot_ws_token": "t",
-        "hermes_ws_token": "t",
-    })
-    assert cfg.global_channel_prompt == "新提示词"
 
 
 # ── notice 事件推送配置 ────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from onebot_adapter.config import AdapterConfig, ConfigStore, GroupConfig, save_
 from onebot_adapter.relay.protocol import parse_chat_id
 
 logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("onebot_adapter.audit")
 
 # Search paths for built SPA assets, checked in order:
 # 1. source-tree static dir (e.g. pip install -e . or editable installs)
@@ -48,6 +50,23 @@ _LOGIN_MAX_FAILS = 5
 _LOGIN_BAN_SECONDS = 900  # 15 minutes
 
 
+def _client_ip(request: aiohttp.web.Request, cfg: AdapterConfig) -> str:
+    """Return a trustworthy client IP using the configured proxy policy."""
+    if cfg.webui_trust_proxy_headers:
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff.strip():
+            return xff.split(",")[0].strip()
+    return request.remote or "unknown"
+
+
+def _config_request_metadata(request: aiohttp.web.Request, cfg: AdapterConfig) -> dict[str, str]:
+    return {
+        "client_ip": _client_ip(request, cfg),
+        "http_method": request.method,
+        "http_path": request.path,
+    }
+
+
 def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str, Any]) -> None:
     app.middlewares.append(_make_auth_middleware(store))
     app.router.add_get("/api/health", _health)
@@ -77,6 +96,13 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_put("/api/hermes_mode", _put_hermes_mode(store))
     app.router.add_post("/api/hermes_mode/refresh", _refresh_hermes_mode(state))
     app.router.add_get("/api/update_check", _update_check)
+    # Usage statistics
+    app.router.add_get("/api/usage/stats", _usage_stats(store, state))
+    app.router.add_get("/api/usage/dimensions", _usage_dimensions(state))
+    app.router.add_delete("/api/usage", _clear_usage(store, state))
+    # Bot-managed dynamic blacklist
+    app.router.add_get("/api/bot_blacklist", _get_bot_blacklist(state))
+    app.router.add_delete("/api/bot_blacklist/{entry_id}", _delete_bot_blacklist(state))
     app.router.add_get("/", _index)
     app.router.add_get("/{tail:.*}", _spa_handler)
 
@@ -107,12 +133,7 @@ def _login(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         # Use X-Forwarded-For only when the user has explicitly opted in via
         # config; otherwise the direct peer IP is used to prevent spoofing.
-        ip: str
-        if store.config.webui_trust_proxy_headers:
-            xff = request.headers.get("X-Forwarded-For", "")
-            ip = xff.split(",")[0].strip() if xff.strip() else (request.remote or "unknown")
-        else:
-            ip = request.remote or "unknown"
+        ip = _client_ip(request, store.config)
         now = time.time()
         # Garbage-collect expired entries to keep the dict bounded.
         # Clear any entry whose ban window has passed, regardless of fail count.
@@ -124,6 +145,9 @@ def _login(store: ConfigStore, state: dict[str, Any]):
         entry = failures.get(ip)
         if entry and entry[0] >= _LOGIN_MAX_FAILS and now - entry[1] < _LOGIN_BAN_SECONDS:
             retry_after = int(_LOGIN_BAN_SECONDS - (now - entry[1])) + 1
+            audit_logger.warning(
+                "webui login blocked client_ip=%s retry_after=%d", ip, retry_after,
+            )
             return aiohttp.web.json_response(
                 {"error": "too many attempts", "retry_after": retry_after}, status=429,
             )
@@ -143,9 +167,13 @@ def _login(store: ConfigStore, state: dict[str, Any]):
         if not hmac.compare_digest(token, cfg.webui_token):
             fails, first_ts = failures.get(ip, (0, now))
             failures[ip] = (fails + 1, first_ts)
+            audit_logger.warning(
+                "webui login failed client_ip=%s failure_count=%d", ip, fails + 1,
+            )
             return aiohttp.web.json_response({"error": "invalid token"}, status=401)
         # Success: clear this IP's counter.
         failures.pop(ip, None)
+        audit_logger.info("webui login succeeded client_ip=%s", ip)
         issued_at = int(time.time())
         msg = f"{cfg.webui_token_epoch}:{issued_at}".encode()
         sig = hmac.new(cfg.webui_token.encode(), msg, hashlib.sha256).hexdigest()
@@ -210,6 +238,10 @@ def _make_auth_middleware(store: ConfigStore):
                 token, cfg.webui_token, cfg.webui_token_epoch, cfg.webui_token_lifetime_hours,
             )
             if not ok:
+                audit_logger.warning(
+                    "webui unauthorized request client_ip=%s method=%s path=%s",
+                    _client_ip(request, cfg), request.method, request.path,
+                )
                 return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         return await handler(request)
     return auth_middleware
@@ -222,11 +254,13 @@ def _status(store: ConfigStore, state: dict[str, Any]):
         per_user = getattr(relay, "hermes_group_sessions_per_user", True) if relay else True
         plugin_ver = getattr(relay, "plugin_version", None) if relay else None
         mismatch = getattr(relay, "version_mismatch", True) if relay else True
+        plugin_status = getattr(relay, "latest_plugin_status", None) if relay else None
         return aiohttp.web.json_response(
             {
                 "adapter_version": __version__,
                 "plugin_version": plugin_ver,
                 "version_mismatch": mismatch,
+                "latest_plugin_status": plugin_status,
                 "onebot_connected": bool(state.get("onebot_connected")),
                 "hermes_plugin_connected": bool(state.get("hermes_plugin_connected")),
                 "onebot_mode": cfg.onebot_mode,
@@ -282,6 +316,49 @@ def _get_config(store: ConfigStore):
     return handler
 
 
+def _get_bot_blacklist(state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        blacklist = state.get("bot_blacklist")
+        if blacklist is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("bot_blacklist_error", "bot blacklist unavailable")}, status=503,
+            )
+        try:
+            entries = blacklist.list(
+                scope=request.query.get("scope"),
+                group_id=request.query.get("group_id"),
+                user_id=request.query.get("user_id"),
+            )
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        return aiohttp.web.json_response({"entries": [entry.to_dict() for entry in entries]})
+
+    return handler
+
+
+def _delete_bot_blacklist(state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        blacklist = state.get("bot_blacklist")
+        if blacklist is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("bot_blacklist_error", "bot blacklist unavailable")}, status=503,
+            )
+        try:
+            entry_id = int(request.match_info["entry_id"])
+        except (TypeError, ValueError):
+            return aiohttp.web.json_response({"error": "invalid entry_id"}, status=400)
+        removed = blacklist.remove_id(entry_id)
+        if not removed:
+            return aiohttp.web.json_response({"error": "entry not found"}, status=404)
+        audit_logger.info(
+            "bot blacklist entry removed source=webui entry_id=%d client_ip=%s",
+            entry_id, request.remote or "unknown",
+        )
+        return aiohttp.web.json_response({"ok": True, "removed": True})
+
+    return handler
+
+
 def _put_config(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         try:
@@ -305,7 +382,14 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             # in-memory state diverged from on-disk state (listeners would
             # have already applied the new config but the file would be stale).
             try:
-                save_config(new_cfg)
+                save_config(
+                    new_cfg,
+                    source="webui",
+                    reason="webui.config_patch",
+                    actor="authenticated_webui_session",
+                    metadata=_config_request_metadata(request, store.config),
+                    submitted_fields=list(data),
+                )
             except Exception as exc:
                 return aiohttp.web.json_response({"error": f"failed to save config: {exc}"}, status=500)
             store.update(new_cfg)
@@ -319,6 +403,108 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
         except Exception as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
         return aiohttp.web.json_response(_public_config(new_cfg))
+
+    return handler
+
+
+def _usage_range(request: aiohttp.web.Request) -> tuple[float, float]:
+    """Parse an optional half-open Unix timestamp range (default: last 7 days)."""
+    now = time.time()
+    try:
+        start = float(request.query.get("start", now - 7 * 86400))
+        end = float(request.query.get("end", now))
+    except (TypeError, ValueError) as exc:
+        raise aiohttp.web.HTTPBadRequest(text='{"error":"start and end must be Unix timestamps"}',
+                                         content_type="application/json") from exc
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+        raise aiohttp.web.HTTPBadRequest(text='{"error":"end must be greater than start"}',
+                                         content_type="application/json")
+    return start, end
+
+
+def _usage_stats(store: ConfigStore, state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        usage = state.get("usage_stats")
+        if usage is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("usage_stats_error", "usage statistics unavailable")}, status=503,
+            )
+        start, end = _usage_range(request)
+        scope = request.query.get("scope", "all")
+        bucket = request.query.get("bucket", "day")
+        group_id = request.query.get("group_id") or None
+        user_id = request.query.get("user_id") or None
+        if scope not in {"all", "dm", "group"}:
+            return aiohttp.web.json_response({"error": "scope must be all, dm, or group"}, status=400)
+        if bucket not in {"hour", "day"}:
+            return aiohttp.web.json_response({"error": "bucket must be hour or day"}, status=400)
+        if scope == "dm" and group_id is not None:
+            return aiohttp.web.json_response({"error": "group_id cannot be used with dm scope"}, status=400)
+        try:
+            tz_offset = int(request.query.get("tz_offset_minutes", "0"))
+        except ValueError:
+            return aiohttp.web.json_response({"error": "tz_offset_minutes must be an integer"}, status=400)
+        if not -1440 <= tz_offset <= 1440:
+            return aiohttp.web.json_response({"error": "tz_offset_minutes out of range"}, status=400)
+        try:
+            result = await usage.query(
+                start=start,
+                end=end,
+                scope=scope,
+                group_id=group_id,
+                user_id=user_id,
+                bucket=bucket,
+                tz_offset_minutes=tz_offset,
+            )
+        except Exception as exc:
+            logger.exception("usage statistics query failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=503)
+        return aiohttp.web.json_response({
+            "enabled": store.config.usage_stats_enabled,
+            "start": start,
+            "end": end,
+            "bucket": bucket,
+            **result,
+        })
+
+    return handler
+
+
+def _usage_dimensions(state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        usage = state.get("usage_stats")
+        if usage is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("usage_stats_error", "usage statistics unavailable")}, status=503,
+            )
+        start, end = _usage_range(request)
+        try:
+            result = await usage.dimensions(start, end)
+        except Exception as exc:
+            logger.exception("usage dimensions query failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=503)
+        return aiohttp.web.json_response(result)
+
+    return handler
+
+
+def _clear_usage(store: ConfigStore, state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        usage = state.get("usage_stats")
+        if usage is None:
+            return aiohttp.web.json_response(
+                {"error": state.get("usage_stats_error", "usage statistics unavailable")}, status=503,
+            )
+        try:
+            deleted = await usage.clear()
+        except Exception as exc:
+            logger.exception("clearing usage statistics failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=503)
+        audit_logger.warning(
+            "usage statistics cleared deleted=%d client_ip=%s",
+            deleted, _client_ip(request, store.config),
+        )
+        return aiohttp.web.json_response({"ok": True, "deleted": deleted})
 
     return handler
 
@@ -348,7 +534,14 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
             # use the same path without the user re-entering it in the config page.
             if install_dir and str(target) != cfg.hermes_install_dir:
                 store.patch(hermes_install_dir=str(target))
-                save_config(store.config)
+                save_config(
+                    store.config,
+                    source="webui",
+                    reason="plugin.install.persist_directory",
+                    actor="authenticated_webui_session",
+                    metadata=_config_request_metadata(request, cfg),
+                    submitted_fields=["hermes_install_dir"],
+                )
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin install failed")
@@ -375,7 +568,14 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
             # the plugin was managed, matching _install_plugin's behavior.
             if install_dir and str(target) != store.config.hermes_install_dir:
                 store.patch(hermes_install_dir=str(target))
-                save_config(store.config)
+                save_config(
+                    store.config,
+                    source="webui",
+                    reason="plugin.uninstall.persist_directory",
+                    actor="authenticated_webui_session",
+                    metadata=_config_request_metadata(request, store.config),
+                    submitted_fields=["hermes_install_dir"],
+                )
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin uninstall failed")
@@ -504,7 +704,16 @@ def _put_group(store: ConfigStore):
             store.patch(groups=new_groups)
         except ValueError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
-        save_config(store.config)
+        metadata = _config_request_metadata(request, cfg)
+        metadata["group_id"] = str(group_id)
+        save_config(
+            store.config,
+            source="webui",
+            reason="group.update",
+            actor="authenticated_webui_session",
+            metadata=metadata,
+            submitted_fields=["groups"],
+        )
         # Materialize channel_prompts into Hermes config.yaml so the plugin
         # picks up the new per-group custom_prompt on next connect/restart.
         try:
@@ -523,14 +732,23 @@ def _delete_group(store: ConfigStore):
         cfg = store.config
         new_groups = {k: v for k, v in cfg.groups.items() if k != str(group_id)}
         store.patch(groups=new_groups)
-        save_config(store.config)
+        metadata = _config_request_metadata(request, cfg)
+        metadata["group_id"] = str(group_id)
+        save_config(
+            store.config,
+            source="webui",
+            reason="group.delete",
+            actor="authenticated_webui_session",
+            metadata=metadata,
+            submitted_fields=["groups"],
+        )
         return aiohttp.web.json_response({"deleted": group_id})
 
     return handler
 
 
 def _sync_groups(store: ConfigStore, state: dict[str, Any]):
-    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         api = state.get("api")
         if api is None:
             return aiohttp.web.json_response({"error": "OneBot API not available"}, status=503)
@@ -551,7 +769,14 @@ def _sync_groups(store: ConfigStore, state: dict[str, Any]):
             added.append(gid)
         if added:
             store.patch(groups=new_groups)
-            save_config(store.config)
+            save_config(
+                store.config,
+                source="webui",
+                reason="group.sync",
+                actor="authenticated_webui_session",
+                metadata=_config_request_metadata(request, cfg),
+                submitted_fields=["groups"],
+            )
         return aiohttp.web.json_response({"added": added, "total": len(new_groups)})
 
     return handler
@@ -656,13 +881,17 @@ def _put_hermes_tools(store: ConfigStore):
         except Exception as exc:
             logger.exception("write platform_toolsets failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        audit_logger.info(
+            "Hermes toolsets updated source=webui client_ip=%s toolsets=%s",
+            _client_ip(request, cfg), final,
+        )
         return aiohttp.web.json_response({"ok": True, "saved": final, "platform": PLATFORM})
 
     return handler
 
 
 def _reset_hermes_tools(store: ConfigStore):
-    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         from onebot_adapter.hermes_config import reset_platform_toolsets, resolve_hermes_config_path
 
         cfg = store.config
@@ -677,6 +906,10 @@ def _reset_hermes_tools(store: ConfigStore):
         except Exception as exc:
             logger.exception("reset platform_toolsets failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        audit_logger.warning(
+            "Hermes toolsets reset source=webui client_ip=%s",
+            _client_ip(request, cfg),
+        )
         return aiohttp.web.json_response({"ok": True})
 
     return handler
@@ -737,6 +970,10 @@ def _put_hermes_mode(store: ConfigStore):
         except Exception as exc:
             logger.exception("write group_sessions_per_user failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        audit_logger.info(
+            "Hermes group_sessions_per_user updated source=webui client_ip=%s value=%s",
+            _client_ip(request, cfg), value,
+        )
         return aiohttp.web.json_response({
             "ok": True,
             "written": value,

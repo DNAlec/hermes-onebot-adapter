@@ -233,6 +233,33 @@ async def test_dequeue_merges_consecutive_same_user():
     assert merged.user_id == "200"
     assert merged.text == "m1\n\nm2"
     assert merged.message_id == "2"
+
+
+async def test_dequeue_merge_does_not_mutate_buffered_events():
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    first = _group_event("first", gid="42", uid="100", mid="1")
+    second = _group_event("second", gid="42", uid="200", mid="2")
+    third = _group_event("third", gid="42", uid="200", mid="3")
+    await relay.push_event(first)
+    await relay.push_event(second)
+    await relay.push_event(third)
+    original_texts = [entry[1].text for entry in relay._ring_buffer]
+    await relay._handle_idle({"group_id": "42"})
+    await asyncio.sleep(0)
+    assert [entry[1].text for entry in relay._ring_buffer] == original_texts
+    merged = relay._broadcast_event.call_args_list[-1][0][0]
+    assert merged.text == "second\n\nthird"
+    assert len(merged.delivery_ids) == 2
+
+
+async def test_idle_group_lock_is_reclaimed():
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("one", gid="42"))
+    await relay._handle_idle({"group_id": "42"})
+    await asyncio.sleep(0)
+    assert "42" not in relay._group_locks
     assert "42" not in relay._queues
 
 

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from onebot_adapter.hermes_plugin.adapter import _msg_context
 from onebot_adapter.hermes_plugin.onebot_tools import (
     _ADMIN_TOOL_NAMES,
     _TOOLS,
@@ -21,9 +22,7 @@ class MockAdapter:
     """Minimal adapter mock for testing tool handlers."""
 
     def __init__(self, is_admin: bool = False, group_id: str = "", user_id: str = ""):
-        self._current_is_admin = is_admin
-        self._current_group_id = group_id
-        self._current_user_id = user_id
+        _msg_context.set((is_admin, group_id, user_id))
         self._api_calls: list[tuple[str, dict]] = []
         self._api_results: dict[str, Any] = {}
 
@@ -58,8 +57,10 @@ def _has_error(result: str) -> bool:
 def reset_adapter():
     """Reset the module-level adapter before each test."""
     set_adapter(None)
+    _msg_context.set(None)
     yield
     set_adapter(None)
+    _msg_context.set(None)
 
 
 def _tool_handler(name: str):
@@ -75,8 +76,41 @@ def test_toolset_constant():
 
 
 def test_tool_count():
-    # 24 read-only/messaging + 14 admin = 38
-    assert len(_TOOLS) == 38
+    # 24 read-only/messaging + 2 bot blacklist + 14 admin = 40
+    assert len(_TOOLS) == 40
+
+
+async def test_bot_blacklist_tools_use_adapter_local_actions():
+    adapter = MockAdapter(group_id="42", user_id="100")
+    set_adapter(adapter)
+    get_result = await _tool_handler("onebot_get_bot_blacklist")({"scope": "group", "group_id": "42"})
+    assert _is_success(get_result)
+    assert adapter._api_calls[0] == (
+        "adapter_get_bot_blacklist",
+        {"scope": "group", "group_id": "42"},
+    )
+
+    edit_result = await _tool_handler("onebot_edit_bot_blacklist")({
+        "action": "set", "scope": "group", "group_id": "42", "user_id": "200",
+        "duration_seconds": 3600, "reason": "刷屏",
+    })
+    assert _is_success(edit_result)
+    assert adapter._api_calls[1] == (
+        "adapter_edit_bot_blacklist",
+        {
+            "operation": "set", "scope": "group", "group_id": "42", "user_id": "200",
+            "duration_seconds": 3600, "reason": "刷屏", "created_by_user_id": "100",
+        },
+    )
+
+
+async def test_bot_blacklist_edit_requires_group_and_set_fields():
+    adapter = MockAdapter(user_id="100")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_edit_bot_blacklist")
+    assert _has_error(await handler({"action": "set", "scope": "group", "user_id": "200"}))
+    assert _has_error(await handler({"action": "set", "scope": "dm", "user_id": "200"}))
+    assert adapter._api_calls == []
 
 
 def test_all_tools_have_required_fields():

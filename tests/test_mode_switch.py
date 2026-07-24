@@ -1,6 +1,8 @@
 """Tests for config hot-reload: transport mode switching via WebUI."""
 from __future__ import annotations
 
+import asyncio
+
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -119,6 +121,20 @@ async def test_log_level_hot_reload(service):
     finally:
         await service._on_hermes_cleanup(relay)
         logging.getLogger().setLevel(logging.INFO)
+
+
+async def test_rapid_config_updates_converge_to_latest(service):
+    first = service.store.config.with_overrides(log_message_preview=10)
+    service.store.update(first)
+    second = first.with_overrides(log_message_preview=20)
+    service.store.update(second)
+    third = second.with_overrides(log_message_preview=30)
+    service.store.update(third)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert service._relay is not None
+    assert service._relay._config.log_message_preview == 30
+    assert service._applied_config.log_message_preview == 30
 
 
 async def test_webui_put_config_triggers_mode_switch(tmp_path, monkeypatch):

@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from onebot_adapter.config import AdapterConfig
+from onebot_adapter.logging_utils import safe_json
 from onebot_adapter.onebot.log_format import log_recv_line
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.parser import parse_event
@@ -44,6 +45,7 @@ class OneBotHandler:
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
+        bot_blacklist_match_fn: Any | None = None,
     ) -> None:
         self.label = label
         self._config = config
@@ -55,6 +57,7 @@ class OneBotHandler:
         self._seq_map = seq_map
         self._name_resolver = name_resolver or NameResolver(api)
         self._ws_api_transport = ws_api_transport
+        self._bot_blacklist_match_fn = bot_blacklist_match_fn
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the handler."""
@@ -71,7 +74,7 @@ class OneBotHandler:
         except json.JSONDecodeError:
             logger.warning("OneBot %s: non-JSON frame ignored", self.label)
             return
-        logger.debug("OneBot %s recv raw: %s", self.label, raw[:2000])
+        logger.debug("OneBot %s recv frame: %s", self.label, safe_json(data))
         # 在 parser 之前存 real_seq → message_id 映射(与 NapCat 的 onRecvMsg 对齐,
         # 所有消息都进 FIFO,不论是否触发 bot)
         if self._seq_map is not None and data.get("post_type") == "message":
@@ -89,6 +92,7 @@ class OneBotHandler:
             name_resolver=self._name_resolver,
             is_known_command_fn=self._is_known_command_fn,
             canonical_command_name_fn=self._canonical_command_name_fn,
+            bot_blacklist_match_fn=self._bot_blacklist_match_fn,
         )
         if parsed is None:
             logger.debug("OneBot %s event ignored (post_type=%s)", self.label, data.get("post_type"))
@@ -96,8 +100,8 @@ class OneBotHandler:
         # FilteredEvent → reject message via callback, don't forward to Hermes
         if isinstance(parsed, FilteredEvent):
             logger.debug(
-                "OneBot %s command filtered: chat_id=%s cmd=%s",
-                self.label, parsed.chat_id, parsed.command_name,
+                "OneBot %s event filtered: type=%s chat_id=%s cmd=%s",
+                self.label, parsed.filter_type, parsed.chat_id, parsed.command_name,
             )
             if self._on_filtered:
                 try:
@@ -106,7 +110,11 @@ class OneBotHandler:
                     logger.exception("OneBot %s: on_filtered callback failed", self.label)
             return
         event = parsed
-        log_recv_line(event, self._config.log_message_preview)
+        log_recv_line(
+            event,
+            self._config.log_message_preview,
+            self._config.log_file_message_mode,
+        )
         logger.debug("OneBot %s parsed text preview: %r", self.label, (event.text or "")[:500])
         if self._on_event:
             try:

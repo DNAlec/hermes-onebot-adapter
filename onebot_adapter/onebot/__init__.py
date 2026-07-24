@@ -1,1 +1,1 @@
-"""OneBot (OneBot 11) integration: WS transports, HTTP API client, event parser."""
+"""OneBot 11 integration: bidirectional WS transport, API facade, and event parser."""

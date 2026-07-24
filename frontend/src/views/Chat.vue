@@ -4,6 +4,7 @@ import {
   getGroups, putGroup, deleteGroup, syncGroups,
   type GroupConfig,
   getHermesMode, putHermesMode, refreshHermesMode, type HermesMode,
+  getBotBlacklist, deleteBotBlacklistEntry, type BotBlacklistEntry,
 } from "../api";
 import { useConfig } from "../composables/useConfig";
 
@@ -15,6 +16,9 @@ const msg = ref("");
 const msgType = ref<"success" | "error">("success");
 const editingGroup = ref<GroupConfig | null>(null);
 const showEditor = ref(false);
+const blacklistEntries = ref<BotBlacklistEntry[]>([]);
+const blacklistLoading = ref(false);
+const blacklistMaxHours = ref(24);
 
 const hermesMode = ref<HermesMode | null>(null);
 const editingPerUser = ref(false);
@@ -27,6 +31,8 @@ onMounted(async () => {
   try {
     await load();
     groups.value = await getGroups();
+    blacklistMaxHours.value = (cfg.value?.bot_blacklist_max_duration_seconds || 86400) / 3600;
+    await fetchBotBlacklist();
     fetchHermesMode();
   } catch (e: any) {
     msg.value = "加载失败: " + (e.response?.data?.error || e.message);
@@ -41,6 +47,41 @@ async function fetchHermesMode() {
     modeMsg.value = "读取 Hermes 配置失败: " + (e.response?.data?.error || e.message);
     modeMsgType.value = "error";
   }
+}
+
+async function fetchBotBlacklist() {
+  blacklistLoading.value = true;
+  try {
+    blacklistEntries.value = await getBotBlacklist();
+  } catch (e: any) {
+    msg.value = "动态黑名单加载失败: " + (e.response?.data?.error || e.message);
+    msgType.value = "error";
+  } finally {
+    blacklistLoading.value = false;
+  }
+}
+
+async function removeBlacklistEntry(entry: BotBlacklistEntry) {
+  if (!confirm(`确认解除用户 ${entry.user_id} 的这条动态拉黑记录？`)) return;
+  try {
+    await deleteBotBlacklistEntry(entry.id);
+    await fetchBotBlacklist();
+    msg.value = "动态黑名单记录已解除";
+    msgType.value = "success";
+  } catch (e: any) {
+    msg.value = e.response?.data?.error || e.message;
+    msgType.value = "error";
+  }
+}
+
+function formatTimestamp(value: number) {
+  return new Date(value * 1000).toLocaleString();
+}
+
+function scopeLabel(entry: BotBlacklistEntry) {
+  if (entry.scope === "group") return `群聊 ${entry.group_id}`;
+  if (entry.scope === "dm") return "私聊";
+  return "全部会话";
 }
 
 async function saveHermesMode(value: boolean) {
@@ -103,12 +144,27 @@ async function saveGlobal() {
       event_queue_enabled: c.event_queue_enabled,
       event_queue_max_per_chat: c.event_queue_max_per_chat,
       event_queue_idle_timeout: c.event_queue_idle_timeout,
+      rate_limit_enabled: c.rate_limit_enabled,
+      global_rate_limit_algorithm: c.global_rate_limit_algorithm,
+      global_rate_limit_messages: c.global_rate_limit_messages,
+      global_rate_limit_window_seconds: c.global_rate_limit_window_seconds,
+      group_rate_limit_algorithm: c.group_rate_limit_algorithm,
+      group_rate_limit_messages: c.group_rate_limit_messages,
+      group_rate_limit_window_seconds: c.group_rate_limit_window_seconds,
+      user_rate_limit_algorithm: c.user_rate_limit_algorithm,
+      user_rate_limit_messages: c.user_rate_limit_messages,
+      user_rate_limit_window_seconds: c.user_rate_limit_window_seconds,
+      rate_limit_reject_message: c.rate_limit_reject_message,
       media_delivery_mode: c.media_delivery_mode,
       global_channel_prompt: c.global_channel_prompt,
       notify_poke_enabled: c.notify_poke_enabled,
       notify_member_change_enabled: c.notify_member_change_enabled,
+      bot_blacklist_enabled: c.bot_blacklist_enabled,
+      bot_blacklist_max_duration_seconds: Math.max(1, Math.round(blacklistMaxHours.value * 3600)),
+      bot_blacklist_reject_message: c.bot_blacklist_reject_message,
     });
     msg.value = "全局设置已保存";
+    await fetchBotBlacklist();
     msgType.value = "success";
   } catch (e: any) {
     msg.value = (e.response?.data?.error || e.message);
@@ -141,6 +197,9 @@ function addGroup() {
     reaction_emoji_enabled: null,
     command_filter_enabled: null, command_filter_unknown: null, command_permissions: null,
     notify_poke_enabled: null, notify_member_change_enabled: null,
+    group_rate_limit_algorithm: null,
+    group_rate_limit_messages: null,
+    group_rate_limit_window_seconds: null,
   };
   showEditor.value = true;
 }
@@ -195,6 +254,19 @@ function addTag(list: string[], value: string) {
 }
 function removeTag(list: string[], idx: number) {
   list.splice(idx, 1);
+}
+
+function toggleGroupRateLimitOverride(enabled: boolean) {
+  if (!editingGroup.value) return;
+  if (!enabled) {
+    editingGroup.value.group_rate_limit_algorithm = null;
+    editingGroup.value.group_rate_limit_messages = null;
+    editingGroup.value.group_rate_limit_window_seconds = null;
+    return;
+  }
+  editingGroup.value.group_rate_limit_algorithm = cfg.value?.group_rate_limit_algorithm || "sliding_window";
+  editingGroup.value.group_rate_limit_messages = cfg.value?.group_rate_limit_messages || 0;
+  editingGroup.value.group_rate_limit_window_seconds = cfg.value?.group_rate_limit_window_seconds || 0;
 }
 
 const cmdPermsError = ref("");
@@ -296,6 +368,109 @@ function resetHint() {
           <span class="hint">消息进入排队队列时贴的表情，空=不贴（默认 123）</span>
         </label>
       </div>
+    </div>
+
+    <!-- 入站消息限流 -->
+    <div v-if="cfg" class="section">
+      <h3>入站消息限流</h3>
+      <p class="hint">
+        现有准入和指令过滤通过后再计数。全局、群聊、个人三个维度同时生效，命中任一维度即回复原消息并拦截。
+        全局管理员和对应群管理员不受限流；个人计数在私聊和所有群之间共享。限额 0 表示禁用该维度。
+      </p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.rate_limit_enabled" />
+        <span>启用消息限流</span>
+      </label>
+      <div class="grid2 rate-limit-grid">
+        <fieldset>
+          <legend>全局总量</legend>
+          <label>算法
+            <select v-model="cfg.global_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限 <input type="number" v-model.number="cfg.global_rate_limit_messages" min="0" /></label>
+          <label>窗口（秒） <input type="number" v-model.number="cfg.global_rate_limit_window_seconds" min="0" step="0.1" /></label>
+        </fieldset>
+        <fieldset>
+          <legend>每个群聊</legend>
+          <label>算法
+            <select v-model="cfg.group_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限 <input type="number" v-model.number="cfg.group_rate_limit_messages" min="0" /></label>
+          <label>窗口（秒） <input type="number" v-model.number="cfg.group_rate_limit_window_seconds" min="0" step="0.1" /></label>
+        </fieldset>
+        <fieldset>
+          <legend>每个用户</legend>
+          <label>算法
+            <select v-model="cfg.user_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限 <input type="number" v-model.number="cfg.user_rate_limit_messages" min="0" /></label>
+          <label>窗口（秒） <input type="number" v-model.number="cfg.user_rate_limit_window_seconds" min="0" step="0.1" /></label>
+        </fieldset>
+      </div>
+      <label class="full">
+        拦截提示模板
+        <input v-model="cfg.rate_limit_reject_message" />
+        <span class="hint">支持 {scope}、{retry_after}、{user_id}；等待时间向上取整为秒。</span>
+      </label>
+    </div>
+
+    <!-- Bot 动态用户黑名单 -->
+    <div v-if="cfg" class="section">
+      <div class="section-header">
+        <h3>Bot 动态用户黑名单</h3>
+        <button @click="fetchBotBlacklist" :disabled="blacklistLoading" class="sync-btn">
+          {{ blacklistLoading ? "刷新中..." : "↻ 刷新记录" }}
+        </button>
+      </div>
+      <p class="hint">
+        独立于上方群聊/私聊准入名单。Bot 可通过 onebot_get_bot_blacklist 和
+        onebot_edit_bot_blacklist 工具临时拦截用户；全局管理员和对应群管理员始终豁免。
+      </p>
+      <div class="grid2">
+        <label class="checkbox-row">
+          <input type="checkbox" v-model="cfg.bot_blacklist_enabled" />
+          <span>允许 bot 查看和编辑动态黑名单</span>
+        </label>
+        <label>
+          允许的最大拉黑时间（小时）
+          <input type="number" v-model.number="blacklistMaxHours" min="0.0002778" step="1" />
+          <span class="hint">默认 24 小时；bot 请求超过此值时自动截短。</span>
+        </label>
+        <label class="full">
+          拦截提示模板
+          <input v-model="cfg.bot_blacklist_reject_message" />
+          <span class="hint">
+            支持 {user_id}、{scope}、{remaining}、{expires_at}、{reason}。
+          </span>
+        </label>
+      </div>
+
+      <table v-if="blacklistEntries.length" class="group-table blacklist-table">
+        <thead>
+          <tr><th>用户</th><th>范围</th><th>原因</th><th>发起用户</th><th>创建时间</th><th>到期/剩余</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="entry in blacklistEntries" :key="entry.id">
+            <td>{{ entry.user_id }}</td>
+            <td>{{ scopeLabel(entry) }}</td>
+            <td>{{ entry.reason }}</td>
+            <td>{{ entry.created_by_user_id || "—" }}</td>
+            <td>{{ formatTimestamp(entry.created_at) }}</td>
+            <td>{{ formatTimestamp(entry.expires_at) }}<br><span class="hint">{{ entry.remaining }}</span></td>
+            <td><button @click="removeBlacklistEntry(entry)" class="row-btn danger">解除</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else-if="!blacklistLoading" class="empty">暂无有效动态黑名单记录</p>
     </div>
 
     <!-- 会话隔离与消息排队 -->
@@ -590,6 +765,32 @@ function resetHint() {
         </label>
 
         <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);" />
+        <h4 style="margin: 0 0 0.75rem; font-size: 0.95rem;">群聊消息限流</h4>
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            :checked="editingGroup.group_rate_limit_messages !== null"
+            @change="toggleGroupRateLimitOverride(($event.target as HTMLInputElement).checked)"
+          />
+          <span>覆盖全局群聊限流配置</span>
+        </label>
+        <template v-if="editingGroup.group_rate_limit_messages !== null">
+          <label>算法
+            <select v-model="editingGroup.group_rate_limit_algorithm">
+              <option value="sliding_window">滑动窗口</option>
+              <option value="token_bucket">令牌桶</option>
+            </select>
+          </label>
+          <label>消息上限
+            <input type="number" v-model.number="editingGroup.group_rate_limit_messages" min="0" />
+            <span class="hint">0 表示仅在此群禁用群聊维度；全局和个人维度仍会生效。</span>
+          </label>
+          <label>窗口（秒）
+            <input type="number" v-model.number="editingGroup.group_rate_limit_window_seconds" min="0" step="0.1" />
+          </label>
+        </template>
+
+        <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);" />
         <h4 style="margin: 0 0 0.75rem; font-size: 0.95rem;">消息显示</h4>
 
         <label>
@@ -683,8 +884,11 @@ function resetHint() {
 .section-header h3 { margin: 0; border: none; padding: 0; }
 .actions { display: flex; gap: 0.5rem; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+.rate-limit-grid fieldset { border: 1px solid var(--border); border-radius: 6px; padding: 0.9rem; display: grid; gap: 0.75rem; }
+.rate-limit-grid legend { color: var(--primary); font-weight: 600; padding: 0 0.35rem; }
 label { display: block; margin-bottom: 0.75rem; font-weight: 500; font-size: 0.9rem; }
 label.full { width: 100%; }
+.grid2 > label.full { grid-column: 1 / -1; }
 input, select, textarea { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; margin-top: 0.25rem; }
 textarea { resize: vertical; }
 input[type="checkbox"] { width: auto; }

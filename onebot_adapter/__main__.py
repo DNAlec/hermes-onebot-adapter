@@ -14,6 +14,7 @@ def _init_config(force: bool) -> int:
         config_path,
         ensure_tokens,
         load_config,
+        save_config,
     )
 
     target = config_path()
@@ -32,7 +33,25 @@ def _init_config(force: bool) -> int:
         }
 
     cfg = AdapterConfig(**existing_tokens)
-    cfg = ensure_tokens(cfg)
+    tokens_were_missing = not all(existing_tokens.values())
+    reason = "cli.force_reinitialize" if target.exists() and force else "cli.init_config"
+    cfg = ensure_tokens(
+        cfg,
+        source="cli",
+        reason=reason,
+        actor="command_line",
+    )
+    # ensure_tokens persists only when at least one token is missing. A forced
+    # reinitialization with three existing tokens still needs to write the
+    # default configuration while preserving those tokens.
+    if not tokens_were_missing:
+        save_config(
+            cfg,
+            source="cli",
+            reason=reason,
+            actor="command_line",
+            submitted_fields=sorted(cfg.to_dict()),
+        )
     print(f"✓ 配置文件已生成: {target}")
     print(f"  onebot_ws_token:  {cfg.onebot_ws_token}")
     print(f"  hermes_ws_token:  {cfg.hermes_ws_token}")
