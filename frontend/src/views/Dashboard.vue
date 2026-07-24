@@ -198,6 +198,16 @@ onUnmounted(() => {
         <p>适配器版本 <strong>v{{ status.adapter_version }}</strong> 与插件版本
           <strong>v{{ status.plugin_version || '未知' }}</strong> 不一致。请<a href="/connections">重新安装插件</a>。</p>
       </div>
+      <div
+        v-if="status.latest_plugin_status?.level === 'error'"
+        class="card card-warn wide"
+      >
+        <h3>⚠️ Hermes 插件处理异常</h3>
+        <p>
+          {{ status.latest_plugin_status.event }}：{{ status.latest_plugin_status.message }}
+          （{{ new Date(status.latest_plugin_status.timestamp * 1000).toLocaleString() }}）
+        </p>
+      </div>
       <div class="card">
         <h3>端口</h3>
         <dl>

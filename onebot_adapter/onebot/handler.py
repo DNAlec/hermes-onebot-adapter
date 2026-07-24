@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from onebot_adapter.config import AdapterConfig
+from onebot_adapter.logging_utils import safe_json
 from onebot_adapter.onebot.log_format import log_recv_line
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.parser import parse_event
@@ -73,7 +74,7 @@ class OneBotHandler:
         except json.JSONDecodeError:
             logger.warning("OneBot %s: non-JSON frame ignored", self.label)
             return
-        logger.debug("OneBot %s recv raw: %s", self.label, raw[:2000])
+        logger.debug("OneBot %s recv frame: %s", self.label, safe_json(data))
         # 在 parser 之前存 real_seq → message_id 映射(与 NapCat 的 onRecvMsg 对齐,
         # 所有消息都进 FIFO,不论是否触发 bot)
         if self._seq_map is not None and data.get("post_type") == "message":
@@ -109,7 +110,11 @@ class OneBotHandler:
                     logger.exception("OneBot %s: on_filtered callback failed", self.label)
             return
         event = parsed
-        log_recv_line(event, self._config.log_message_preview)
+        log_recv_line(
+            event,
+            self._config.log_message_preview,
+            self._config.log_file_message_mode,
+        )
         logger.debug("OneBot %s parsed text preview: %r", self.label, (event.text or "")[:500])
         if self._on_event:
             try:

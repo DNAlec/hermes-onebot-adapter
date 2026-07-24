@@ -9,10 +9,11 @@ WS 帧格式：请求 ``{"action", "params", "echo"}``，响应 ``{"retcode", "d
 """
 from __future__ import annotations
 
-import json
 import logging
+import time
 from typing import Any
 
+from onebot_adapter.logging_utils import safe_json
 from onebot_adapter.onebot.ws_api import WsApiTransport
 
 logger = logging.getLogger(__name__)
@@ -31,14 +32,22 @@ class OneBotApi:
     ) -> dict[str, Any]:
         logger.debug(
             "OneBot API call: %s params=%s",
-            action, json.dumps(params or {}, ensure_ascii=False)[:_DEBUG_LOG_MAX],
+            action, safe_json(params or {}, _DEBUG_LOG_MAX),
         )
+        started = time.monotonic()
         try:
             data = await self._ws.request(action, params, timeout=timeout)
         except Exception as exc:
-            logger.warning("OneBot API %s request failed: %s", action, exc)
+            logger.warning(
+                "OneBot API %s request failed duration_ms=%.1f: %s",
+                action, (time.monotonic() - started) * 1000, exc,
+            )
             raise
-        logger.debug("OneBot API %s response: %s", action, json.dumps(data, ensure_ascii=False)[:_DEBUG_LOG_MAX])
+        duration_ms = (time.monotonic() - started) * 1000
+        logger.debug(
+            "OneBot API %s response duration_ms=%.1f: %s",
+            action, duration_ms, safe_json(data, _DEBUG_LOG_MAX),
+        )
         if data.get("retcode", 0) != 0:
             logger.warning(
                 "OneBot API %s error: retcode=%s status=%s msg=%s",
@@ -48,7 +57,7 @@ class OneBotApi:
                 f"OneBot API error {action}: retcode={data.get('retcode')} "
                 f"status={data.get('status')} msg={data.get('msg')}"
             )
-        logger.debug("OneBot API %s -> ok", action)
+        logger.debug("OneBot API %s -> ok duration_ms=%.1f", action, duration_ms)
         return data
 
     async def get_login_info(self) -> dict[str, Any]:

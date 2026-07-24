@@ -45,6 +45,7 @@ COMMAND_PERM_ADMIN = "admin"
 COMMAND_PERM_DISABLED = "disabled"
 _VALID_COMMAND_PERM_LEVELS = {COMMAND_PERM_EVERYONE, COMMAND_PERM_ADMIN, COMMAND_PERM_DISABLED}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_VALID_LOG_FILE_MESSAGE_MODES = {"none", "preview", "full"}
 
 RATE_LIMIT_SLIDING_WINDOW = "sliding_window"
 RATE_LIMIT_TOKEN_BUCKET = "token_bucket"
@@ -195,6 +196,8 @@ class AdapterConfig:
     log_file_enabled: bool = True
     log_file_dir: str = ""
     log_retention_days: int = 3
+    log_file_message_mode: str = "preview"
+    log_file_max_bytes: int = 10 * 1024 * 1024
     usage_stats_enabled: bool = True
     usage_stats_retention_days: int = 365
     message_show_group_id: bool = True
@@ -254,6 +257,13 @@ class AdapterConfig:
             errors.append("log_message_preview must be non-negative")
         if self.log_retention_days < 1:
             errors.append("log_retention_days must be at least 1")
+        if self.log_file_message_mode not in _VALID_LOG_FILE_MESSAGE_MODES:
+            errors.append(
+                f"log_file_message_mode must be one of {sorted(_VALID_LOG_FILE_MESSAGE_MODES)}"
+            )
+        if not isinstance(self.log_file_max_bytes, int) or isinstance(self.log_file_max_bytes, bool) \
+                or self.log_file_max_bytes < 1024:
+            errors.append("log_file_max_bytes must be an integer of at least 1024")
         if self.usage_stats_retention_days < 1:
             errors.append("usage_stats_retention_days must be at least 1")
         for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port"):
@@ -639,6 +649,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
                                      "直连开启会被伪造 IP 绕过登录限流)",
         "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
+        "log_file_message_mode": "文件日志消息正文:none(不记录)|preview(按预览长度截断,默认)|full(完整正文)",
+        "log_file_max_bytes": "单个日志文件大小上限(字节,默认10 MiB);达到上限后立即轮转",
         "usage_stats_enabled": "用量统计开关;关闭后停止新增记录,已有历史仍可查询",
         "usage_stats_retention_days": "用量统计保留天数(默认365),过期记录自动清理",
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -84,6 +85,25 @@ async def test_event_ack_removes_replay_entry():
     assert len(relay._ring_buffer) == 1
     relay._handle_event_ack({"delivery_ids": [event.delivery_id]})
     assert not relay._ring_buffer
+
+
+async def test_plugin_status_is_stored_for_webui():
+    relay, _, _ = _make_relay()
+    ws = MagicMock()
+    ws.send_json = AsyncMock()
+    await relay._handle_text(ws, json.dumps({
+        "type": "plugin_status",
+        "level": "error",
+        "event": "handle_message_failed",
+        "message": "RuntimeError: boom",
+        "timestamp": 123.0,
+    }))
+    assert relay.latest_plugin_status == {
+        "level": "error",
+        "event": "handle_message_failed",
+        "message": "RuntimeError: boom",
+        "timestamp": 123.0,
+    }
 
 
 async def test_rpc_connection_does_not_replay_or_become_consumer():

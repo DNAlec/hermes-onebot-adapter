@@ -19,6 +19,8 @@ import logging
 import uuid
 from typing import Any
 
+from onebot_adapter.logging_utils import safe_json
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 10.0
@@ -86,13 +88,9 @@ class WsApiTransport:
         self._echo_ws.pop(echo, None)
         if not fut.done():
             fut.set_result(data)
-        try:
-            data_preview = json.dumps(data.get("data"), ensure_ascii=False)[:500]
-        except (TypeError, ValueError):
-            data_preview = "<unserializable>"
         logger.debug(
             "WsApiTransport: resolved echo=%s retcode=%s data=%s",
-            echo, data.get("retcode"), data_preview,
+            echo, data.get("retcode"), safe_json(data.get("data"), 500),
         )
         return True
 
@@ -114,7 +112,7 @@ class WsApiTransport:
         frame = {"action": action, "params": params or {}, "echo": echo}
         logger.debug(
             "WsApiTransport: sending action=%s echo=%s params=%s",
-            action, echo, json.dumps(params or {}, ensure_ascii=False)[:500],
+            action, echo, safe_json(params or {}, 500),
         )
         try:
             await ws.send_json(frame)

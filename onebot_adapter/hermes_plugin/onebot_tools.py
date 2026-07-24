@@ -40,13 +40,17 @@ except ImportError:
     _msg_context = _contextvars_mod.ContextVar("_msg_context", default=None)
 
 
-def _api_call(action: str, **params: Any) -> Any:
+async def _api_call(action: str, **params: Any) -> Any:
     """Return an awaitable that calls the adapter's _api_call method."""
     if _adapter is None:
         raise RuntimeError("OneBot adapter not initialized")
     # Convert kwargs to a params dict, dropping None values
     clean = {k: v for k, v in params.items() if v is not None}
-    return _adapter._api_call(action, clean)
+    try:
+        return await _adapter._api_call(action, clean)
+    except Exception:
+        logger.warning("OneBot tool API call failed action=%s", action, exc_info=True)
+        raise
 
 
 # ── Schema helpers ───────────────────────────────────────────────────────

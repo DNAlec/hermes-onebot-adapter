@@ -141,11 +141,26 @@ async def format_send_line(
         return f"{'群聊' if is_group else '私聊'} {chat_id}"
 
 
-def log_recv_line(event: NormalizedEvent, preview: int = 40) -> None:
-    """Log a receive-side line to both console (truncated) and file (full)."""
+def log_recv_line(
+    event: NormalizedEvent,
+    preview: int = 40,
+    file_message_mode: str = "preview",
+) -> None:
+    """Log a receive-side line to the console/WebUI and optionally the file.
+
+    ``file_message_mode`` controls the dedicated persistent message copy:
+    ``none`` disables it, ``preview`` applies the configured preview limit, and
+    ``full`` preserves the historical full-body behaviour.
+    """
     line = format_recv_line(event, preview)
-    logger.info("接收 <- %s", line)
-    _file_logger.info("接收 <- %s", format_recv_line(event, 0))
+    logger.info("接收 <- %s [message_id=%s]", line, event.message_id)
+    if file_message_mode != "none":
+        file_preview = 0 if file_message_mode == "full" else preview
+        _file_logger.info(
+            "接收 <- %s [message_id=%s]",
+            format_recv_line(event, file_preview),
+            event.message_id,
+        )
 
 
 async def log_send_line(
@@ -157,8 +172,11 @@ async def log_send_line(
     reply_to: str | None = None,
     preview: int = 40,
     name_resolver: Any = None,
+    file_message_mode: str = "preview",
+    req_id: str = "",
+    message_id: str = "",
 ) -> None:
-    """Log a send-side line to both console (truncated) and file (full).
+    """Log a send-side line to the console/WebUI and optionally the file.
 
     Renders the full line once with ``preview=0`` (no truncation) so name
     resolution runs exactly once per call.  The console line is produced by
@@ -171,5 +189,8 @@ async def log_send_line(
         group_name=group_name, reply_to=reply_to,
         preview=0, name_resolver=name_resolver,
     )
-    logger.info("发送 -> %s", truncate(full, preview))
-    _file_logger.info("发送 -> %s", full)
+    suffix = " [message_id=%s req_id=%s]"
+    logger.info("发送 -> %s" + suffix, truncate(full, preview), message_id, req_id)
+    if file_message_mode != "none":
+        file_line = full if file_message_mode == "full" else truncate(full, preview)
+        _file_logger.info("发送 -> %s" + suffix, file_line, message_id, req_id)

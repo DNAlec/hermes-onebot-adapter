@@ -201,4 +201,7 @@ class OneBotForwardClient:
                 self._ws_api_transport.unregister(ws)
             if self._on_disconnect:
                 self._on_disconnect()
-            logger.info("OneBot forward WS disconnected")
+            logger.info(
+                "OneBot forward WS disconnected close_code=%s exception=%r",
+                ws.close_code, ws.exception(),
+            )
