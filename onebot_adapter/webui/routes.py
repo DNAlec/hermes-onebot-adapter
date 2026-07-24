@@ -49,6 +49,23 @@ _LOGIN_MAX_FAILS = 5
 _LOGIN_BAN_SECONDS = 900  # 15 minutes
 
 
+def _client_ip(request: aiohttp.web.Request, cfg: AdapterConfig) -> str:
+    """Return a trustworthy client IP using the configured proxy policy."""
+    if cfg.webui_trust_proxy_headers:
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff.strip():
+            return xff.split(",")[0].strip()
+    return request.remote or "unknown"
+
+
+def _config_request_metadata(request: aiohttp.web.Request, cfg: AdapterConfig) -> dict[str, str]:
+    return {
+        "client_ip": _client_ip(request, cfg),
+        "http_method": request.method,
+        "http_path": request.path,
+    }
+
+
 def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str, Any]) -> None:
     app.middlewares.append(_make_auth_middleware(store))
     app.router.add_get("/api/health", _health)
@@ -115,12 +132,7 @@ def _login(store: ConfigStore, state: dict[str, Any]):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         # Use X-Forwarded-For only when the user has explicitly opted in via
         # config; otherwise the direct peer IP is used to prevent spoofing.
-        ip: str
-        if store.config.webui_trust_proxy_headers:
-            xff = request.headers.get("X-Forwarded-For", "")
-            ip = xff.split(",")[0].strip() if xff.strip() else (request.remote or "unknown")
-        else:
-            ip = request.remote or "unknown"
+        ip = _client_ip(request, store.config)
         now = time.time()
         # Garbage-collect expired entries to keep the dict bounded.
         # Clear any entry whose ban window has passed, regardless of fail count.
@@ -352,7 +364,14 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             # in-memory state diverged from on-disk state (listeners would
             # have already applied the new config but the file would be stale).
             try:
-                save_config(new_cfg)
+                save_config(
+                    new_cfg,
+                    source="webui",
+                    reason="webui.config_patch",
+                    actor="authenticated_webui_session",
+                    metadata=_config_request_metadata(request, store.config),
+                    submitted_fields=list(data),
+                )
             except Exception as exc:
                 return aiohttp.web.json_response({"error": f"failed to save config: {exc}"}, status=500)
             store.update(new_cfg)
@@ -493,7 +512,14 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
             # use the same path without the user re-entering it in the config page.
             if install_dir and str(target) != cfg.hermes_install_dir:
                 store.patch(hermes_install_dir=str(target))
-                save_config(store.config)
+                save_config(
+                    store.config,
+                    source="webui",
+                    reason="plugin.install.persist_directory",
+                    actor="authenticated_webui_session",
+                    metadata=_config_request_metadata(request, cfg),
+                    submitted_fields=["hermes_install_dir"],
+                )
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin install failed")
@@ -520,7 +546,14 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
             # the plugin was managed, matching _install_plugin's behavior.
             if install_dir and str(target) != store.config.hermes_install_dir:
                 store.patch(hermes_install_dir=str(target))
-                save_config(store.config)
+                save_config(
+                    store.config,
+                    source="webui",
+                    reason="plugin.uninstall.persist_directory",
+                    actor="authenticated_webui_session",
+                    metadata=_config_request_metadata(request, store.config),
+                    submitted_fields=["hermes_install_dir"],
+                )
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin uninstall failed")
@@ -649,7 +682,16 @@ def _put_group(store: ConfigStore):
             store.patch(groups=new_groups)
         except ValueError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
-        save_config(store.config)
+        metadata = _config_request_metadata(request, cfg)
+        metadata["group_id"] = str(group_id)
+        save_config(
+            store.config,
+            source="webui",
+            reason="group.update",
+            actor="authenticated_webui_session",
+            metadata=metadata,
+            submitted_fields=["groups"],
+        )
         # Materialize channel_prompts into Hermes config.yaml so the plugin
         # picks up the new per-group custom_prompt on next connect/restart.
         try:
@@ -668,14 +710,23 @@ def _delete_group(store: ConfigStore):
         cfg = store.config
         new_groups = {k: v for k, v in cfg.groups.items() if k != str(group_id)}
         store.patch(groups=new_groups)
-        save_config(store.config)
+        metadata = _config_request_metadata(request, cfg)
+        metadata["group_id"] = str(group_id)
+        save_config(
+            store.config,
+            source="webui",
+            reason="group.delete",
+            actor="authenticated_webui_session",
+            metadata=metadata,
+            submitted_fields=["groups"],
+        )
         return aiohttp.web.json_response({"deleted": group_id})
 
     return handler
 
 
 def _sync_groups(store: ConfigStore, state: dict[str, Any]):
-    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         api = state.get("api")
         if api is None:
             return aiohttp.web.json_response({"error": "OneBot API not available"}, status=503)
@@ -696,7 +747,14 @@ def _sync_groups(store: ConfigStore, state: dict[str, Any]):
             added.append(gid)
         if added:
             store.patch(groups=new_groups)
-            save_config(store.config)
+            save_config(
+                store.config,
+                source="webui",
+                reason="group.sync",
+                actor="authenticated_webui_session",
+                metadata=_config_request_metadata(request, cfg),
+                submitted_fields=["groups"],
+            )
         return aiohttp.web.json_response({"added": added, "total": len(new_groups)})
 
     return handler
