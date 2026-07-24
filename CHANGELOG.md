@@ -1,23 +1,30 @@
 # 更新日志
 
-## [未发布]
+## [1.2.0] - 2026-07-24
 
 ### 新增
-- **Bot 动态用户黑名单**：默认开启，新增 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具，支持群聊、私聊和全局临时拉黑，记录原因、发起用户与到期时间；管理员自动豁免。记录独立持久化到 SQLite，WebUI 可配置最大时长和提示模板、查看并人工解除记录
+- **使用统计**：记录通过准入与指令过滤的消息元数据（不含正文/媒体），持久化到 `~/.onebot_adapter/usage_stats.sqlite3`，默认保留 365 天。新增 `GET /api/usage/stats`、`GET /api/usage/dimensions`、`DELETE /api/usage` 端点；WebUI 仪表盘展示趋势/活跃群/活跃用户图表，可按时间、范围（全部/私聊/群聊）、群、用户过滤。配置项 `usage_stats_enabled`（默认 true）/`usage_stats_retention_days`（默认 365）在「高级设置」页管理
+- **入站消息限流**：全局、群聊、个人三维度同时检查，支持滑动窗口（`sliding_window`）与令牌桶（`token_bucket`）两种算法，命中任一维度即回复原消息并拦截。全局管理员与对应群管理员豁免；个人计数在私聊和所有群之间共享；限额 0 表示禁用该维度。新增 `rate_limit_enabled` 及 `global/group/user_rate_limit_(algorithm|messages|window_seconds)`、`rate_limit_reject_message` 配置；GroupConfig 可 per-group 覆盖群聊维度。WebUI「聊天配置」页配置
+- **Bot 动态用户黑名单**：默认开启，新增 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具，支持群聊、私聊和全局临时拉黑，记录原因、发起用户与到期时间；管理员自动豁免。记录独立持久化到 `~/.onebot_adapter/bot_blacklist.sqlite3`，WebUI「聊天配置」页可配置 `bot_blacklist_enabled`/`bot_blacklist_max_duration_seconds`/`bot_blacklist_reject_message`、查看并人工解除记录
+- **配置备份与审计**：`save_config` 写入前自动备份为 `config.json.bak.<ts>`，保留最近 5 个；每次保存追加一条 JSON 审计记录到 `~/.onebot_adapter/logs/config-audit.log`（按日轮转，保留 365 天），记录改动字段、来源、操作者、客户端 IP 及指纹；检测到疑似重置（≥5 字段回退默认或群配置清空）时额外告警
 - **可靠事件投递**：Hermes 事件新增 delivery ID/ack；独立 cron 发送使用 `role=rpc` WS，不再参与事件重放或群聊队列状态
-- **日志隐私与审计**：新增文件消息正文 `none`/`preview`/`full` 策略（默认 `preview`）和单文件大小上限；记录 WebUI 登录/鉴权失败、WS 鉴权失败、统计清空、动态黑名单及 Hermes 配置修改审计事件
+- **日志隐私与审计**：新增文件消息正文 `none`/`preview`/`full` 策略（默认 `preview`）和单文件大小上限 `log_file_max_bytes`（默认 10 MiB，达到即轮转）；记录 WebUI 登录/鉴权失败、WS 鉴权失败、统计清空、动态黑名单及 Hermes 配置修改审计事件
 - **插件状态上报**：Hermes 插件可向适配器上报处理异常，WebUI 仪表盘显示最近一次插件错误摘要
 
 ### 变更
-- 配置文件损坏或字段非法时启动 fail-fast，不再回退默认配置并覆盖原文件
+- 配置文件损坏或字段非法时启动 fail-fast（`ConfigLoadError`），不再回退默认配置并覆盖原文件
 - WebUI Dashboard 与 ECharts 拆分为懒加载 chunk，降低首屏包体积
-- 移除 `platform_hint` 旧字段迁移及无生产调用的协议/缓存辅助接口
+- 移除 `platform_hint` 旧字段迁移及无生产调用的协议/缓存辅助接口（`MediaItem.from_dict`、`CommandInfo` 等）
 
 ### 修复
 - 修复 ring buffer 重连重复投递、队列合并污染缓冲事件及全客户端发送失败仍报告成功
 - 修复配置热更新乱序、插件连接失败 session 泄漏、self-id 探测任务泄漏和工具管理员上下文串线
 - 修复 per-group lock 长期增长及陈旧 OneBot HTTP API 文档
 - 修复完整消息日志向 root 传播，导致控制台/WebUI 同时出现截断版和完整版并泄露正文的问题
+
+### 文档
+- `docs/api.md` 补全 `/api/usage/*`、`/api/bot_blacklist` 端点；Config 字段表补全 `usage_stats_*`/`rate_limit_*`/`bot_blacklist_*`/`log_file_message_mode`/`log_file_max_bytes`；GroupConfig 字段表补 `group_rate_limit_*`
+- README 补充使用统计、入站消息限流、配置备份与审计、动态黑名单说明
 
 ## [1.1.0b] - 2026-07-17
 
