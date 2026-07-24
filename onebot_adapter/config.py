@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -9,7 +10,9 @@ import secrets
 import shutil
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -676,6 +679,104 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
 
 
 _MAX_BACKUPS = 5
+_AUDIT_RETENTION_DAYS = 365
+_AUDIT_LOCK = threading.Lock()
+
+
+def _config_fingerprint(data: dict[str, Any] | None) -> str | None:
+    if data is None:
+        return None
+    canonical = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _read_existing_config_data(target: Path) -> dict[str, Any] | None:
+    """Read the pre-save JSON for audit comparison without applying defaults."""
+    if not target.exists():
+        return None
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return {k: v for k, v in raw.items() if not k.startswith("_comment_")}
+
+
+def _audit_diff(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
+    old_data = old or {}
+    changed_fields = sorted(k for k in old_data.keys() | new.keys() if old_data.get(k) != new.get(k))
+    defaults = AdapterConfig().to_dict()
+    reverted_to_default = sorted(
+        k for k in changed_fields
+        if k in defaults and old is not None and old_data.get(k) != defaults[k] and new.get(k) == defaults[k]
+    )
+    old_groups = old_data.get("groups")
+    new_groups = new.get("groups")
+    old_group_count = len(old_groups) if isinstance(old_groups, dict) else 0
+    new_group_count = len(new_groups) if isinstance(new_groups, dict) else 0
+    suspicious_reset = (
+        len(reverted_to_default) >= 5
+        or (old_group_count > 0 and new_group_count == 0)
+    )
+    return {
+        "changed_fields": changed_fields,
+        "reverted_to_default_fields": reverted_to_default,
+        "old_group_count": old_group_count,
+        "new_group_count": new_group_count,
+        "suspicious_reset": suspicious_reset,
+    }
+
+
+def _safe_audit_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
+    """Allow only bounded request metadata; configuration values never enter here."""
+    if not metadata:
+        return {}
+    allowed = {"client_ip", "http_method", "http_path", "group_id"}
+    result: dict[str, str] = {}
+    for key in allowed:
+        if key in metadata:
+            result[key] = str(metadata[key]).replace("\r", " ").replace("\n", " ")[:300]
+    return result
+
+
+def _rotate_config_audit(audit_path: Path, now: float) -> None:
+    if audit_path.exists():
+        modified = datetime.fromtimestamp(audit_path.stat().st_mtime)
+        current = datetime.fromtimestamp(now)
+        if modified.date() != current.date():
+            rotated = audit_path.with_name(f"{audit_path.name}.{modified:%Y-%m-%d}")
+            if rotated.exists():
+                rotated = audit_path.with_name(f"{audit_path.name}.{modified:%Y-%m-%d}.{int(now)}")
+            os.replace(audit_path, rotated)
+    cutoff = now - (_AUDIT_RETENTION_DAYS * 86400)
+    for old in audit_path.parent.glob(f"{audit_path.name}.*"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError as exc:
+            logger.warning("could not remove old config audit log %s: %s", old, exc)
+
+
+def _write_config_audit(target: Path, event: dict[str, Any]) -> None:
+    """Append one JSON audit record independently of normal logging settings."""
+    audit_dir = target.parent / "logs"
+    audit_path = audit_dir / "config-audit.log"
+    with _AUDIT_LOCK:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        _rotate_config_audit(audit_path, time.time())
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+            handle.flush()
+
+
+def _try_write_config_audit(target: Path, event: dict[str, Any]) -> None:
+    try:
+        _write_config_audit(target, event)
+    except Exception:
+        # Audit failure must never turn a successful atomic config write into a
+        # failed API operation, but it must remain visible in ordinary logs.
+        logger.exception("config audit write failed for %s", target)
 
 
 def _rotate_backups(target: Path, max_backups: int = _MAX_BACKUPS) -> None:
@@ -693,26 +794,103 @@ def _rotate_backups(target: Path, max_backups: int = _MAX_BACKUPS) -> None:
             logger.warning("could not remove old backup %s: %s", old, exc)
 
 
-def save_config(cfg: AdapterConfig, path: Path | None = None) -> None:
+def save_config(
+    cfg: AdapterConfig,
+    path: Path | None = None,
+    *,
+    source: str = "internal",
+    reason: str = "unspecified",
+    actor: str = "system",
+    metadata: dict[str, Any] | None = None,
+    submitted_fields: list[str] | None = None,
+) -> None:
     target = path or config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+    old_data = _read_existing_config_data(target)
+    new_data = cfg.to_dict()
+    diff = _audit_diff(old_data, new_data)
+    event: dict[str, Any] = {
+        "audit_id": uuid.uuid4().hex,
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "pid": os.getpid(),
+        "source": source,
+        "reason": reason,
+        "actor": actor,
+        "config_path": str(target),
+        "outcome": "attempt",
+        "old_fingerprint": _config_fingerprint(old_data),
+        "new_fingerprint": _config_fingerprint(new_data),
+        "submitted_fields": sorted(set(submitted_fields or [])),
+        **diff,
+        **_safe_audit_metadata(metadata),
+    }
+    backup_path: Path | None = None
     # 备份现有文件(若存在),避免静默覆盖丢失用户配置
     if target.exists():
-        backup_path = target.with_name(f"{target.name}.bak.{int(time.time())}")
+        candidate_backup = target.with_name(f"{target.name}.bak.{int(time.time())}")
         try:
-            shutil.copy2(target, backup_path)
-            logger.info("config backed up to %s", backup_path)
+            shutil.copy2(target, candidate_backup)
+            backup_path = candidate_backup
+            logger.info("config backed up to %s", candidate_backup)
             _rotate_backups(target)
         except OSError as exc:
             logger.warning("config backup failed (will still save): %s", exc)
     tmp = target.with_suffix(target.suffix + ".tmp")
-    data = _inject_comments(cfg.to_dict())
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, target)
-    logger.info("config saved to %s (size=%d)", target, target.stat().st_size)
+    try:
+        data = _inject_comments(new_data)
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception as exc:
+        event["outcome"] = "failure"
+        event["error_type"] = type(exc).__name__
+        if backup_path is not None:
+            event["backup_file"] = backup_path.name
+        _try_write_config_audit(target, event)
+        logger.error(
+            "config save failed: path=%s reason=%s source=%s changed=%s error_type=%s audit_id=%s",
+            target,
+            reason,
+            source,
+            diff["changed_fields"],
+            type(exc).__name__,
+            event["audit_id"],
+        )
+        raise
+    event["outcome"] = "success"
+    if backup_path is not None:
+        event["backup_file"] = backup_path.name
+    _try_write_config_audit(target, event)
+    if diff["suspicious_reset"]:
+        logger.warning(
+            "suspicious config reset detected: reason=%s source=%s changed=%s reverted_to_default=%s "
+            "groups=%d->%d audit_id=%s",
+            reason,
+            source,
+            diff["changed_fields"],
+            diff["reverted_to_default_fields"],
+            diff["old_group_count"],
+            diff["new_group_count"],
+            event["audit_id"],
+        )
+    logger.info(
+        "config saved to %s (size=%d, reason=%s, source=%s, changed=%s, audit_id=%s)",
+        target,
+        target.stat().st_size,
+        reason,
+        source,
+        diff["changed_fields"],
+        event["audit_id"],
+    )
 
 
-def ensure_tokens(cfg: AdapterConfig, path: Path | None = None) -> AdapterConfig:
+def ensure_tokens(
+    cfg: AdapterConfig,
+    path: Path | None = None,
+    *,
+    source: str = "startup",
+    reason: str = "startup.token_generation",
+    actor: str = "system",
+) -> AdapterConfig:
     """Generate and persist tokens for any that are empty.
 
     Returns *cfg* unchanged when both tokens are already set.  When one or both
@@ -733,7 +911,14 @@ def ensure_tokens(cfg: AdapterConfig, path: Path | None = None) -> AdapterConfig
             path or config_path(),
         )
         cfg = cfg.with_overrides(**changes)
-        save_config(cfg, path)
+        save_config(
+            cfg,
+            path,
+            source=source,
+            reason=reason,
+            actor=actor,
+            submitted_fields=sorted(changes),
+        )
     return cfg
 
 

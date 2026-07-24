@@ -610,7 +610,13 @@ class AdapterService:
             try:
                 info = await self._api.get_login_info()
                 self.store.patch(self_id=str(info.get("user_id", "")))
-                save_config(self.store.config)
+                save_config(
+                    self.store.config,
+                    source="onebot",
+                    reason="onebot.self_id_probe",
+                    actor="adapter_service",
+                    submitted_fields=["self_id"],
+                )
                 self._self_id_probed = True
                 logger.info("OneBot self_id probed: %s", self.store.config.self_id)
                 # Notify already-connected plugins of the new self_id

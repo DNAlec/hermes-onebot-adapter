@@ -1,4 +1,5 @@
 
+import json
 import time
 
 import pytest
@@ -7,7 +8,7 @@ from conftest import make_session_token
 
 from onebot_adapter.app import AdapterService
 from onebot_adapter.bot_blacklist import BotBlacklistStore
-from onebot_adapter.config import AdapterConfig, ConfigStore
+from onebot_adapter.config import AdapterConfig, ConfigStore, config_path
 
 _TOKEN = "secret"
 _EPOCH = 0
@@ -53,6 +54,42 @@ async def test_config_get_put(client):
     resp = await client.put("/api/config", json={"self_id": "999", "seq_map_size": 100}, headers=_auth())
     assert resp.status == 200
     assert (await resp.json())["seq_map_size"] == 100
+
+
+async def test_config_put_audit_records_direct_client_not_untrusted_xff(client):
+    resp = await client.put(
+        "/api/config",
+        json={"seq_map_size": 101},
+        headers={**_auth(), "X-Forwarded-For": "198.51.100.10"},
+    )
+    assert resp.status == 200
+
+    audit_path = config_path().parent / "logs" / "config-audit.log"
+    event = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert event["reason"] == "webui.config_patch"
+    assert event["http_method"] == "PUT"
+    assert event["http_path"] == "/api/config"
+    assert event["client_ip"] != "198.51.100.10"
+    assert event["submitted_fields"] == ["seq_map_size"]
+
+
+async def test_config_put_audit_uses_trusted_xff(client):
+    resp = await client.put(
+        "/api/config",
+        json={"webui_trust_proxy_headers": True},
+        headers=_auth(),
+    )
+    assert resp.status == 200
+    resp = await client.put(
+        "/api/config",
+        json={"seq_map_size": 102},
+        headers={**_auth(), "X-Forwarded-For": "198.51.100.11, 10.0.0.1"},
+    )
+    assert resp.status == 200
+
+    audit_path = config_path().parent / "logs" / "config-audit.log"
+    event = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert event["client_ip"] == "198.51.100.11"
 
 
 async def test_bot_blacklist_list_and_delete_api(tmp_path, monkeypatch):
