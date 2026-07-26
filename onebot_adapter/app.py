@@ -148,6 +148,7 @@ class AdapterService:
         self._ws_api_transport = WsApiTransport()
         self._api = OneBotApi(ws_transport=self._ws_api_transport)
         self._state["api"] = self._api
+        self._state["local_api_call"] = self._handle_local_api_call
         self._name_resolver = NameResolver(self._api)
         self._seq_map = SeqMap(maxlen=cfg.seq_map_size)
         self._relay = HermesRelayServer(

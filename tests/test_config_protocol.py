@@ -225,7 +225,7 @@ def test_save_config_writes_safe_audit_event(tmp_path):
         source="test",
         reason="test.config_change",
         actor="test_actor",
-        metadata={"client_ip": "127.0.0.1", "http_method": "PUT", "http_path": "/api/config"},
+        metadata={"client_ip": "127.0.0.1", "http_method": "PUT", "http_path": "/api/v1/config"},
         submitted_fields=["seq_map_size", "global_channel_prompt"],
     )
 

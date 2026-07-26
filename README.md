@@ -73,6 +73,11 @@ hermes-onebot-adapter --no-webui              # 不启动 WebUI (仅 WS 服务)
 # 配置管理
 hermes-onebot-adapter --init-config           # 生成默认配置文件后退出
 hermes-onebot-adapter --init-config --force   # 覆盖已有配置 (保留 token，其余重置为默认)
+hermes-onebot-adapter --generate-api-key --enable-api  # 生成自动化 API key 并启用
+hermes-onebot-adapter --rotate-api-key         # 轮换 key（仅显示一次）
+hermes-onebot-adapter --revoke-api-key         # 撤销 key 并关闭自动化 API
+hermes-onebot-adapter --enable-api             # 启用已有 key
+hermes-onebot-adapter --disable-api            # 关闭自动化 API
 
 # 插件安装 (默认从 config.json 读取 URL 和 token)
 hermes-onebot-adapter install                          # 安装到 ~/.hermes
@@ -82,13 +87,33 @@ hermes-onebot-adapter uninstall                        # 卸载
 hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
 ```
 
+## 自动化工具 API
+
+自动化 API 默认关闭。它使用独立于 WebUI 登录的全权限 key，可调用 Hermes 插件提供的全部 OneBot 工具以及文件上传工具：
+
+```bash
+# key 只显示一次；请保存到调用脚本的安全环境变量中
+hermes-onebot-adapter --generate-api-key --enable-api
+
+curl -H "Authorization: Bearer hoa_xxx" \
+  http://127.0.0.1:18820/api/v1/tools
+```
+
+每个工具使用独立的 RPC 路径 `POST /api/v1/tools/<tool_name>`。完整参数可从 `GET /api/v1/tools` 或 `/api/v1/openapi.json` 获取。Key 可执行踢人、禁言、退群、删好友等高风险操作，不要放入 URL、日志或前端代码。
+
+本地文件默认只允许来自 `/tmp/hermes-onebot-adapter-uploads`；可在 WebUI 高级设置中调整 `automation_upload_allowed_roots`。qBittorrent hook 需要在其进程环境中设置：
+
+```bash
+ONEBOT_AUTOMATION_API_KEY=hoa_xxx
+```
+
 ## 三端口
 
 | 端口  | 用途 |
 |------|------|
 | 18800 | OneBot WS 服务端 `/onebot`（反向 WS 模式，OneBot 连接此端口；正向 WS 模式不使用） |
 | 18810 | Hermes 插件 WS 服务端 `/hermes?token=`（插件连接适配器的端口） |
-| 18820 | WebUI + REST API + 健康检查 (`/api/health`)（详见 [API 文档](docs/api.md)） |
+| 18820 | WebUI + REST API + 健康检查 (`/api/v1/health`)（详见 [API 文档](docs/api.md)） |
 
 ## 环境变量
 
@@ -97,6 +122,12 @@ hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `ONEBOT_ADAPTER_CONFIG` | `~/.onebot_adapter/config.json` | 配置文件路径 |
+
+### 自动化客户端
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `ONEBOT_AUTOMATION_API_KEY` | 是 | qBittorrent hook 使用的自动化 key；这是客户端约定，适配器服务本身不从该变量加载 key |
 
 ### Hermes 插件
 

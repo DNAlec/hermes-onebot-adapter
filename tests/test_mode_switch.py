@@ -138,7 +138,7 @@ async def test_rapid_config_updates_converge_to_latest(service):
 
 
 async def test_webui_put_config_triggers_mode_switch(tmp_path, monkeypatch):
-    """PUT /api/config with a new onebot_mode should trigger the on_change callback."""
+    """PUT /api/v1/config with a new onebot_mode should trigger the on_change callback."""
     monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(tmp_path / "cfg.json"))
     store = ConfigStore(AdapterConfig(
         onebot_reverse_ws_port=28840,
@@ -164,8 +164,8 @@ async def test_webui_put_config_triggers_mode_switch(tmp_path, monkeypatch):
 
         async with TestClient(server) as client:
             auth = {"Authorization": f"Bearer {make_session_token(_WT, _EPOCH)}"}
-            resp = await client.put(
-                "/api/config",
+            resp = await client.patch(
+                "/api/v1/config",
                 json={"onebot_mode": "forward", "onebot_forward_ws_url": "ws://127.0.0.1:1/t"},
                 headers=auth,
             )

@@ -12,6 +12,7 @@ share or overwrite authorization state.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from collections.abc import Callable
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 # ── Runtime bridge to the adapter's WS api_call channel ──────────────────
 
 _adapter: Any = None  # OneBotAdapter instance (set by register_tools)
+_api_caller: contextvars.ContextVar[Callable[[str, dict[str, Any]], Any] | None] = contextvars.ContextVar(
+    "_onebot_api_caller", default=None,
+)
 
 
 def set_adapter(adapter: Any) -> None:
@@ -42,11 +46,14 @@ except ImportError:
 
 async def _api_call(action: str, **params: Any) -> Any:
     """Return an awaitable that calls the adapter's _api_call method."""
-    if _adapter is None:
+    caller = _api_caller.get()
+    if caller is None and _adapter is None:
         raise RuntimeError("OneBot adapter not initialized")
     # Convert kwargs to a params dict, dropping None values
     clean = {k: v for k, v in params.items() if v is not None}
     try:
+        if caller is not None:
+            return await caller(action, clean)
         return await _adapter._api_call(action, clean)
     except Exception:
         logger.warning("OneBot tool API call failed action=%s", action, exc_info=True)
@@ -101,10 +108,10 @@ except ImportError:
 
 def _check_admin() -> str | None:
     """Return an error string if the current user is not an admin."""
-    if _adapter is None:
-        return "OneBot adapter not initialized"
     ctx = _msg_context.get()
     is_admin = ctx[0] if ctx is not None else False
+    if _adapter is None and _api_caller.get() is None:
+        return "OneBot adapter not initialized"
     if not is_admin:
         return "此操作需要管理员权限"
     return None
@@ -699,6 +706,27 @@ async def _set_avatar(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
+async def _upload_file(args: dict, **_) -> str:
+    try:
+        message_type = str(args["message_type"])
+        file_ref = str(args["file"])
+        name = str(args.get("name") or file_ref.rsplit("/", 1)[-1])
+        if message_type == "group":
+            await _api_call(
+                "upload_group_file", group_id=int(args["group_id"]), file=file_ref, name=name,
+            )
+        elif message_type == "private":
+            await _api_call(
+                "upload_private_file", user_id=int(args["user_id"]), file=file_ref, name=name,
+            )
+        else:
+            raise ValueError("message_type must be 'group' or 'private'")
+        return tool_result({"uploaded": True, "name": name})
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════
@@ -975,6 +1003,17 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_set_avatar", "设置机器人头像（需管理员权限）。",
         {"file": _str("图片路径或URL")},
         ["file"],
+    )),
+    ("onebot_upload_file", _upload_file, _schema(
+        "onebot_upload_file", "上传群文件或私聊文件。",
+        {
+            "message_type": _str("'group' 或 'private'"),
+            "group_id": _int("群号(message_type=group时必填)"),
+            "user_id": _int("QQ号(message_type=private时必填)"),
+            "file": _str("允许目录内的绝对路径或 http(s) URL"),
+            "name": _str("显示文件名(可选)"),
+        },
+        ["message_type", "file"],
     )),
 ]
 

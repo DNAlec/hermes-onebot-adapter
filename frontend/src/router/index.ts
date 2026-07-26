@@ -21,7 +21,7 @@ router.beforeEach(async (to, _from, next) => {
   if (to.name === "login") {
     if (token) {
       try {
-        const resp = await fetch("/api/status", {
+        const resp = await fetch("/api/v1/status", {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (resp.ok) {
@@ -40,7 +40,7 @@ router.beforeEach(async (to, _from, next) => {
       return;
     }
     try {
-      const resp = await fetch("/api/status", {
+      const resp = await fetch("/api/v1/status", {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (resp.ok) {
