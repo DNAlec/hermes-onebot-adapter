@@ -1,4 +1,4 @@
-"""Tests for the /api/health endpoint and standalone cron sender."""
+"""Tests for the /api/v1/health endpoint and standalone cron sender."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -25,7 +25,7 @@ async def client(tmp_path, monkeypatch):
 
 
 async def test_health_returns_ok(client):
-    resp = await client.get("/api/health")
+    resp = await client.get("/api/v1/health")
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "ok"
@@ -33,7 +33,7 @@ async def test_health_returns_ok(client):
 
 async def test_health_no_auth_required(client):
     # Health endpoint should be accessible without any auth
-    resp = await client.get("/api/health")
+    resp = await client.get("/api/v1/health")
     assert resp.status == 200
 
 

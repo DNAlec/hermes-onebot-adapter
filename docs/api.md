@@ -6,13 +6,14 @@
 
 ## 鉴权
 
-除 `/api/health` 和 `/api/login` 外，所有 `/api/*` 端点均需鉴权。
+管理端点使用 WebUI session；`/api/v1/tools*` 使用独立的自动化 API key。
+`/api/v1/health`、`/api/v1/auth/login` 和 `/api/v1/openapi.json` 无需鉴权。
 
 适配器采用**签名 session token** 机制：原始 `webui_token`（首次启动时自动生成并打印到日志，也可在 `~/.onebot_adapter/config.json` 的 `webui_token` 字段查看）只能用于登录，**不能直接用于其他 API 调用**。登录成功后服务端返回一个带有效期的 HMAC 签名 token，后续请求使用该签名 token。
 
 ### 登录流程
 
-**`POST /api/login`**（无需鉴权，但有失败次数限制，见下文）
+**`POST /api/v1/auth/login`**（无需鉴权，但有失败次数限制，见下文）
 
 请求体：
 ```json
@@ -36,10 +37,8 @@
 
 ### 后续 API 调用
 
-拿到 `session_token` 后，两种传 token 方式：
-
-1. **Authorization header（推荐）**：`Authorization: Bearer <session_token>`
-2. **Query 参数**：`?token=<session_token>`
+拿到 `session_token` 后，仅通过 Authorization header 传递：
+`Authorization: Bearer <session_token>`。URL Query 不接受 token，避免凭证进入访问日志和浏览器历史。
 
 无 token、token 错误、签名无效或 token 过期均返回 `401`：
 ```json
@@ -54,10 +53,10 @@ import requests
 
 base = "http://host:18820"
 # 1. 用原始 token 登录
-r = requests.post(f"{base}/api/login", json={"token": "原始webui_token"})
+r = requests.post(f"{base}/api/v1/auth/login", json={"token": "原始webui_token"})
 session = r.json()["session_token"]
 # 2. 后续调用用签名 token
-r = requests.get(f"{base}/api/status",
+r = requests.get(f"{base}/api/v1/status",
                  headers={"Authorization": f"Bearer {session}"})
 print(r.json())
 ```
@@ -65,21 +64,44 @@ print(r.json())
 **curl**：
 ```bash
 # 1. 登录拿 session_token
-SESSION=$(curl -s -X POST http://host:18820/api/login \
+SESSION=$(curl -s -X POST http://host:18820/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"token":"原始webui_token"}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['session_token'])")
 # 2. 用签名 token 调 API
-curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
+curl -H "Authorization: Bearer $SESSION" http://host:18820/api/v1/status
 ```
 
 ### 登录失败次数限制（防爆破）
 
-`/api/login` 按客户端 IP 计数：同一 IP 累计 **5 次**登录失败后，封禁该 IP **15 分钟**，期间任何登录尝试直接返回 `429`（不再执行 token 校验）。封禁期间其他已持有有效签名 token 的 API 调用不受影响。封禁到期自动解封；登录成功会立即清零该 IP 的失败计数。计数状态仅在进程内存中，**重启适配器即清空**。
+`/api/v1/auth/login` 按客户端 IP 计数：同一 IP 累计 **5 次**登录失败后，封禁该 IP **15 分钟**，期间任何登录尝试直接返回 `429`（不再执行 token 校验）。封禁期间其他已持有有效签名 token 的 API 调用不受影响。封禁到期自动解封；登录成功会立即清零该 IP 的失败计数。计数状态仅在进程内存中，**重启适配器即清空**。
 
 ### 修改有效期
 
 在 WebUI 高级设置页修改 `webui_token_lifetime_hours` 后保存，所有已签发的签名 token 立即失效（包括当前会话），需要重新登录。这是通过内部 `webui_token_epoch` 字段递增实现的，无需手动操作。
+
+### 自动化 API key
+
+工具 API 不接受 WebUI session，管理 API 也不接受自动化 key。自动化 key 拥有全部 OneBot 工具权限，包括踢人、禁言、退群、删好友和修改机器人资料。
+
+生成并启用：
+
+```bash
+hermes-onebot-adapter --generate-api-key --enable-api
+```
+
+CLI 还提供：
+
+- `--rotate-api-key`：替换已有 key，原 key 立即失效；新 key 仅显示一次
+- `--revoke-api-key`：清除摘要并关闭自动化 API
+- `--enable-api` / `--disable-api`：启停已有 key 对应的工具 API
+
+WebUI session 可调用以下 key 管理接口：
+
+- `POST /api/v1/automation/key`：生成或轮换 key，响应 `{"api_key":"hoa_...","shown_once":true}`
+- `DELETE /api/v1/automation/key`：撤销 key并关闭自动化 API，响应 `{"revoked":true}`
+
+服务端仅保存 key 的 SHA-256 摘要；`GET /api/v1/config` 只返回派生字段 `automation_api_key_configured`，不会返回原始 key 或摘要。
 
 ---
 
@@ -87,7 +109,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 1. 健康检查（无需鉴权）
 
-**`GET /api/health`**
+**`GET /api/v1/health`**
 
 响应 `200`：
 ```json
@@ -102,7 +124,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 3. 服务状态
 
-**`GET /api/status`**
+**`GET /api/v1/status`**
 
 响应 `200`：
 ```json
@@ -118,7 +140,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
   "onebot_ws_port": 18800,
   "hermes_ws_port": 18810,
   "webui_port": 18820,
-  "hermes_group_sessions_per_user": true
+  "hermes_group_sessions_per_user": true,
 }
 ```
 
@@ -138,7 +160,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 4. 配置管理
 
-**`GET /api/config`**
+**`GET /api/v1/config`**
 
 返回完整适配器配置。响应 `200`：
 
@@ -211,13 +233,13 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 }
 ```
 
-> 注：`webui_token` 在 `GET /api/config` 响应中会被剔除（登录口令不可通过 API 读取），仅可用 `POST /api/login` 验证；此处列出仅为说明字段存在。`webui_token_epoch` 为内部状态，不在 API 中暴露也不接受客户端设置。
+> 注：`webui_token` 在 `GET /api/v1/config` 响应中会被剔除（登录口令不可通过 API 读取），仅可用 `POST /api/v1/auth/login` 验证；此处列出仅为说明字段存在。`webui_token_epoch` 为内部状态，不在 API 中暴露也不接受客户端设置。
 
 完整字段说明见 [Config 字段表](#config-字段)。
 
 ---
 
-**`PUT /api/config`**
+**`PATCH /api/v1/config`**
 
 部分更新配置，只传需要修改的字段。Body 为 JSON 对象，包含要更新的键值对。
 
@@ -226,7 +248,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 {"log_level": "DEBUG"}
 ```
 
-响应 `200` — 返回更新后的完整配置（与 `GET /api/config` 同结构）。
+响应 `200` — 返回更新后的完整配置（与 `GET /api/v1/config` 同结构）。
 
 响应 `400` — 校验失败：
 ```json
@@ -237,7 +259,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 5. Hermes 安装目录状态
 
-**`GET /api/hermes_dir_status`**
+**`GET /api/v1/hermes_dir_status`**
 
 响应 `200`：
 ```json
@@ -251,7 +273,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 6. 插件管理
 
-**`POST /api/install_plugin`**
+**`POST /api/v1/install_plugin`**
 
 将 OneBot 插件安装到 Hermes。Body（JSON）：
 
@@ -296,7 +318,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-**`POST /api/uninstall_plugin`**
+**`POST /api/v1/uninstall_plugin`**
 
 从 Hermes 卸载 OneBot 插件。Body 同上。
 
@@ -320,40 +342,64 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-### 7. 发送消息
+### 7. 自动化工具 API
 
-**`POST /api/send`**
+自动化 API 默认关闭，使用 WebUI 或 CLI 生成独立 API key 并启用后调用。该 key 拥有全部 OneBot 工具权限。
 
-通过机器人发送消息到群聊或私聊。Body（JSON）：
+- `GET /api/v1/tools`：返回全部工具及参数 JSON Schema。
+- `POST /api/v1/tools/{tool_name}`：调用指定工具。
+- `GET /api/v1/openapi.json`：OpenAPI 3.1 契约。
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `chat_id` | string | 是 | 目标：QQ 号（私聊）或 `group:<群号>`（群聊） |
-| `message` | string | 是 | 消息文本内容 |
+工具接口只接受自动化 key：
 
-响应 `200`：
-```json
-{
-  "success": true,
-  "message_id": "12345"
-}
+```http
+Authorization: Bearer hoa_xxx
 ```
 
-响应 `400` — 缺少必填字段：
+通用成功响应：
+
 ```json
-{"error": "chat_id and message required"}
+{"ok": true, "data": {}}
 ```
 
-响应 `503` — OneBot 未连接：
-```json
-{"error": "adapter not ready"}
+常见错误：
+
+- `400 validation_error`：JSON 参数与工具 schema 不匹配
+- `401 unauthorized`：key 缺失或错误
+- `403 automation_api_disabled`：自动化 API 未启用
+- `403 file_not_allowed`：本地文件不在允许根目录，或 URL scheme 不受支持
+- `503 onebot_unavailable`：OneBot WS 尚未连接
+- `500 tool_call_failed`：工具处理器或 OneBot action 调用失败；详细异常仅记录在服务端日志
+
+`onebot_upload_file`、`onebot_set_avatar` 以及消息段/转发节点中的 `file` 引用都会经过相同安全检查。本地路径必须是允许根目录内的绝对普通文件；会解析 `..` 和符号链接后再判断。远程引用只接受 `http`/`https`。
+
+部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文以查询 SeqMap；HTTP 调用没有当前聊天上下文，无法命中带 scope 的映射时会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
+
+例如发送群消息：
+
+```http
+POST /api/v1/tools/onebot_send_message
+Authorization: Bearer hoa_xxx
+Content-Type: application/json
+
+{"message_type":"group","group_id":"123","message":[{"type":"text","data":{"text":"hello"}}]}
+```
+
+上传群文件：
+
+```http
+POST /api/v1/tools/onebot_upload_file
+Authorization: Bearer hoa_xxx
+Content-Type: application/json
+
+{"message_type":"group","group_id":123,"file":"/tmp/hermes-onebot-adapter-uploads/done.zip","name":"done.zip"}
 ```
 
 ---
 
 ### 8. 日志
 
-**`GET /api/logs`**
+**`GET /api/v1/logs`**
 
 返回服务端环形缓冲区中的最近日志行。
 
@@ -371,7 +417,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 9. 群组管理
 
-**`GET /api/groups`**
+**`GET /api/v1/groups`**
 
 返回所有已配置的群组列表。
 
@@ -411,7 +457,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-**`PUT /api/groups/{group_id}`**
+**`PUT /api/v1/groups/{group_id}`**
 
 创建或更新指定群的配置。Body 为 JSON，包含 GroupConfig 中需要设置的字段（`group_id` 自动取 URL 路径值，无需在 body 中提供）。
 
@@ -432,7 +478,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-**`DELETE /api/groups/{group_id}`**
+**`DELETE /api/v1/groups/{group_id}`**
 
 删除指定群的配置（回退到全局默认）。
 
@@ -443,7 +489,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-**`POST /api/groups/sync`**
+**`POST /api/v1/groups/sync`**
 
 从 OneBot 同步机器人加入的群列表，自动将新群加入配置（新群使用默认设置，已有配置的群不受影响）。
 
@@ -459,7 +505,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 10. 指令过滤
 
-**`GET /api/commands`**
+**`GET /api/v1/commands`**
 
 返回 Hermes 已注册的 slash 指令列表（由插件推送的 snapshot）。
 
@@ -480,7 +526,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-**`POST /api/commands/refresh`**
+**`POST /api/v1/commands/refresh`**
 
 要求 Hermes 插件重新推送指令列表（刷新指令 snapshot）。
 
@@ -498,7 +544,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ### 11. 工具集管理
 
-**`GET /api/hermes_tools`**
+**`GET /api/v1/hermes_tools`**
 
 返回 OneBot 平台可配置的工具集列表和当前启用状态。
 
@@ -538,7 +584,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-**`PUT /api/hermes_tools`**
+**`PUT /api/v1/hermes_tools`**
 
 设置 OneBot 平台启用的工具集和 MCP 服务器。Body（JSON）：
 
@@ -573,7 +619,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 ---
 
-**`POST /api/hermes_tools/reset`**
+**`POST /api/v1/hermes_tools/reset`**
 
 重置 OneBot 平台工具集到默认值。
 
@@ -588,7 +634,7 @@ curl -H "Authorization: Bearer $SESSION" http://host:18820/api/status
 
 OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊会话隔离方式：`true`=每人独立 session，`false`=全群共享 session（适配器启用群聊排队）。该值由插件连接时上报给适配器，WebUI「连接管理」页可直接修改 Hermes `config.yaml` 的此字段。
 
-**`GET /api/hermes_mode`**
+**`GET /api/v1/hermes_mode`**
 
 返回当前生效的 `group_sessions_per_user` 值及来源。
 
@@ -632,7 +678,7 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 ---
 
-**`PUT /api/hermes_mode`**
+**`PUT /api/v1/hermes_mode`**
 
 写入 `group_sessions_per_user` 到 Hermes `config.yaml`（顶层字段）。Body（JSON）：
 
@@ -664,7 +710,7 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 ---
 
-**`POST /api/hermes_mode/refresh`**
+**`POST /api/v1/hermes_mode/refresh`**
 
 要求已连接的 Hermes 插件重新上报 `group_sessions_per_user`（用于 Hermes 重启或配置变更后刷新显示）。
 
@@ -690,7 +736,7 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 ### 13. 版本更新检查
 
-**`GET /api/update_check`**
+**`GET /api/v1/update_check`**
 
 查询 GitHub 最新 release tag 并与当前适配器版本比较。结果在服务端缓存 1 小时（错误结果缓存 5 分钟）。
 
@@ -739,7 +785,7 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 适配器记录通过准入与指令过滤的消息元数据（QQ 号、群号、时间、是否系统事件，**不含消息正文或媒体地址**）到 `~/.onebot_adapter/usage_stats.sqlite3`，默认保留 365 天。关闭 `usage_stats_enabled` 后停止新增，已有历史仍可查询。
 
-**`GET /api/usage/stats`**
+**`GET /api/v1/usage/stats`**
 
 查询时间范围内的统计聚合。Query 参数：
 
@@ -790,7 +836,7 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 ---
 
-**`GET /api/usage/dimensions`**
+**`GET /api/v1/usage/dimensions`**
 
 返回时间范围内出现过的群和用户维度（用于前端过滤下拉）。Query 参数同 `start`/`end`。
 
@@ -810,7 +856,7 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 ---
 
-**`DELETE /api/usage`**
+**`DELETE /api/v1/usage`**
 
 清空全部使用统计数据（不可恢复）。操作记入审计日志。
 
@@ -827,7 +873,7 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入的临时拉黑记录持久化到 `~/.onebot_adapter/bot_blacklist.sqlite3`，WebUI「聊天配置」页可查看并人工解除。记录字段见响应示例。
 
-**`GET /api/bot_blacklist`**
+**`GET /api/v1/bot_blacklist`**
 
 列出当前有效的黑名单记录（已过期记录自动清理，不返回）。Query 参数均可选：
 
@@ -884,7 +930,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 
 ---
 
-**`DELETE /api/bot_blacklist/{entry_id}`**
+**`DELETE /api/v1/bot_blacklist/{entry_id}`**
 
 人工解除单条黑名单记录。操作记入审计日志。
 
@@ -932,10 +978,14 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `hermes_ws_token` | string | 自动生成 | Hermes WS 鉴权 token |
 | `hermes_install_dir` | string | `""` | Hermes 安装目录（插件安装/工具集读写/会话隔离模式写入的目标路径） |
 | `webui_port` | int | `18820` | WebUI 端口 |
-| `webui_token` | string | 自动生成 | WebUI 登录原始 token（仅用于 `/api/login`，不可直接调其他 API；`GET /api/config` 不返回此字段） |
+| `webui_token` | string | 自动生成 | WebUI 登录原始 token（仅用于 `/api/v1/auth/login`，不可直接调其他 API；`GET /api/v1/config` 不返回此字段） |
 | `webui_token_lifetime_hours` | int | `168` | 登录有效期（小时），最小 1，默认 7 天；修改后所有已登录会话立即失效 |
 | `webui_token_epoch` | int | `0` | token 纪元（内部状态，用于会话失效；不在 API 中暴露，不接受客户端设置） |
 | `webui_trust_proxy_headers` | bool | `false` | 信任 `X-Forwarded-For` 获取客户端 IP（仅反向代理时开启；直连开启会被伪造 IP 绕过登录限流） |
+| `automation_api_enabled` | bool | `false` | 自动化工具 API 总开关；关闭时 `/api/v1/tools*` 返回 403 |
+| `automation_api_key_hash` | string | `""` | 自动化 key 的 SHA-256 摘要；仅配置文件内部使用，不通过管理 API 返回或接受客户端修改 |
+| `automation_api_key_configured` | bool | 派生值 | `GET /api/v1/config` 返回的只读状态，表示是否已配置 key |
+| `automation_upload_allowed_roots` | string[] | `["/tmp/hermes-onebot-adapter-uploads"]` | HTTP 工具可引用的本地文件根目录；校验解析后的真实路径 |
 | `log_level` | string | `"INFO"` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` |
 | `log_message_preview` | int | `100` | 消息正文日志截断长度 |
 | `log_file_enabled` | bool | `true` | 是否启用文件日志 |

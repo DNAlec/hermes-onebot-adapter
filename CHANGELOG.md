@@ -1,5 +1,25 @@
 # 更新日志
 
+## [Unreleased]
+
+### 新增
+- 新增自动化 OneBot 工具 API：`GET /api/v1/tools` 返回工具目录，41 个 `POST /api/v1/tools/<tool_name>` 路由覆盖 Hermes 已有工具及新的 `onebot_upload_file`
+- 新增独立自动化 API key，可通过 WebUI 或 `--generate-api-key` / `--rotate-api-key` / `--revoke-api-key` 管理；配置仅持久化 SHA-256 摘要
+- 新增 `/api/v1/openapi.json`、Pydantic 严格参数校验、本地文件允许目录及路径/符号链接逃逸防护
+
+### 变更
+- **破坏性变更**：WebUI 管理 API 全部迁移到 `/api/v1/*`；配置更新由 `PUT /api/config` 改为 `PATCH /api/v1/config`，旧业务路径不再保留
+- WebUI session 和自动化 API key 分权；凭证只接受 `Authorization: Bearer`，不再接受 `?token=`
+- 自动化 API 默认关闭；API key 拥有全部 OneBot 工具权限，包括群管理和账号管理操作
+- qBittorrent 完成脚本改用 `onebot_send_message` / `onebot_upload_file` 工具路由和专用上传目录
+
+### 修复
+- 未知 `/api/*` 不再回退到 SPA，而是返回 JSON 404
+- 群配置写入改为磁盘保存成功后再更新内存，避免保存失败造成状态分叉
+
+### 文档
+- 更新 README、REST API 文档和 AGENTS 架构说明，补充 v1 路径、key 生命周期、工具发现和文件安全策略
+
 ## [1.2.0] - 2026-07-24
 
 ### 新增

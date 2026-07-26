@@ -2,10 +2,48 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import secrets
 import sys
 
 from onebot_adapter import __version__
 from onebot_adapter.app import run
+
+
+def _manage_automation_api(args) -> int:
+    from onebot_adapter.config import load_config, save_config
+
+    cfg = load_config()
+    changes = {}
+    raw_key: str | None = None
+    if args.generate_api_key:
+        if cfg.automation_api_key_hash:
+            print("✗ API key 已存在；请使用 --rotate-api-key")
+            return 1
+        raw_key = "hoa_" + secrets.token_urlsafe(32)
+        changes["automation_api_key_hash"] = hashlib.sha256(raw_key.encode()).hexdigest()
+    elif args.rotate_api_key:
+        raw_key = "hoa_" + secrets.token_urlsafe(32)
+        changes["automation_api_key_hash"] = hashlib.sha256(raw_key.encode()).hexdigest()
+    elif args.revoke_api_key:
+        changes.update(automation_api_key_hash="", automation_api_enabled=False)
+    if args.enable_api:
+        if not (changes.get("automation_api_key_hash") or cfg.automation_api_key_hash):
+            print("✗ 尚未配置 API key；请先使用 --generate-api-key")
+            return 1
+        changes["automation_api_enabled"] = True
+    if args.disable_api:
+        changes["automation_api_enabled"] = False
+    new_cfg = cfg.with_overrides(**changes)
+    save_config(
+        new_cfg, source="cli", reason="cli.automation_api_management",
+        actor="command_line", submitted_fields=sorted(changes),
+    )
+    if raw_key:
+        print("✓ 自动化 API key（仅显示一次）:")
+        print(raw_key)
+    print(f"  自动化 API: {'已启用' if new_cfg.automation_api_enabled else '已关闭'}")
+    return 0
 
 
 def _init_config(force: bool) -> int:
@@ -30,10 +68,13 @@ def _init_config(force: bool) -> int:
             "onebot_ws_token": old.onebot_ws_token,
             "hermes_ws_token": old.hermes_ws_token,
             "webui_token": old.webui_token,
+            "automation_api_key_hash": old.automation_api_key_hash,
         }
 
     cfg = AdapterConfig(**existing_tokens)
-    tokens_were_missing = not all(existing_tokens.values())
+    tokens_were_missing = not all(
+        existing_tokens[key] for key in ("onebot_ws_token", "hermes_ws_token", "webui_token")
+    )
     reason = "cli.force_reinitialize" if target.exists() and force else "cli.init_config"
     cfg = ensure_tokens(
         cfg,
@@ -117,6 +158,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=None, help="WebUI/API port (default: from config, 18820)")
     parser.add_argument("--no-webui", action="store_true", help="不启动 WebUI 管理界面")
     parser.add_argument("--version", action="version", version=f"hermes-onebot-adapter {__version__}")
+    key_group = parser.add_mutually_exclusive_group()
+    key_group.add_argument("--generate-api-key", action="store_true", help="生成自动化 API key 后退出")
+    key_group.add_argument("--rotate-api-key", action="store_true", help="轮换自动化 API key 后退出")
+    key_group.add_argument("--revoke-api-key", action="store_true", help="撤销自动化 API key 后退出")
+    api_group = parser.add_mutually_exclusive_group()
+    api_group.add_argument("--enable-api", action="store_true", help="启用自动化工具 API")
+    api_group.add_argument("--disable-api", action="store_true", help="关闭自动化工具 API")
     parser.add_argument(
         "--init-config",
         action="store_true",
@@ -141,6 +189,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    if any((
+        args.generate_api_key, args.rotate_api_key, args.revoke_api_key,
+        args.enable_api, args.disable_api,
+    )):
+        return _manage_automation_api(args)
 
     if args.command == "install":
         return _install(args)

@@ -6,7 +6,9 @@ import hashlib
 import hmac
 import logging
 import math
+import secrets
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,7 @@ import aiohttp.web
 
 from onebot_adapter import __version__
 from onebot_adapter.config import AdapterConfig, ConfigStore, GroupConfig, save_config
-from onebot_adapter.relay.protocol import parse_chat_id
+from onebot_adapter.webui.tool_api import TOOL_MAP, TOOL_MODELS, add_tool_routes, key_matches
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("onebot_adapter.audit")
@@ -45,7 +47,7 @@ def _find_static() -> Path | None:
 
 _STATIC_DIR = _find_static() or _WEBUI_STATIC
 
-# ── /api/login rate limiting (in-memory, per-IP) ─────────────────────────
+# ── /api/v1/auth/login rate limiting (in-memory, per-IP) ────────────────
 _LOGIN_MAX_FAILS = 5
 _LOGIN_BAN_SECONDS = 900  # 15 minutes
 
@@ -68,41 +70,46 @@ def _config_request_metadata(request: aiohttp.web.Request, cfg: AdapterConfig) -
 
 
 def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str, Any]) -> None:
+    app.middlewares.append(_security_middleware)
     app.middlewares.append(_make_auth_middleware(store))
-    app.router.add_get("/api/health", _health)
-    app.router.add_post("/api/login", _login(store, state))
-    app.router.add_get("/api/status", _status(store, state))
-    app.router.add_get("/api/config", _get_config(store))
-    app.router.add_put("/api/config", _put_config(store, state))
-    app.router.add_get("/api/hermes_dir_status", _hermes_dir_status(store))
-    app.router.add_post("/api/install_plugin", _install_plugin(store, state))
-    app.router.add_post("/api/uninstall_plugin", _uninstall_plugin(store, state))
-    app.router.add_post("/api/send", _send(store, state))
-    app.router.add_get("/api/logs", _logs(state))
+    app.router.add_get("/api/v1/health", _health)
+    app.router.add_post("/api/v1/auth/login", _login(store, state))
+    app.router.add_get("/api/v1/openapi.json", _openapi)
+    app.router.add_get("/api/v1/status", _status(store, state))
+    app.router.add_get("/api/v1/config", _get_config(store))
+    app.router.add_patch("/api/v1/config", _put_config(store, state))
+    app.router.add_post("/api/v1/automation/key", _rotate_automation_key(store))
+    app.router.add_delete("/api/v1/automation/key", _revoke_automation_key(store))
+    app.router.add_get("/api/v1/hermes_dir_status", _hermes_dir_status(store))
+    app.router.add_post("/api/v1/install_plugin", _install_plugin(store, state))
+    app.router.add_post("/api/v1/uninstall_plugin", _uninstall_plugin(store, state))
+    app.router.add_get("/api/v1/logs", _logs(state))
     # Group management
-    app.router.add_get("/api/groups", _get_groups(store))
-    app.router.add_put("/api/groups/{group_id}", _put_group(store))
-    app.router.add_delete("/api/groups/{group_id}", _delete_group(store))
-    app.router.add_post("/api/groups/sync", _sync_groups(store, state))
+    app.router.add_get("/api/v1/groups", _get_groups(store))
+    app.router.add_put("/api/v1/groups/{group_id}", _put_group(store))
+    app.router.add_delete("/api/v1/groups/{group_id}", _delete_group(store))
+    app.router.add_post("/api/v1/groups/sync", _sync_groups(store, state))
     # Command filter
-    app.router.add_get("/api/commands", _get_commands(state))
-    app.router.add_post("/api/commands/refresh", _refresh_commands(state))
+    app.router.add_get("/api/v1/commands", _get_commands(state))
+    app.router.add_post("/api/v1/commands/refresh", _refresh_commands(state))
     # Hermes tools management (OneBot platform)
-    app.router.add_get("/api/hermes_tools", _get_hermes_tools(store))
-    app.router.add_put("/api/hermes_tools", _put_hermes_tools(store))
-    app.router.add_post("/api/hermes_tools/reset", _reset_hermes_tools(store))
+    app.router.add_get("/api/v1/hermes_tools", _get_hermes_tools(store))
+    app.router.add_put("/api/v1/hermes_tools", _put_hermes_tools(store))
+    app.router.add_post("/api/v1/hermes_tools/reset", _reset_hermes_tools(store))
     # Hermes session-isolation mode (group_sessions_per_user)
-    app.router.add_get("/api/hermes_mode", _get_hermes_mode(store, state))
-    app.router.add_put("/api/hermes_mode", _put_hermes_mode(store))
-    app.router.add_post("/api/hermes_mode/refresh", _refresh_hermes_mode(state))
-    app.router.add_get("/api/update_check", _update_check)
+    app.router.add_get("/api/v1/hermes_mode", _get_hermes_mode(store, state))
+    app.router.add_put("/api/v1/hermes_mode", _put_hermes_mode(store))
+    app.router.add_post("/api/v1/hermes_mode/refresh", _refresh_hermes_mode(state))
+    app.router.add_get("/api/v1/update_check", _update_check)
     # Usage statistics
-    app.router.add_get("/api/usage/stats", _usage_stats(store, state))
-    app.router.add_get("/api/usage/dimensions", _usage_dimensions(state))
-    app.router.add_delete("/api/usage", _clear_usage(store, state))
+    app.router.add_get("/api/v1/usage/stats", _usage_stats(store, state))
+    app.router.add_get("/api/v1/usage/dimensions", _usage_dimensions(state))
+    app.router.add_delete("/api/v1/usage", _clear_usage(store, state))
     # Bot-managed dynamic blacklist
-    app.router.add_get("/api/bot_blacklist", _get_bot_blacklist(state))
-    app.router.add_delete("/api/bot_blacklist/{entry_id}", _delete_bot_blacklist(state))
+    app.router.add_get("/api/v1/bot_blacklist", _get_bot_blacklist(state))
+    app.router.add_delete("/api/v1/bot_blacklist/{entry_id}", _delete_bot_blacklist(state))
+    add_tool_routes(app, store, state)
+    app.router.add_route("*", "/api/{tail:.*}", _api_not_found)
     app.router.add_get("/", _index)
     app.router.add_get("/{tail:.*}", _spa_handler)
 
@@ -111,8 +118,53 @@ async def _health(_: aiohttp.web.Request) -> aiohttp.web.Response:
     return aiohttp.web.json_response({"status": "ok"})
 
 
+@aiohttp.web.middleware
+async def _security_middleware(request: aiohttp.web.Request, handler):
+    request_id = request.headers.get("X-Request-ID", "").strip()[:128] or uuid.uuid4().hex
+    response = await handler(request)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.path in {
+        "/api/v1/auth/login", "/api/v1/config", "/api/v1/automation/key",
+    }:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+async def _api_not_found(_: aiohttp.web.Request) -> aiohttp.web.Response:
+    return aiohttp.web.json_response(
+        {"error": {"code": "not_found", "message": "API endpoint not found"}}, status=404,
+    )
+
+
+async def _openapi(_: aiohttp.web.Request) -> aiohttp.web.Response:
+    paths: dict[str, Any] = {}
+    for name, (_handler, schema) in TOOL_MAP.items():
+        paths[f"/api/v1/tools/{name}"] = {
+            "post": {
+                "summary": schema["description"],
+                "security": [{"automationApiKey": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": TOOL_MODELS[name].model_json_schema()}},
+                },
+                "responses": {"200": {"description": "Tool result"}},
+            },
+        }
+    return aiohttp.web.json_response({
+        "openapi": "3.1.0",
+        "info": {"title": "Hermes OneBot Adapter API", "version": "1"},
+        "paths": paths,
+        "components": {"securitySchemes": {
+            "webuiSession": {"type": "http", "scheme": "bearer"},
+            "automationApiKey": {"type": "http", "scheme": "bearer"},
+        }},
+    })
+
+
 def _login(store: ConfigStore, state: dict[str, Any]):
-    """POST /api/login — exchange the raw webui_token for a signed session token.
+    """POST /api/v1/auth/login — exchange the raw webui_token for a signed session token.
 
     Request body: ``{"token": "<raw webui_token>"}``.
     Response: ``{"session_token": "<signed token>", "expires_in": <seconds>}``.
@@ -188,15 +240,15 @@ def _login(store: ConfigStore, state: dict[str, Any]):
 
 
 def _extract_token(request: aiohttp.web.Request) -> str:
-    """Extract a bearer token from Authorization header or query param."""
+    """Extract a bearer token exclusively from the Authorization header."""
     token = request.headers.get("Authorization", "")
     if token.lower().startswith("bearer "):
         return token[7:].strip()
-    return request.query.get("token", "")
+    return ""
 
 
 def _verify_session_token(token: str, secret: str, epoch: int, lifetime_hours: int) -> bool:
-    """Verify an HMAC-signed session token issued by ``/api/login``.
+    """Verify an HMAC-signed session token issued by ``/api/v1/auth/login``.
 
     Token format: ``base64url("{issued_at}.{hmac_hex}")`` where the HMAC is
     computed over ``f"{epoch}:{issued_at}"`` using *secret* as the key. Returns
@@ -222,7 +274,7 @@ def _verify_session_token(token: str, secret: str, epoch: int, lifetime_hours: i
 def _make_auth_middleware(store: ConfigStore):
     """aiohttp middleware: require a valid signed session token for all /api/* requests.
 
-    ``/api/health`` and ``/api/login`` are exempt (public health check + login
+    ``/api/v1/health`` and ``/api/v1/auth/login`` are exempt
     endpoint). Static-file routes (``/``, ``/{tail:.*}``) are outside ``/api/``
     and thus unaffected — the SPA shell and login page always load without auth.
 
@@ -231,7 +283,20 @@ def _make_auth_middleware(store: ConfigStore):
     """
     @aiohttp.web.middleware
     async def auth_middleware(request: aiohttp.web.Request, handler):
-        if request.path.startswith("/api/") and request.path not in ("/api/health", "/api/login"):
+        public = {"/api/v1/health", "/api/v1/auth/login", "/api/v1/openapi.json"}
+        if request.path.startswith("/api/v1/tools"):
+            cfg = store.config
+            if not cfg.automation_api_enabled:
+                return aiohttp.web.json_response(
+                    {"error": {"code": "automation_api_disabled", "message": "automation API is disabled"}},
+                    status=403,
+                )
+            if not key_matches(_extract_token(request), cfg.automation_api_key_hash):
+                return aiohttp.web.json_response(
+                    {"error": {"code": "unauthorized", "message": "invalid automation API key"}},
+                    status=401,
+                )
+        elif request.path.startswith("/api/") and request.path not in public:
             token = _extract_token(request)
             cfg = store.config
             ok = _verify_session_token(
@@ -295,7 +360,7 @@ def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
     """Config dict with the raw ``webui_token`` scrubbed for API responses.
 
     The WebUI login token is the password to this very UI and must never be
-    readable over the API — verify it through ``POST /api/login`` instead.
+    readable over the API — verify it through ``POST /api/v1/auth/login`` instead.
     Other tokens (onebot_ws_token, hermes_ws_token) are operational values
     the user needs to see/copy in the WebUI and are returned as-is.
 
@@ -306,12 +371,61 @@ def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
     d = cfg.to_dict()
     d.pop("webui_token", None)
     d.pop("webui_token_epoch", None)
+    d.pop("automation_api_key_hash", None)
+    d["automation_api_key_configured"] = bool(cfg.automation_api_key_hash)
     return d
 
 
 def _get_config(store: ConfigStore):
     async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
         return aiohttp.web.json_response(_public_config(store.config))
+
+    return handler
+
+
+def _rotate_automation_key(store: ConfigStore):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        raw_key = "hoa_" + secrets.token_urlsafe(32)
+        new_cfg = store.config.with_overrides(
+            automation_api_key_hash=hashlib.sha256(raw_key.encode()).hexdigest(),
+        )
+        try:
+            save_config(
+                new_cfg, source="webui", reason="automation.key.rotate",
+                actor="authenticated_webui_session",
+                metadata=_config_request_metadata(request, store.config),
+                submitted_fields=["automation_api_key_hash"],
+            )
+        except Exception:
+            logger.exception("automation API key save failed")
+            return aiohttp.web.json_response(
+                {"error": {"code": "config_save_failed", "message": "failed to save API key"}}, status=500,
+            )
+        store.update(new_cfg)
+        return aiohttp.web.json_response({"api_key": raw_key, "shown_once": True})
+
+    return handler
+
+
+def _revoke_automation_key(store: ConfigStore):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        new_cfg = store.config.with_overrides(
+            automation_api_key_hash="", automation_api_enabled=False,
+        )
+        try:
+            save_config(
+                new_cfg, source="webui", reason="automation.key.revoke",
+                actor="authenticated_webui_session",
+                metadata=_config_request_metadata(request, store.config),
+                submitted_fields=["automation_api_key_hash", "automation_api_enabled"],
+            )
+        except Exception:
+            logger.exception("automation API key revoke failed")
+            return aiohttp.web.json_response(
+                {"error": {"code": "config_save_failed", "message": "failed to revoke API key"}}, status=500,
+            )
+        store.update(new_cfg)
+        return aiohttp.web.json_response({"revoked": True})
 
     return handler
 
@@ -371,6 +485,8 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
             # Strip client-supplied epoch first so a PUT body can't override
             # the internal counter (see _public_config for rationale).
             data.pop("webui_token_epoch", None)
+            data.pop("automation_api_key_hash", None)
+            data.pop("automation_api_key_configured", None)
             if "webui_token_lifetime_hours" in data and \
                     data["webui_token_lifetime_hours"] != store.config.webui_token_lifetime_hours:
                 data["webui_token_epoch"] = store.config.webui_token_epoch + 1
@@ -584,36 +700,6 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
-def _send(store: ConfigStore, state: dict[str, Any]):
-    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        try:
-            data = await request.json()
-        except Exception:
-            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
-        chat_id = data.get("chat_id", "")
-        message = data.get("message", "")
-        if not chat_id or not message:
-            return aiohttp.web.json_response({"error": "chat_id and message required"}, status=400)
-        api = state.get("api")
-        if api is None:
-            return aiohttp.web.json_response({"error": "adapter not ready"}, status=503)
-        try:
-            from onebot_adapter.onebot.api import text_segment
-
-            is_group, num_id = parse_chat_id(chat_id)
-            segs = [text_segment(message)]
-            if is_group:
-                resp = await api.send_group_msg(num_id, segs)
-            else:
-                resp = await api.send_private_msg(num_id, segs)
-            return aiohttp.web.json_response({"success": True, "message_id": str(resp.get("message_id", ""))})
-        except Exception as exc:
-            logger.exception("send failed")
-            return aiohttp.web.json_response({"error": str(exc)}, status=500)
-
-    return handler
-
-
 def _logs(state: dict[str, Any]):
     async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
         records = list(state.get("log_buffer", []))
@@ -701,24 +787,28 @@ def _put_group(store: ConfigStore):
         cfg = store.config
         new_groups = {**cfg.groups, str(group_id): gc.to_dict()}
         try:
-            store.patch(groups=new_groups)
+            new_cfg = cfg.with_overrides(groups=new_groups)
+            errors = new_cfg.validate()
+            if errors:
+                raise ValueError("; ".join(errors))
         except ValueError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         metadata = _config_request_metadata(request, cfg)
         metadata["group_id"] = str(group_id)
         save_config(
-            store.config,
+            new_cfg,
             source="webui",
             reason="group.update",
             actor="authenticated_webui_session",
             metadata=metadata,
             submitted_fields=["groups"],
         )
+        store.update(new_cfg)
         # Materialize channel_prompts into Hermes config.yaml so the plugin
         # picks up the new per-group custom_prompt on next connect/restart.
         try:
             from onebot_adapter.hermes_config import materialize_channel_prompts
-            materialize_channel_prompts(store.config, store.config.hermes_install_dir or None)
+            materialize_channel_prompts(new_cfg, new_cfg.hermes_install_dir or None)
         except Exception:
             logger.exception("materialize_channel_prompts after group save failed")
         return aiohttp.web.json_response(gc.to_dict())
@@ -731,17 +821,18 @@ def _delete_group(store: ConfigStore):
         group_id = request.match_info.get("group_id", "")
         cfg = store.config
         new_groups = {k: v for k, v in cfg.groups.items() if k != str(group_id)}
-        store.patch(groups=new_groups)
+        new_cfg = cfg.with_overrides(groups=new_groups)
         metadata = _config_request_metadata(request, cfg)
         metadata["group_id"] = str(group_id)
         save_config(
-            store.config,
+            new_cfg,
             source="webui",
             reason="group.delete",
             actor="authenticated_webui_session",
             metadata=metadata,
             submitted_fields=["groups"],
         )
+        store.update(new_cfg)
         return aiohttp.web.json_response({"deleted": group_id})
 
     return handler
@@ -768,15 +859,16 @@ def _sync_groups(store: ConfigStore, state: dict[str, Any]):
             new_groups[gid] = gc.to_dict()
             added.append(gid)
         if added:
-            store.patch(groups=new_groups)
+            new_cfg = cfg.with_overrides(groups=new_groups)
             save_config(
-                store.config,
+                new_cfg,
                 source="webui",
                 reason="group.sync",
                 actor="authenticated_webui_session",
                 metadata=_config_request_metadata(request, cfg),
                 submitted_fields=["groups"],
             )
+            store.update(new_cfg)
         return aiohttp.web.json_response({"added": added, "total": len(new_groups)})
 
     return handler

@@ -191,6 +191,11 @@ class AdapterConfig:
     webui_token_lifetime_hours: int = 168  # 登录有效期(小时),最小 1;默认 168(7 天)
     webui_token_epoch: int = 0  # token 纪元,改 lifetime 时 bump 使所有旧 session token 立即失效
     webui_trust_proxy_headers: bool = False  # 信任 X-Forwarded-For(仅反向代理时开启)
+    automation_api_enabled: bool = False
+    automation_api_key_hash: str = ""
+    automation_upload_allowed_roots: list[str] = field(
+        default_factory=lambda: ["/tmp/hermes-onebot-adapter-uploads"],
+    )
     log_level: str = "INFO"
     log_message_preview: int = 100
     log_file_enabled: bool = True
@@ -312,6 +317,10 @@ class AdapterConfig:
             errors.append(f"media_delivery_mode must be one of {sorted(_VALID_MEDIA_DELIVERY_MODES)}")
         if self.webui_token_lifetime_hours < 1:
             errors.append("webui_token_lifetime_hours must be at least 1")
+        if not isinstance(self.automation_upload_allowed_roots, list) or not all(
+            isinstance(root, str) and root.strip() for root in self.automation_upload_allowed_roots
+        ):
+            errors.append("automation_upload_allowed_roots must be a list of non-empty paths")
         if not self.reaction_emoji_id:
             errors.append("reaction_emoji_id must not be empty")
         if self.dm_user_filter_mode not in _VALID_USER_FILTER_MODES:
@@ -647,6 +656,9 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "webui_token_epoch": "token 纪元(内部状态,勿手动修改);改 lifetime 时自动递增使旧 session token 失效",
         "webui_trust_proxy_headers": "信任 X-Forwarded-For 获取客户端 IP(仅反向代理时开启;"
                                      "直连开启会被伪造 IP 绕过登录限流)",
+        "automation_api_enabled": "自动化工具 API 总开关;默认关闭",
+        "automation_api_key_hash": "自动化 API key 的 SHA-256 摘要;原始 key 不落盘",
+        "automation_upload_allowed_roots": "自动化 API 可引用的本地文件根目录列表",
         "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
         "log_file_message_mode": "文件日志消息正文:none(不记录)|preview(按预览长度截断,默认)|full(完整正文)",

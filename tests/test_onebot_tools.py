@@ -77,7 +77,7 @@ def test_toolset_constant():
 
 def test_tool_count():
     # 24 read-only/messaging + 2 bot blacklist + 14 admin = 40
-    assert len(_TOOLS) == 40
+    assert len(_TOOLS) == 41
 
 
 async def test_bot_blacklist_tools_use_adapter_local_actions():
