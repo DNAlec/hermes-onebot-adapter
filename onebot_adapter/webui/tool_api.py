@@ -111,6 +111,8 @@ async def _call_tool(
     api = state.get("api")
     if api is None:
         raise RuntimeError("OneBot API is not ready")
+    if getattr(api, "connected", True) is False:
+        raise RuntimeError("OneBot WS is not connected")
     relay = state.get("relay")
     local_api_call = state.get("local_api_call")
 
@@ -132,12 +134,18 @@ async def _call_tool(
     finally:
         _msg_context.reset(context_token)
         _api_caller.reset(caller_token)
-    if isinstance(raw, str):
-        decoded = json.loads(raw)
-        if decoded.get("success") is False:
+    decoded = json.loads(raw) if isinstance(raw, str) else raw
+    if isinstance(decoded, dict):
+        # Hermes' tool_error() emits {"error": ...} without a success field.
+        # Also accept the legacy {"success": false, "error": ...} shape and
+        # non-string handler results defensively.
+        if "error" in decoded or decoded.get("success") is False:
             raise ValueError(str(decoded.get("error", "tool call failed")))
-        return decoded.get("data", decoded)
-    return raw
+        # Backward compatibility for results produced by older installed
+        # plugin files; current tool_result() returns the data directly.
+        if decoded.get("success") is True and "data" in decoded:
+            return decoded["data"]
+    return decoded
 
 
 def _tool_handler(name: str, store: ConfigStore, state: dict[str, Any]):

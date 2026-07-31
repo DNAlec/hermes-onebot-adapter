@@ -12,7 +12,7 @@ import os
 
 # Skip entire module if Hermes base isn't importable (standalone CI without Hermes)
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -135,6 +135,28 @@ async def test_api_call_constructs_frame():
     assert sent["type"] == "api_call"
     assert sent["action"] == "get_group_info"
     assert sent["params"] == {"group_id": 42}
+
+
+async def test_rpc_send_failure_cleans_pending_future():
+    adapter = _make_adapter()
+    fake_ws = FakeWS()
+    fake_ws._adapter = adapter
+    fake_ws.send_json = AsyncMock(side_effect=ConnectionError("write failed"))
+    adapter._ws = fake_ws
+
+    with pytest.raises(ConnectionError, match="write failed"):
+        await adapter._api_call("get_group_info", {"group_id": 42})
+    assert adapter._futures == {}
+
+
+def test_upload_rpcs_use_long_result_timeout():
+    from onebot_adapter.hermes_plugin.adapter import _result_timeout
+
+    assert _result_timeout("api_call", "upload_group_file") == 630.0
+    assert _result_timeout("api_call", "upload_private_file") == 630.0
+    assert _result_timeout("send", "send_document") == 630.0
+    assert _result_timeout("api_call", "get_group_info") == 30.0
+    assert _result_timeout("send", "send_text") == 30.0
 
 
 async def test_handle_text_ready_frame():

@@ -45,7 +45,14 @@ except ImportError:
 
 
 async def _api_call(action: str, **params: Any) -> Any:
-    """Return an awaitable that calls the adapter's _api_call method."""
+    """Call a OneBot action and return its data payload.
+
+    The Hermes plugin transport returns an RPC envelope
+    (``{"success": bool, "data"|"error": ...}``), while the WebUI automation
+    caller already returns the unwrapped OneBot data and raises on failure.
+    Normalize both paths here so every tool handler has the same contract:
+    return data on success and raise on any transport/API failure.
+    """
     caller = _api_caller.get()
     if caller is None and _adapter is None:
         raise RuntimeError("OneBot adapter not initialized")
@@ -54,7 +61,13 @@ async def _api_call(action: str, **params: Any) -> Any:
     try:
         if caller is not None:
             return await caller(action, clean)
-        return await _adapter._api_call(action, clean)
+        result = await _adapter._api_call(action, clean)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"invalid adapter response for {action}: expected object")
+        if result.get("success") is not True:
+            error = result.get("error") or f"{action} failed without an error message"
+            raise RuntimeError(str(error))
+        return result.get("data")
     except Exception:
         logger.warning("OneBot tool API call failed action=%s", action, exc_info=True)
         raise
@@ -97,10 +110,12 @@ try:
     from tools.registry import tool_error, tool_result
 except ImportError:
     def tool_result(data: Any) -> str:
-        return json.dumps({"success": True, "data": data}, ensure_ascii=False, default=str)
+        # Match Hermes' tools.registry.tool_result wire format so standalone
+        # adapter/WebUI behavior does not differ from the installed plugin.
+        return json.dumps(data, ensure_ascii=False, default=str)
 
     def tool_error(msg: str) -> str:
-        return json.dumps({"success": False, "error": msg}, ensure_ascii=False)
+        return json.dumps({"error": msg}, ensure_ascii=False)
 
 
 # ── Admin gating ─────────────────────────────────────────────────────────
