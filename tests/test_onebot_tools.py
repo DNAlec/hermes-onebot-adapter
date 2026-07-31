@@ -550,6 +550,36 @@ async def test_api_call_error_returns_tool_error():
     assert "connection refused" in _parse(raw).get("error", "")
 
 
+async def test_api_call_failure_envelope_returns_tool_error():
+    adapter = MockAdapter()
+    adapter._api_results["upload_group_file"] = {
+        "success": False,
+        "error": "OneBot API error upload_group_file: retcode=100 msg=识别URL失败",
+    }
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_upload_file")
+    raw = await handler({
+        "message_type": "group",
+        "group_id": 42,
+        "file": "/home/alec/Downloads/archive.7z",
+    })
+    parsed = _parse(raw)
+    assert _has_error(raw) is True
+    assert "识别URL失败" in parsed["error"]
+    assert parsed.get("uploaded") is not True
+
+
+async def test_api_call_success_envelope_is_unwrapped_for_tools():
+    adapter = MockAdapter()
+    adapter._api_results["get_group_info"] = {
+        "success": True,
+        "data": {"group_id": 42, "group_name": "Test"},
+    }
+    set_adapter(adapter)
+    raw = await _tool_handler("onebot_get_group_info")({"group_id": 42})
+    assert _parse(raw) == {"group_id": 42, "group_name": "Test"}
+
+
 async def test_no_adapter_returns_error():
     set_adapter(None)
     handler = _tool_handler("onebot_get_group_list")

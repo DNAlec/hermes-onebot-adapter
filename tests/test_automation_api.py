@@ -1,4 +1,5 @@
 import hashlib
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -65,6 +66,61 @@ async def test_upload_file_from_allowed_root(automation_client):
     assert api.call.await_args.args[0] == "upload_group_file"
 
 
+async def test_onebot_failure_is_not_reported_as_webapi_success(automation_client):
+    client, _, api, allowed = automation_client
+    path = allowed / "failed.zip"
+    path.write_bytes(b"payload")
+    api.call.side_effect = RuntimeError(
+        "OneBot API error upload_group_file: retcode=100 msg=识别URL失败"
+    )
+    response = await client.post(
+        "/api/v1/tools/onebot_upload_file",
+        json={"message_type": "group", "group_id": 42, "file": str(path)},
+        headers=_key_auth(),
+    )
+    body = await response.json()
+    assert response.status == 500
+    assert body["error"]["code"] == "tool_call_failed"
+    assert "ok" not in body
+
+
+async def test_disconnected_onebot_returns_service_unavailable(automation_client):
+    client, _, api, _ = automation_client
+    api.connected = False
+    response = await client.post(
+        "/api/v1/tools/onebot_get_group_list",
+        json={},
+        headers=_key_auth(),
+    )
+    body = await response.json()
+    assert response.status == 503
+    assert body["error"]["code"] == "onebot_unavailable"
+    api.call.assert_not_awaited()
+
+
+async def test_error_only_tool_result_is_not_reported_as_webapi_success(
+    automation_client, monkeypatch,
+):
+    client, _, _, _ = automation_client
+
+    async def failed_tool(_args):
+        return json.dumps({"error": "declared tool failure"})
+
+    from onebot_adapter.webui import tool_api
+
+    _old_handler, schema = tool_api.TOOL_MAP["onebot_get_group_list"]
+    monkeypatch.setitem(tool_api.TOOL_MAP, "onebot_get_group_list", (failed_tool, schema))
+    response = await client.post(
+        "/api/v1/tools/onebot_get_group_list",
+        json={},
+        headers=_key_auth(),
+    )
+    body = await response.json()
+    assert response.status == 500
+    assert body["error"]["code"] == "tool_call_failed"
+    assert "ok" not in body
+
+
 async def test_upload_file_outside_root_is_rejected(automation_client, tmp_path):
     client, _, _, _ = automation_client
     path = tmp_path / "secret.txt"
@@ -103,4 +159,3 @@ async def test_openapi_is_public_and_contains_tool_paths(automation_client):
     assert response.status == 200
     spec = await response.json()
     assert "/api/v1/tools/onebot_upload_file" in spec["paths"]
-

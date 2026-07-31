@@ -313,11 +313,72 @@ async def test_api_call_nonzero_retcode_raises():
         await asyncio.wait_for(task, timeout=2)
 
 
+async def test_api_call_failed_status_without_retcode_raises():
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    api = OneBotApi(ws_transport=t)
+
+    task = asyncio.create_task(api.call("upload_group_file", {"file": "/tmp/a"}))
+    await asyncio.sleep(0.01)
+    frame = ws.send_json.await_args.args[0]
+    t.on_text(json.dumps({
+        "status": "failed",
+        "msg": "识别URL失败",
+        "echo": frame["echo"],
+    }))
+    with pytest.raises(RuntimeError, match="status=failed"):
+        await asyncio.wait_for(task, timeout=2)
+
+
 async def test_api_no_connection_raises():
     t = WsApiTransport()
     api = OneBotApi(ws_transport=t)
+    assert api.connected is False
     with pytest.raises(RuntimeError):
         await api.call("get_login_info")
+
+
+def test_api_connected_reflects_transport_state():
+    t = WsApiTransport()
+    api = OneBotApi(ws_transport=t)
+    ws = _make_ws()
+
+    assert api.connected is False
+    t.register(ws)
+    assert api.connected is True
+    t.unregister(ws)
+    assert api.connected is False
+
+
+async def test_api_upload_actions_use_long_timeout():
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
+    api = OneBotApi(ws_transport=transport)
+
+    await api.call("upload_group_file", {"group_id": 1, "file": "/tmp/a", "name": "a"})
+    assert transport.request.await_args.kwargs["timeout"] == 600.0
+
+    await api.upload_private_file(2, "/tmp/b", "b")
+    assert transport.request.await_args.kwargs["timeout"] == 600.0
+
+
+async def test_api_explicit_timeout_overrides_upload_timeout():
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
+    api = OneBotApi(ws_transport=transport)
+
+    await api.call("upload_group_file", {}, timeout=12.0)
+    assert transport.request.await_args.kwargs["timeout"] == 12.0
+
+
+async def test_api_non_upload_action_uses_transport_default_timeout():
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
+    api = OneBotApi(ws_transport=transport)
+
+    await api.call("get_login_info")
+    assert transport.request.await_args.kwargs["timeout"] is None
 
 
 async def test_api_get_login_info_helper():
