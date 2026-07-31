@@ -66,6 +66,42 @@ async def test_upload_file_from_allowed_root(automation_client):
     assert api.call.await_args.args[0] == "upload_group_file"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "payload"),
+    [
+        ("onebot_send_message", {"message_type": "group", "message": []}),
+        ("onebot_send_message", {
+            "message_type": "group", "group_id": 42, "user_id": 7, "message": [],
+        }),
+        ("onebot_send_forward_msg", {"message_type": "private", "messages": []}),
+        ("onebot_mark_msg_as_read", {}),
+        ("onebot_mark_msg_as_read", {"real_seq": 123, "all": True}),
+    ],
+)
+async def test_dependent_tool_parameters_are_validated(automation_client, tool_name, payload):
+    client, _, api, _ = automation_client
+    response = await client.post(
+        f"/api/v1/tools/{tool_name}",
+        json=payload,
+        headers=_key_auth(),
+    )
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "validation_error"
+    api.call.assert_not_awaited()
+
+
+async def test_risky_admin_intent_parameters_are_required_by_http(automation_client):
+    client, _, api, _ = automation_client
+    response = await client.post(
+        "/api/v1/tools/onebot_set_group_admin",
+        json={"group_id": 42, "user_id": 7},
+        headers=_key_auth(),
+    )
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "validation_error"
+    api.call.assert_not_awaited()
+
+
 async def test_onebot_failure_is_not_reported_as_webapi_success(automation_client):
     client, _, api, allowed = automation_client
     path = allowed / "failed.zip"

@@ -71,6 +71,13 @@ def _tool_handler(name: str):
     raise KeyError(f"tool {name!r} not found")
 
 
+def _tool_schema(name: str):
+    for tname, _, schema in _TOOLS:
+        if tname == name:
+            return schema
+    raise KeyError(f"tool {name!r} not found")
+
+
 def test_toolset_constant():
     assert TOOLSET == "onebot"
 
@@ -233,6 +240,32 @@ async def test_send_message_private():
     assert adapter._api_calls[0][1]["user_id"] == 100
 
 
+async def test_send_message_defaults_to_matching_current_context():
+    group_adapter = MockAdapter(group_id="42", user_id="100")
+    set_adapter(group_adapter)
+    handler = _tool_handler("onebot_send_message")
+    raw = await handler({"message_type": "group", "message": []})
+    assert _is_success(raw) is True
+    assert group_adapter._api_calls[0][1]["group_id"] == 42
+
+    dm_adapter = MockAdapter(user_id="100")
+    set_adapter(dm_adapter)
+    raw = await handler({"message_type": "private", "message": []})
+    assert _is_success(raw) is True
+    assert dm_adapter._api_calls[0][1]["user_id"] == 100
+
+
+async def test_send_message_rejects_missing_or_conflicting_target():
+    adapter = MockAdapter(group_id="42", user_id="100")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_send_message")
+    assert _has_error(await handler({"message_type": "private", "message": []}))
+    assert _has_error(await handler({
+        "message_type": "group", "group_id": "42", "user_id": "100", "message": [],
+    }))
+    assert adapter._api_calls == []
+
+
 async def test_recall_message():
     adapter = MockAdapter(group_id="42")
     set_adapter(adapter)
@@ -249,6 +282,33 @@ async def test_poke():
     raw = await handler({"user_id": 100, "group_id": 42})
     assert _is_success(raw) is True
     assert adapter._api_calls[0] == ("send_poke", {"user_id": 100, "group_id": 42})
+
+
+async def test_poke_defaults_to_current_group():
+    adapter = MockAdapter(group_id="42")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_poke")
+    raw = await handler({"user_id": 100})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("send_poke", {"user_id": 100, "group_id": 42})
+
+
+async def test_poke_explicit_group_overrides_current_group():
+    adapter = MockAdapter(group_id="42")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_poke")
+    raw = await handler({"user_id": 100, "group_id": 99})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("send_poke", {"user_id": 100, "group_id": 99})
+
+
+async def test_poke_without_group_context_stays_private():
+    adapter = MockAdapter(user_id="100")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_poke")
+    raw = await handler({"user_id": 100})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("send_poke", {"user_id": 100})
 
 
 async def test_get_file():
@@ -360,6 +420,15 @@ async def test_send_forward_msg_private():
     assert params["messages"] == nodes
 
 
+async def test_send_forward_msg_defaults_to_current_group():
+    adapter = MockAdapter(group_id="42", user_id="100")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_send_forward_msg")
+    raw = await handler({"message_type": "group", "messages": []})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0][1]["group_id"] == 42
+
+
 async def test_forward_single_msg_group_context():
     """群聊上下文:转发到当前群,action=forward_group_single_msg。"""
     adapter = MockAdapter(group_id="42")
@@ -407,6 +476,49 @@ async def test_forward_single_msg_no_target_error():
     raw = await handler({"real_seq": 666})
     assert _has_error(raw) is True
     assert len(adapter._api_calls) == 0
+
+
+async def test_forward_single_msg_rejects_conflicting_targets():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_forward_single_msg")
+    raw = await handler({"real_seq": 666, "group_id": 42, "user_id": 100})
+    assert _has_error(raw) is True
+    assert adapter._api_calls == []
+
+
+async def test_upload_file_defaults_to_matching_current_context():
+    group_adapter = MockAdapter(group_id="42", user_id="100")
+    set_adapter(group_adapter)
+    handler = _tool_handler("onebot_upload_file")
+    raw = await handler({"message_type": "group", "file": "/tmp/group.txt"})
+    assert _is_success(raw) is True
+    assert group_adapter._api_calls[0] == (
+        "upload_group_file",
+        {"group_id": 42, "file": "/tmp/group.txt", "name": "group.txt"},
+    )
+
+    dm_adapter = MockAdapter(user_id="100")
+    set_adapter(dm_adapter)
+    raw = await handler({"message_type": "private", "file": "/tmp/private.txt"})
+    assert _is_success(raw) is True
+    assert dm_adapter._api_calls[0] == (
+        "upload_private_file",
+        {"user_id": 100, "file": "/tmp/private.txt", "name": "private.txt"},
+    )
+
+
+async def test_mark_msg_as_read_requires_explicit_scope():
+    adapter = MockAdapter(group_id="42")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_mark_msg_as_read")
+    assert _has_error(await handler({}))
+    assert _has_error(await handler({"real_seq": 123, "all": True}))
+    assert adapter._api_calls == []
+
+    raw = await handler({"all": True})
+    assert _is_success(raw) is True
+    assert adapter._api_calls[0] == ("mark_msg_as_read", {"message_id": 0, "group_id": "42"})
 
 
 # ── Admin tool tests (require admin) ─────────────────────────────────────
@@ -471,12 +583,44 @@ async def test_handle_group_request_admin():
     adapter = MockAdapter(is_admin=True)
     set_adapter(adapter)
     handler = _tool_handler("onebot_handle_group_request")
-    raw = await handler({"flag": "flag123", "approve": True})
+    raw = await handler({"flag": "flag123", "sub_type": "add", "approve": True})
     assert _is_success(raw) is True
     assert adapter._api_calls[0] == (
         "set_group_add_request",
         {"flag": "flag123", "sub_type": "add", "approve": True, "reason": ""},
     )
+
+
+def test_risky_admin_intent_parameters_are_required():
+    expected = {
+        "onebot_mute_group_member": {"duration"},
+        "onebot_mute_group_whole": {"enable"},
+        "onebot_set_group_admin": {"enable"},
+        "onebot_set_group_card": {"card"},
+        "onebot_handle_group_request": {"sub_type", "approve"},
+        "onebot_handle_friend_request": {"approve"},
+        "onebot_set_group_special_title": {"special_title"},
+    }
+    for name, required_fields in expected.items():
+        required = set(_tool_schema(name)["parameters"]["required"])
+        assert required_fields <= required
+
+
+async def test_risky_admin_handlers_reject_missing_intent():
+    adapter = MockAdapter(is_admin=True)
+    set_adapter(adapter)
+    calls = [
+        ("onebot_mute_group_member", {"group_id": 42, "user_id": 100}),
+        ("onebot_mute_group_whole", {"group_id": 42}),
+        ("onebot_set_group_admin", {"group_id": 42, "user_id": 100}),
+        ("onebot_set_group_card", {"group_id": 42, "user_id": 100}),
+        ("onebot_handle_group_request", {"flag": "x", "sub_type": "add"}),
+        ("onebot_handle_friend_request", {"flag": "x"}),
+        ("onebot_set_group_special_title", {"group_id": 42, "user_id": 100}),
+    ]
+    for name, args in calls:
+        assert _has_error(await _tool_handler(name)(args)), name
+    assert adapter._api_calls == []
 
 
 async def test_set_group_special_title_admin():

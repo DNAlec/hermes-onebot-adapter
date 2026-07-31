@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp.web
-from pydantic import BaseModel, ConfigDict, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model, model_validator
 
 from onebot_adapter.config import ConfigStore
 from onebot_adapter.hermes_plugin.onebot_tools import _TOOLS, _api_caller, _msg_context
@@ -20,6 +20,30 @@ logger = logging.getLogger(__name__)
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_dependent_fields(self):
+        fields = type(self).model_fields
+        if "message_type" in fields and {"group_id", "user_id"} <= fields.keys():
+            message_type = self.message_type
+            group_id = self.group_id
+            user_id = self.user_id
+            if message_type == "group":
+                if group_id is None or user_id is not None:
+                    raise ValueError("message_type=group requires group_id and forbids user_id")
+            elif message_type == "private":
+                if user_id is None or group_id is not None:
+                    raise ValueError("message_type=private requires user_id and forbids group_id")
+            else:
+                raise ValueError("message_type must be 'group' or 'private'")
+        if {"real_seq", "all"} <= fields.keys():
+            real_seq = self.real_seq
+            mark_all = self.all
+            if (real_seq is None) == (mark_all is not True):
+                raise ValueError("provide exactly one of real_seq or all=true")
+            if real_seq is not None and real_seq <= 0:
+                raise ValueError("real_seq must be positive")
+        return self
 
 
 def _annotation(prop: dict[str, Any]) -> Any:
@@ -157,7 +181,12 @@ def _tool_handler(name: str, store: ConfigStore, state: dict[str, Any]):
         try:
             args = TOOL_MODELS[name].model_validate(payload).model_dump(exclude_none=True)
         except ValidationError as exc:
-            return _error("validation_error", "request validation failed", 400, details=exc.errors())
+            return _error(
+                "validation_error",
+                "request validation failed",
+                400,
+                details=exc.errors(include_context=False),
+            )
         try:
             _validate_file_refs(args, store.config.automation_upload_allowed_roots)
             result = await _call_tool(name, args, state)
