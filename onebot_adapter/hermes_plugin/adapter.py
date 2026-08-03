@@ -74,10 +74,13 @@ except ImportError:
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
+_UPLOAD_RESULT_TIMEOUT = 630.0
+_UPLOAD_API_ACTIONS = frozenset({"upload_group_file", "upload_private_file"})
 _RECONNECT_INITIAL_DELAY = 1.0
 _RECONNECT_MAX_DELAY = 30.0
 # Maximum concurrent in-flight send requests (send_text/send_image/...).
-# Each send awaits a ``result`` frame from the adapter with a 30s timeout.
+# Most sends await a ``result`` frame for 30s; synchronous file uploads get
+# a longer action-specific timeout.
 # Without a limit, Gateway ``_send_with_retry`` retries pile up as parallel
 # ``_request`` coroutines, all hitting the serial OneBot WS and amplifying
 # congestion (death spiral).  Limiting to 2 keeps retries orderly: one
@@ -86,6 +89,13 @@ _MAX_INFLIGHT_SENDS = 2
 
 _PLUGIN_YAML_PATH = Path(__file__).parent / "plugin.yaml"
 _VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
+
+
+def _result_timeout(frame_type: str, action: str) -> float:
+    """Return the plugin-side wait limit for an adapter RPC result."""
+    if action == "send_document" or (frame_type == "api_call" and action in _UPLOAD_API_ACTIONS):
+        return _UPLOAD_RESULT_TIMEOUT
+    return _RESULT_TIMEOUT
 
 # ── Media caching helpers ────────────────────────────────────────────────
 # Used only when media_delivery_mode == "cache".  Extracts a file extension
@@ -1063,17 +1073,22 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 frame_type, action, req_id, list(payload.keys()),
                 _safe_log_json(msg),
             )
-            await self._ws.send_json(msg)
             try:
-                result = await asyncio.wait_for(fut, timeout=_RESULT_TIMEOUT)
-                logger.debug(
-                    "OneBot plugin _rpc result: action=%s req_id=%s success=%s",
-                    action, req_id, result.get("success"),
-                )
-                return result
-            except TimeoutError:
+                await self._ws.send_json(msg)
+                try:
+                    result = await asyncio.wait_for(fut, timeout=_result_timeout(frame_type, action))
+                    logger.debug(
+                        "OneBot plugin _rpc result: action=%s req_id=%s success=%s",
+                        action, req_id, result.get("success"),
+                    )
+                    return result
+                except TimeoutError:
+                    return {"success": False, "error": f"timeout waiting for {action} result"}
+            finally:
+                # _handle_text normally removes completed requests. Always
+                # clean up here too so send failures and caller cancellation
+                # cannot leak an unreachable pending future.
                 self._futures.pop(req_id, None)
-                return {"success": False, "error": f"timeout waiting for {action} result"}
 
     async def _request(self, action: str, **payload: Any) -> dict[str, Any]:
         """Send a ``send`` frame and await the matching ``result``."""

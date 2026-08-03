@@ -25,6 +25,7 @@ keywords = ["onebot", "qq", "hermes", "napcat", "chatbot", "onebot11"]
 dependencies = [
     "aiohttp>=3.10,<4",
     "packaging>=23",
+    "pydantic>=2,<3",
     "ruamel.yaml>=0.18",
 ]
 

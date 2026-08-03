@@ -23,7 +23,7 @@ from onebot_adapter.logging_utils import safe_json
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 10.0
+_DEFAULT_TIMEOUT = 300.0
 
 
 class WsApiTransport:

@@ -14,12 +14,12 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-/** Exchange the raw webui_token for a signed session token via POST /api/login.
+/** Exchange the raw webui_token for a signed session token via POST /api/v1/auth/login.
  * Uses fetch() directly (not the axios instance) so the 401 response
  * interceptor does not fire and cause a redirect loop on the login page.
  * On failure throws an Error with a `.status` property (401 or 429). */
 export async function login(rawToken: string): Promise<number> {
-  const resp = await fetch("/api/login", {
+  const resp = await fetch("/api/v1/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ token: rawToken }),
@@ -35,7 +35,7 @@ export async function login(rawToken: string): Promise<number> {
   return data.expires_in as number;
 }
 
-export const api = axios.create({ baseURL: "/api" });
+export const api = axios.create({ baseURL: "/api/v1" });
 
 api.interceptors.request.use((config) => {
   const token = getToken();
@@ -129,6 +129,9 @@ export interface Config {
   webui_port: number;
   webui_token?: string;
   webui_token_lifetime_hours: number;
+  automation_api_enabled: boolean;
+  automation_api_key_configured: boolean;
+  automation_upload_allowed_roots: string[];
   log_level: string;
   log_message_preview: number;
   log_file_enabled: boolean;
@@ -180,7 +183,7 @@ export interface Config {
 
 export const getStatus = () => api.get<Status>("/status").then((r) => r.data);
 export const getConfig = () => api.get<Config>("/config").then((r) => r.data);
-export const putConfig = (cfg: Partial<Config>) => api.put<Config>("/config", cfg).then((r) => r.data);
+export const putConfig = (cfg: Partial<Config>) => api.patch<Config>("/config", cfg).then((r) => r.data);
 export interface HermesDirStatus {
   hermes_dir: string;
   exists: boolean;
@@ -333,3 +336,8 @@ export interface UpdateInfo {
 
 export const getUpdateCheck = () =>
   api.get<UpdateInfo>("/update_check").then((r) => r.data);
+
+export const rotateAutomationApiKey = () =>
+  api.post<{ api_key: string; shown_once: boolean }>("/automation/key").then((r) => r.data);
+export const revokeAutomationApiKey = () =>
+  api.delete<{ revoked: boolean }>("/automation/key").then((r) => r.data);

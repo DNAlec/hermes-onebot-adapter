@@ -36,12 +36,12 @@ async def client(tmp_path, monkeypatch):
 
 
 async def test_status_endpoint_requires_auth(client):
-    resp = await client.get("/api/status")
+    resp = await client.get("/api/v1/status")
     assert resp.status == 401
 
 
 async def test_status_endpoint_with_token(client):
-    resp = await client.get("/api/status", headers=_auth())
+    resp = await client.get("/api/v1/status", headers=_auth())
     assert resp.status == 200
     data = await resp.json()
     assert data["adapter_version"]
@@ -49,16 +49,16 @@ async def test_status_endpoint_with_token(client):
 
 
 async def test_config_get_put(client):
-    got = await (await client.get("/api/config", headers=_auth())).json()
+    got = await (await client.get("/api/v1/config", headers=_auth())).json()
     assert got["self_id"] == "123"
-    resp = await client.put("/api/config", json={"self_id": "999", "seq_map_size": 100}, headers=_auth())
+    resp = await client.patch("/api/v1/config", json={"self_id": "999", "seq_map_size": 100}, headers=_auth())
     assert resp.status == 200
     assert (await resp.json())["seq_map_size"] == 100
 
 
 async def test_config_put_audit_records_direct_client_not_untrusted_xff(client):
-    resp = await client.put(
-        "/api/config",
+    resp = await client.patch(
+        "/api/v1/config",
         json={"seq_map_size": 101},
         headers={**_auth(), "X-Forwarded-For": "198.51.100.10"},
     )
@@ -67,21 +67,21 @@ async def test_config_put_audit_records_direct_client_not_untrusted_xff(client):
     audit_path = config_path().parent / "logs" / "config-audit.log"
     event = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
     assert event["reason"] == "webui.config_patch"
-    assert event["http_method"] == "PUT"
-    assert event["http_path"] == "/api/config"
+    assert event["http_method"] == "PATCH"
+    assert event["http_path"] == "/api/v1/config"
     assert event["client_ip"] != "198.51.100.10"
     assert event["submitted_fields"] == ["seq_map_size"]
 
 
 async def test_config_put_audit_uses_trusted_xff(client):
-    resp = await client.put(
-        "/api/config",
+    resp = await client.patch(
+        "/api/v1/config",
         json={"webui_trust_proxy_headers": True},
         headers=_auth(),
     )
     assert resp.status == 200
-    resp = await client.put(
-        "/api/config",
+    resp = await client.patch(
+        "/api/v1/config",
         json={"seq_map_size": 102},
         headers={**_auth(), "X-Forwarded-For": "198.51.100.11, 10.0.0.1"},
     )
@@ -109,12 +109,12 @@ async def test_bot_blacklist_list_and_delete_api(tmp_path, monkeypatch):
     await server.start_server()
     web_client = TestClient(server)
     try:
-        assert (await web_client.get("/api/bot_blacklist")).status == 401
-        response = await web_client.get("/api/bot_blacklist", headers=_auth())
+        assert (await web_client.get("/api/v1/bot_blacklist")).status == 401
+        response = await web_client.get("/api/v1/bot_blacklist", headers=_auth())
         assert response.status == 200
         payload = await response.json()
         assert payload["entries"][0]["reason"] == "test"
-        response = await web_client.delete(f"/api/bot_blacklist/{entry.id}", headers=_auth())
+        response = await web_client.delete(f"/api/v1/bot_blacklist/{entry.id}", headers=_auth())
         assert response.status == 200
         assert blacklist.list() == []
     finally:
@@ -124,8 +124,8 @@ async def test_bot_blacklist_list_and_delete_api(tmp_path, monkeypatch):
 
 
 async def test_config_get_does_not_expose_webui_token(client):
-    """GET /api/config must not return the raw webui_token (login password)."""
-    got = await (await client.get("/api/config", headers=_auth())).json()
+    """GET /api/v1/config must not return the raw webui_token (login password)."""
+    got = await (await client.get("/api/v1/config", headers=_auth())).json()
     assert "webui_token" not in got
     # Operational tokens remain visible — the user needs to copy them.
     assert got["onebot_ws_token"] == "t1"
@@ -133,29 +133,29 @@ async def test_config_get_does_not_expose_webui_token(client):
 
 
 async def test_config_put_does_not_expose_webui_token(client):
-    """PUT /api/config must not leak webui_token in the response, and changing
-    it still updates the value server-side (verified via /api/login)."""
-    resp = await client.put("/api/config", json={"webui_token": "newsecret123"}, headers=_auth())
+    """PUT /api/v1/config must not leak webui_token in the response, and changing
+    it still updates the value server-side (verified via /api/v1/auth/login)."""
+    resp = await client.patch("/api/v1/config", json={"webui_token": "newsecret123"}, headers=_auth())
     assert resp.status == 200
     got = await resp.json()
     assert "webui_token" not in got
     # New token authenticates; old one no longer does.
-    assert (await client.post("/api/login", json={"token": "newsecret123"})).status == 200
-    assert (await client.post("/api/login", json={"token": _TOKEN})).status == 401
+    assert (await client.post("/api/v1/auth/login", json={"token": "newsecret123"})).status == 200
+    assert (await client.post("/api/v1/auth/login", json={"token": _TOKEN})).status == 401
 
 
 async def test_config_get_requires_auth(client):
-    resp = await client.get("/api/config")
+    resp = await client.get("/api/v1/config")
     assert resp.status == 401
 
 
 async def test_config_put_requires_auth(client):
-    resp = await client.put("/api/config", json={"seq_map_size": 100})
+    resp = await client.patch("/api/v1/config", json={"seq_map_size": 100})
     assert resp.status == 401
 
 
 async def test_config_rejects_invalid(client):
-    resp = await client.put("/api/config", json={"onebot_mode": "bogus"}, headers=_auth())
+    resp = await client.patch("/api/v1/config", json={"onebot_mode": "bogus"}, headers=_auth())
     assert resp.status == 400
     assert "onebot_mode" in (await resp.json())["error"]
 
@@ -168,24 +168,24 @@ async def test_index_placeholder_no_auth_needed(client):
 
 
 async def test_logs_endpoint_requires_auth(client):
-    resp = await client.get("/api/logs")
+    resp = await client.get("/api/v1/logs")
     assert resp.status == 401
 
 
 async def test_logs_endpoint_with_token(client):
-    resp = await client.get("/api/logs", headers=_auth())
+    resp = await client.get("/api/v1/logs", headers=_auth())
     assert resp.status == 200
     assert "logs" in await resp.json()
 
 
 async def test_install_plugin_requires_auth(client):
-    resp = await client.post("/api/install_plugin", json={})
+    resp = await client.post("/api/v1/install_plugin", json={})
     assert resp.status == 401
 
 
 async def test_install_plugin_endpoint(client, tmp_path):
     resp = await client.post(
-        "/api/install_plugin",
+        "/api/v1/install_plugin",
         json={"hermes_install_dir": str(tmp_path / "hermes")},
         headers=_auth(),
     )
@@ -196,27 +196,27 @@ async def test_install_plugin_endpoint(client, tmp_path):
 
 
 async def test_groups_sync_requires_auth(client):
-    resp = await client.post("/api/groups/sync")
+    resp = await client.post("/api/v1/groups/sync")
     assert resp.status == 401
 
 
 async def test_groups_get_requires_auth(client):
-    resp = await client.get("/api/groups")
+    resp = await client.get("/api/v1/groups")
     assert resp.status == 401
 
 
 async def test_commands_requires_auth(client):
-    resp = await client.get("/api/commands")
+    resp = await client.get("/api/v1/commands")
     assert resp.status == 401
 
 
 async def test_send_requires_auth(client):
-    resp = await client.post("/api/send", json={"chat_id": "group:1", "message": "hi"})
-    assert resp.status == 401
+    resp = await client.post("/api/v1/tools/onebot_send_message", json={})
+    assert resp.status == 403
 
 
 async def test_send_does_not_fallback_to_hermes_ws_token(tmp_path, monkeypatch):
-    """Only webui_token authenticates /api/send — no hermes_ws_token fallback."""
+    """The Hermes WS token cannot authenticate the automation tool API."""
     monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(tmp_path / "cfg.json"))
     store = ConfigStore(AdapterConfig(
         self_id="123",
@@ -232,11 +232,11 @@ async def test_send_does_not_fallback_to_hermes_ws_token(tmp_path, monkeypatch):
     client = TestClient(server)
     # Sending with hermes_ws_token as Bearer should NOT authenticate
     resp = await client.post(
-        "/api/send",
-        json={"chat_id": "group:1", "message": "hi"},
+        "/api/v1/tools/onebot_send_message",
+        json={},
         headers={"Authorization": "Bearer hermes_tok"},
     )
-    assert resp.status == 401
+    assert resp.status == 403
     await server.close()
 
 
@@ -258,18 +258,18 @@ async def no_token_client(tmp_path, monkeypatch):
 
 async def test_health_endpoint_public_without_token(no_token_client):
     """Health endpoint is always public regardless of token config."""
-    resp = await no_token_client.get("/api/health")
+    resp = await no_token_client.get("/api/v1/health")
     assert resp.status == 200
     assert (await resp.json())["status"] == "ok"
 
 
 async def test_health_endpoint_public_with_token(client):
-    resp = await client.get("/api/health")
+    resp = await client.get("/api/v1/health")
     assert resp.status == 200
     assert (await resp.json())["status"] == "ok"
 
 
-# ── Signed session token (/api/login) tests ──────────────────────────────
+# ── Signed session token (/api/v1/auth/login) tests ──────────────────────────────
 
 
 @pytest.fixture
@@ -289,45 +289,45 @@ async def signed_client(tmp_path, monkeypatch):
 
 
 async def test_login_wrong_token(signed_client):
-    resp = await signed_client.post("/api/login", json={"token": "wrong"})
+    resp = await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})
     assert resp.status == 401
 
 
 async def test_login_returns_signed_token(signed_client):
-    resp = await signed_client.post("/api/login", json={"token": _TOKEN})
+    resp = await signed_client.post("/api/v1/auth/login", json={"token": _TOKEN})
     assert resp.status == 200
     data = await resp.json()
     assert "session_token" in data
     assert data["expires_in"] == 24 * 3600
-    # The returned token should authenticate /api/status
+    # The returned token should authenticate /api/v1/status
     auth = {"Authorization": f"Bearer {data['session_token']}"}
-    r2 = await signed_client.get("/api/status", headers=auth)
+    r2 = await signed_client.get("/api/v1/status", headers=auth)
     assert r2.status == 200
 
 
 async def test_signed_mode_rejects_raw_token(signed_client):
     """In signed mode the raw webui_token must not authenticate."""
-    resp = await signed_client.get("/api/status", headers=_RAW_AUTH)
+    resp = await signed_client.get("/api/v1/status", headers=_RAW_AUTH)
     assert resp.status == 401
 
 
 async def test_signed_token_expired(signed_client):
     """A token whose issued_at is older than lifetime_hours is rejected."""
     old = make_session_token(_TOKEN, _EPOCH, int(time.time()) - 25 * 3600)
-    resp = await signed_client.get("/api/status", headers={"Authorization": f"Bearer {old}"})
+    resp = await signed_client.get("/api/v1/status", headers={"Authorization": f"Bearer {old}"})
     assert resp.status == 401
 
 
 async def test_signed_token_bad_signature(signed_client):
     """A token with a tampered HMAC is rejected."""
     bad = make_session_token("wrong-secret", _EPOCH, int(time.time()))
-    resp = await signed_client.get("/api/status", headers={"Authorization": f"Bearer {bad}"})
+    resp = await signed_client.get("/api/v1/status", headers={"Authorization": f"Bearer {bad}"})
     assert resp.status == 401
 
 
 async def test_signed_token_garbage(signed_client):
     """Non-base64 / malformed tokens are rejected without crashing."""
-    resp = await signed_client.get("/api/status", headers={"Authorization": "Bearer !!!notb64!!!"})
+    resp = await signed_client.get("/api/v1/status", headers={"Authorization": "Bearer !!!notb64!!!"})
     assert resp.status == 401
 
 
@@ -342,7 +342,7 @@ async def test_lifetime_below_minimum_rejected(tmp_path, monkeypatch):
 
 
 async def test_changing_lifetime_invalidates_old_sessions(tmp_path, monkeypatch):
-    """Bumping lifetime via PUT /api/config invalidates old signed tokens."""
+    """Bumping lifetime via PUT /api/v1/config invalidates old signed tokens."""
     monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(tmp_path / "cfg.json"))
     store = ConfigStore(AdapterConfig(
         self_id="123", onebot_ws_token="t1", hermes_ws_token="t2", webui_token=_TOKEN,
@@ -355,32 +355,32 @@ async def test_changing_lifetime_invalidates_old_sessions(tmp_path, monkeypatch)
     client = TestClient(server)
 
     # Login → get a signed token
-    resp = await client.post("/api/login", json={"token": _TOKEN})
+    resp = await client.post("/api/v1/auth/login", json={"token": _TOKEN})
     session_tok = (await resp.json())["session_token"]
     auth = {"Authorization": f"Bearer {session_tok}"}
-    assert (await client.get("/api/status", headers=auth)).status == 200
+    assert (await client.get("/api/v1/status", headers=auth)).status == 200
 
     # Change lifetime → epoch should bump → old token invalid
-    resp = await client.put("/api/config", json={"webui_token_lifetime_hours": 48}, headers=auth)
+    resp = await client.patch("/api/v1/config", json={"webui_token_lifetime_hours": 48}, headers=auth)
     assert resp.status == 200
     # webui_token_epoch is internal state, not exposed in the API response;
     # verify it bumped by reading the store directly.
     assert store.config.webui_token_epoch == _EPOCH + 1
 
     # Old session token no longer works
-    assert (await client.get("/api/status", headers=auth)).status == 401
+    assert (await client.get("/api/v1/status", headers=auth)).status == 401
 
     # Re-login works with the new epoch
-    resp = await client.post("/api/login", json={"token": _TOKEN})
+    resp = await client.post("/api/v1/auth/login", json={"token": _TOKEN})
     new_tok = (await resp.json())["session_token"]
     new_auth = {"Authorization": f"Bearer {new_tok}"}
-    assert (await client.get("/api/status", headers=new_auth)).status == 200
+    assert (await client.get("/api/v1/status", headers=new_auth)).status == 200
     await server.close()
 
 
 async def test_login_endpoint_no_auth_required(signed_client):
-    """/api/login is exempt from the auth middleware (public login endpoint)."""
-    resp = await signed_client.post("/api/login", json={"token": _TOKEN})
+    """/api/v1/auth/login is exempt from the auth middleware (public login endpoint)."""
+    resp = await signed_client.post("/api/v1/auth/login", json={"token": _TOKEN})
     assert resp.status == 200
 
 
@@ -390,9 +390,9 @@ async def test_login_endpoint_no_auth_required(signed_client):
 async def test_login_rate_limit_blocks_after_5_failures(signed_client):
     """5 failed logins from the same IP → 6th attempt returns 429."""
     for _ in range(5):
-        resp = await signed_client.post("/api/login", json={"token": "wrong"})
+        resp = await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})
         assert resp.status == 401
-    resp = await signed_client.post("/api/login", json={"token": "wrong"})
+    resp = await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})
     assert resp.status == 429
     body = await resp.json()
     assert "retry_after" in body
@@ -401,21 +401,21 @@ async def test_login_rate_limit_blocks_after_5_failures(signed_client):
 async def test_login_rate_limit_resets_on_success(signed_client):
     """A successful login clears the failure counter for that IP."""
     for _ in range(4):
-        assert (await signed_client.post("/api/login", json={"token": "wrong"})).status == 401
+        assert (await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})).status == 401
     # 5th attempt with correct token succeeds and resets the counter
-    assert (await signed_client.post("/api/login", json={"token": _TOKEN})).status == 200
+    assert (await signed_client.post("/api/v1/auth/login", json={"token": _TOKEN})).status == 200
     # After reset, 5 more failures should be allowed before ban
     for _ in range(5):
-        assert (await signed_client.post("/api/login", json={"token": "wrong"})).status == 401
+        assert (await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})).status == 401
     # 6th failure → 429
-    assert (await signed_client.post("/api/login", json={"token": "wrong"})).status == 429
+    assert (await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})).status == 429
 
 
 async def test_login_rate_limit_banned_ip_rejects_even_correct_token(signed_client):
     """Once banned, even the correct token returns 429 (not 401)."""
     for _ in range(5):
-        await signed_client.post("/api/login", json={"token": "wrong"})
-    resp = await signed_client.post("/api/login", json={"token": _TOKEN})
+        await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})
+    resp = await signed_client.post("/api/v1/auth/login", json={"token": _TOKEN})
     assert resp.status == 429
 
 
@@ -432,30 +432,30 @@ async def test_login_rate_limit_unblock_after_window(signed_client, monkeypatch)
     monkeypatch.setattr(routes.time, "time", fake_time)
 
     for _ in range(5):
-        assert (await signed_client.post("/api/login", json={"token": "wrong"})).status == 401
-    assert (await signed_client.post("/api/login", json={"token": "wrong"})).status == 429
+        assert (await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})).status == 401
+    assert (await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})).status == 429
 
     # Advance past the ban window + the GC threshold.
     fake_now[0] += routes._LOGIN_BAN_SECONDS + 1
 
     # The IP's stale entry should be garbage-collected on the next request,
     # and a correct token should now succeed.
-    resp = await signed_client.post("/api/login", json={"token": _TOKEN})
+    resp = await signed_client.post("/api/v1/auth/login", json={"token": _TOKEN})
     assert resp.status == 200
 
 
 async def test_login_rate_limit_different_ips_independent(signed_client):
-    """Rate-limit ban on /api/login does not affect already-authenticated API calls.
+    """Rate-limit ban on /api/v1/auth/login does not affect already-authenticated API calls.
 
-    The rate limiter only applies to /api/login; a banned IP can still use a
-    valid signed session token to call other endpoints (e.g. /api/status)."""
+    The rate limiter only applies to /api/v1/auth/login; a banned IP can still use a
+    valid signed session token to call other endpoints (e.g. /api/v1/status)."""
     # Exhaust the login limit for this IP.
     for _ in range(5):
-        await signed_client.post("/api/login", json={"token": "wrong"})
-    # Banned on /api/login
-    assert (await signed_client.post("/api/login", json={"token": _TOKEN})).status == 429
+        await signed_client.post("/api/v1/auth/login", json={"token": "wrong"})
+    # Banned on /api/v1/auth/login
+    assert (await signed_client.post("/api/v1/auth/login", json={"token": _TOKEN})).status == 429
     # But an existing valid signed token still works on other endpoints.
-    assert (await signed_client.get("/api/status", headers=_auth())).status == 200
+    assert (await signed_client.get("/api/v1/status", headers=_auth())).status == 200
 
 
 async def test_xff_ignored_by_default(signed_client):
@@ -464,14 +464,14 @@ async def test_xff_ignored_by_default(signed_client):
     as a new IP each time."""
     for _ in range(5):
         resp = await signed_client.post(
-            "/api/login",
+            "/api/v1/auth/login",
             json={"token": "wrong"},
             headers={"X-Forwarded-For": "10.0.0.1"},
         )
         assert resp.status == 401
     # 6th attempt with a *different* spoofed XFF → still banned (same real IP)
     resp = await signed_client.post(
-        "/api/login",
+        "/api/v1/auth/login",
         json={"token": "wrong"},
         headers={"X-Forwarded-For": "10.0.0.2"},
     )
@@ -496,16 +496,16 @@ async def test_xff_trusted_when_configured(tmp_path, monkeypatch):
         # 5 failures with one XFF IP → banned for that XFF
         for _ in range(5):
             assert (await client.post(
-                "/api/login", json={"token": "wrong"},
+                "/api/v1/auth/login", json={"token": "wrong"},
                 headers={"X-Forwarded-For": "10.0.0.1"},
             )).status == 401
         assert (await client.post(
-            "/api/login", json={"token": "wrong"},
+            "/api/v1/auth/login", json={"token": "wrong"},
             headers={"X-Forwarded-For": "10.0.0.1"},
         )).status == 429
         # A different XFF IP is not banned
         assert (await client.post(
-            "/api/login", json={"token": _TOKEN},
+            "/api/v1/auth/login", json={"token": _TOKEN},
             headers={"X-Forwarded-For": "10.0.0.2"},
         )).status == 200
     finally:
