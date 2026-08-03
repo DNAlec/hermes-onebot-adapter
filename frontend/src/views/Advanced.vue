@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useConfig } from "../composables/useConfig";
-import { clearUsageStats, login } from "../api";
+import {
+  clearUsageStats, login, revokeAutomationApiKey, rotateAutomationApiKey,
+} from "../api";
 
 const { cfg, load, save: saveConfig } = useConfig();
 const saving = ref(false);
@@ -16,6 +18,7 @@ const tokenMsg = ref("");
 const tokenMsgType = ref<"success" | "error">("success");
 const changingToken = ref(false);
 const clearingUsage = ref(false);
+const generatedApiKey = ref("");
 
 onMounted(async () => {
   try {
@@ -44,6 +47,8 @@ async function save() {
       usage_stats_retention_days: c.usage_stats_retention_days,
       webui_port: c.webui_port,
       webui_token_lifetime_hours: c.webui_token_lifetime_hours,
+      automation_api_enabled: c.automation_api_enabled,
+      automation_upload_allowed_roots: c.automation_upload_allowed_roots,
       send_dedup_enabled: c.send_dedup_enabled,
       send_dedup_ttl_seconds: c.send_dedup_ttl_seconds,
       seq_map_size: c.seq_map_size,
@@ -92,11 +97,11 @@ async function changeToken() {
   }
   changingToken.value = true;
   try {
-    // Verify the old token server-side via /api/login. The webui_token is never
+    // Verify the old token server-side via /api/v1/auth/login.
     // exposed over the API, so verification can only happen on the backend.
     // We do NOT persist the returned session token here — the current session
     // keeps its existing token until we re-login with the new one below.
-    const verifyResp = await fetch("/api/login", {
+    const verifyResp = await fetch("/api/v1/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token: oldToken.value }),
@@ -129,6 +134,20 @@ async function changeToken() {
   } finally {
     changingToken.value = false;
   }
+}
+
+async function rotateApiKey() {
+  if (!window.confirm("该 Key 拥有全部 OneBot 工具权限。确认生成或轮换？")) return;
+  const result = await rotateAutomationApiKey();
+  generatedApiKey.value = result.api_key;
+  await load();
+}
+
+async function revokeApiKey() {
+  if (!window.confirm("撤销后所有自动化调用会立即失效。确认撤销？")) return;
+  await revokeAutomationApiKey();
+  generatedApiKey.value = "";
+  await load();
 }
 
 </script>
@@ -169,6 +188,30 @@ async function changeToken() {
         有效期(小时)
         <input type="number" v-model.number="cfg.webui_token_lifetime_hours" min="1" max="87600" />
         <span class="hint">最小 1 小时;修改后点击下方"保存配置"生效</span>
+      </label>
+    </div>
+
+    <div class="section">
+      <h3>自动化工具 API</h3>
+      <p class="hint">⚠️ API Key 可调用全部 OneBot 工具，包括踢人、禁言、退群和删除好友，请仅交给可信脚本。</p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.automation_api_enabled" />
+        <span>启用自动化工具 API</span>
+      </label>
+      <label>
+        允许读取的本地目录（每行一个）
+        <textarea
+          :value="cfg.automation_upload_allowed_roots.join('\n')"
+          @input="cfg.automation_upload_allowed_roots = ($event.target as HTMLTextAreaElement).value.split('\n').map(v => v.trim()).filter(Boolean)"
+          rows="3"
+        />
+      </label>
+      <p>Key 状态：{{ cfg.automation_api_key_configured ? "已配置" : "未配置" }}</p>
+      <button @click="rotateApiKey">{{ cfg.automation_api_key_configured ? "轮换 API Key" : "生成 API Key" }}</button>
+      <button v-if="cfg.automation_api_key_configured" class="danger-btn" @click="revokeApiKey">撤销 API Key</button>
+      <label v-if="generatedApiKey">
+        新 API Key（仅显示一次）
+        <input :value="generatedApiKey" readonly />
       </label>
     </div>
 

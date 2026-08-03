@@ -8,7 +8,7 @@ import time
 
 
 def make_session_token(secret: str, epoch: int, issued_at: int | None = None) -> str:
-    """Mint an HMAC-signed session token identical to what /api/login issues.
+    """Mint an HMAC-signed session token identical to what /api/v1/auth/login issues.
 
     Mirrors ``onebot_adapter.webui.routes._login`` so tests can authenticate
     without going through the login endpoint.

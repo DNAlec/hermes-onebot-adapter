@@ -19,6 +19,8 @@ from onebot_adapter.onebot.ws_api import WsApiTransport
 logger = logging.getLogger(__name__)
 
 _DEBUG_LOG_MAX = 2000
+_UPLOAD_TIMEOUT = 600.0
+_UPLOAD_ACTIONS = frozenset({"upload_group_file", "upload_private_file"})
 
 
 class OneBotApi:
@@ -26,6 +28,11 @@ class OneBotApi:
 
     def __init__(self, ws_transport: WsApiTransport) -> None:
         self._ws = ws_transport
+
+    @property
+    def connected(self) -> bool:
+        """Whether a OneBot WebSocket is currently available for API calls."""
+        return self._ws.has_active
 
     async def call(
         self, action: str, params: dict[str, Any] | None = None, timeout: float | None = None
@@ -35,8 +42,9 @@ class OneBotApi:
             action, safe_json(params or {}, _DEBUG_LOG_MAX),
         )
         started = time.monotonic()
+        request_timeout = _UPLOAD_TIMEOUT if timeout is None and action in _UPLOAD_ACTIONS else timeout
         try:
-            data = await self._ws.request(action, params, timeout=timeout)
+            data = await self._ws.request(action, params, timeout=request_timeout)
         except Exception as exc:
             logger.warning(
                 "OneBot API %s request failed duration_ms=%.1f: %s",
@@ -48,7 +56,7 @@ class OneBotApi:
             "OneBot API %s response duration_ms=%.1f: %s",
             action, duration_ms, safe_json(data, _DEBUG_LOG_MAX),
         )
-        if data.get("retcode", 0) != 0:
+        if data.get("retcode", 0) != 0 or data.get("status") == "failed":
             logger.warning(
                 "OneBot API %s error: retcode=%s status=%s msg=%s",
                 action, data.get("retcode"), data.get("status"), data.get("msg"),
@@ -89,10 +97,10 @@ class OneBotApi:
         }))["data"]
 
     async def upload_group_file(self, group_id: int, file: str, name: str) -> None:
-        await self.call("upload_group_file", {"group_id": group_id, "file": file, "name": name}, timeout=60)
+        await self.call("upload_group_file", {"group_id": group_id, "file": file, "name": name})
 
     async def upload_private_file(self, user_id: int, file: str, name: str) -> None:
-        await self.call("upload_private_file", {"user_id": user_id, "file": file, "name": name}, timeout=60)
+        await self.call("upload_private_file", {"user_id": user_id, "file": file, "name": name})
 
 
 def text_segment(text: str) -> dict:

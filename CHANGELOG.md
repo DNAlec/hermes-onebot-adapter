@@ -1,5 +1,32 @@
 # 更新日志
 
+## [Unreleased]
+
+## [1.3.0] - 2026-08-03
+
+### 新增
+- 新增自动化 OneBot 工具 API：`GET /api/v1/tools` 返回工具目录，41 个 `POST /api/v1/tools/<tool_name>` 路由覆盖完整工具目录
+- 新增独立自动化 API key，可通过 WebUI 或 `--generate-api-key` / `--rotate-api-key` / `--revoke-api-key` 管理；配置仅持久化 SHA-256 摘要
+- 新增 `/api/v1/openapi.json`、Pydantic 严格参数校验、本地文件允许目录及路径/符号链接逃逸防护
+- 新增 `onebot_upload_file`，统一支持群文件和私聊文件上传；上传类 OneBot 调用使用独立的长超时
+
+### 变更
+- **破坏性变更**：WebUI 管理 API 全部迁移到 `/api/v1/*`；配置更新由 `PUT /api/config` 改为 `PATCH /api/v1/config`，旧业务路径不再保留
+- WebUI session 和自动化 API key 分权；凭证只接受 `Authorization: Bearer`，不再接受 `?token=`
+- 自动化 API 默认关闭；API key 拥有全部 OneBot 工具权限，包括群管理和账号管理操作
+- Hermes 插件与 HTTP 自动化 API 共用同一份工具目录和处理器，工具成功/失败响应语义保持一致
+- 消息发送、合并转发和文件上传会严格校验群聊/私聊目标；HTTP 调用必须显式传入匹配的 `group_id` 或 `user_id`，插件调用仅继承同类型的当前会话
+- 收紧有依赖关系的工具参数：标记已读须在 `real_seq` 与 `all=true` 中二选一，开关、时长和可清空文本等参数改为显式必填
+
+### 修复
+- 未知 `/api/*` 不再回退到 SPA，而是返回 JSON 404
+- 群配置写入改为磁盘保存成功后再更新内存，避免保存失败造成状态分叉
+- OneBot API 将 `status=failed` 视为失败并向工具调用方返回错误；未连接 OneBot 时自动化工具 API 返回 `503`
+- RPC 发送失败、超时或取消后清理 pending future，避免长期运行时泄漏；文件上传不再被普通请求的短超时提前中断
+
+### 文档
+- 更新 README、REST API 文档和 AGENTS 架构说明，补充 v1 路径、key 生命周期、工具发现和文件安全策略
+
 ## [1.2.0] - 2026-07-24
 
 ### 新增
@@ -118,3 +145,11 @@
 - 28 个 OneBot API 工具暴露给 LLM
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
+
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.1.0b...v1.2.0
+[1.1.0b]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.0.0b3...v1.1.0b
+[1.0.0b3]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.0.0b2...v1.0.0b3
+[1.0.0b2]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.0.0b1...v1.0.0b2
+[1.0.0b1]: https://github.com/DNAlec/hermes-onebot-adapter/releases/tag/v1.0.0b1

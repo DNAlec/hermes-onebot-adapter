@@ -12,6 +12,7 @@ share or overwrite authorization state.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from collections.abc import Callable
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 # ── Runtime bridge to the adapter's WS api_call channel ──────────────────
 
 _adapter: Any = None  # OneBotAdapter instance (set by register_tools)
+_api_caller: contextvars.ContextVar[Callable[[str, dict[str, Any]], Any] | None] = contextvars.ContextVar(
+    "_onebot_api_caller", default=None,
+)
 
 
 def set_adapter(adapter: Any) -> None:
@@ -41,13 +45,29 @@ except ImportError:
 
 
 async def _api_call(action: str, **params: Any) -> Any:
-    """Return an awaitable that calls the adapter's _api_call method."""
-    if _adapter is None:
+    """Call a OneBot action and return its data payload.
+
+    The Hermes plugin transport returns an RPC envelope
+    (``{"success": bool, "data"|"error": ...}``), while the WebUI automation
+    caller already returns the unwrapped OneBot data and raises on failure.
+    Normalize both paths here so every tool handler has the same contract:
+    return data on success and raise on any transport/API failure.
+    """
+    caller = _api_caller.get()
+    if caller is None and _adapter is None:
         raise RuntimeError("OneBot adapter not initialized")
     # Convert kwargs to a params dict, dropping None values
     clean = {k: v for k, v in params.items() if v is not None}
     try:
-        return await _adapter._api_call(action, clean)
+        if caller is not None:
+            return await caller(action, clean)
+        result = await _adapter._api_call(action, clean)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"invalid adapter response for {action}: expected object")
+        if result.get("success") is not True:
+            error = result.get("error") or f"{action} failed without an error message"
+            raise RuntimeError(str(error))
+        return result.get("data")
     except Exception:
         logger.warning("OneBot tool API call failed action=%s", action, exc_info=True)
         raise
@@ -90,10 +110,12 @@ try:
     from tools.registry import tool_error, tool_result
 except ImportError:
     def tool_result(data: Any) -> str:
-        return json.dumps({"success": True, "data": data}, ensure_ascii=False, default=str)
+        # Match Hermes' tools.registry.tool_result wire format so standalone
+        # adapter/WebUI behavior does not differ from the installed plugin.
+        return json.dumps(data, ensure_ascii=False, default=str)
 
     def tool_error(msg: str) -> str:
-        return json.dumps({"success": False, "error": msg}, ensure_ascii=False)
+        return json.dumps({"error": msg}, ensure_ascii=False)
 
 
 # ── Admin gating ─────────────────────────────────────────────────────────
@@ -101,10 +123,10 @@ except ImportError:
 
 def _check_admin() -> str | None:
     """Return an error string if the current user is not an admin."""
-    if _adapter is None:
-        return "OneBot adapter not initialized"
     ctx = _msg_context.get()
     is_admin = ctx[0] if ctx is not None else False
+    if _adapter is None and _api_caller.get() is None:
+        return "OneBot adapter not initialized"
     if not is_admin:
         return "此操作需要管理员权限"
     return None
@@ -124,6 +146,35 @@ def _current_user_id() -> str:
     if ctx is not None:
         return ctx[2]
     return ctx[2] if ctx is not None else ""
+
+
+def _resolve_message_target(args: dict) -> tuple[str, dict[str, int]]:
+    """Resolve and validate a group/private destination.
+
+    Explicit IDs take precedence.  Missing IDs may inherit only a matching
+    current-chat context: group calls inherit the current group, while private
+    calls inherit the current user only when the current chat itself is a DM.
+    """
+    message_type = str(args.get("message_type", ""))
+    group_id = args.get("group_id")
+    user_id = args.get("user_id")
+    if message_type == "group":
+        if user_id:
+            raise ValueError("message_type=group 时不能提供 user_id")
+        group_id = group_id or _current_group_id()
+        if not group_id:
+            raise ValueError("无法确定群聊目标:需要 group_id 或当前群聊上下文")
+        return message_type, {"group_id": int(group_id)}
+    if message_type == "private":
+        if group_id:
+            raise ValueError("message_type=private 时不能提供 group_id")
+        # A group sender's user_id is not an implicit private-message target.
+        if not user_id and not _current_group_id():
+            user_id = _current_user_id()
+        if not user_id:
+            raise ValueError("无法确定私聊目标:需要 user_id 或当前私聊上下文")
+        return message_type, {"user_id": int(user_id)}
+    raise ValueError("message_type must be 'group' or 'private'")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -254,12 +305,18 @@ async def _get_forward_msg(args: dict, **_) -> str:
 
 async def _mark_msg_as_read(args: dict, **_) -> str:
     try:
-        seq_val = args.get("real_seq", 0)
-        if seq_val:
+        seq_val = args.get("real_seq")
+        mark_all = args.get("all") is True
+        if seq_val is not None and mark_all:
+            return tool_error("real_seq 和 all=true 只能选择一个")
+        if seq_val is not None:
+            if int(seq_val) <= 0:
+                return tool_error("real_seq 必须是正整数")
             params: dict = {"real_seq": int(seq_val)}
-        else:
-            # 0 或未传 → 标记全部已读
+        elif mark_all:
             params = {"message_id": 0}
+        else:
+            return tool_error("需要提供 real_seq；标记当前会话全部已读时请显式传 all=true")
         gid = _current_group_id()
         if gid:
             params["group_id"] = gid
@@ -376,11 +433,11 @@ async def _edit_bot_blacklist(args: dict, **_) -> str:
 
 async def _send_message(args: dict, **_) -> str:
     try:
+        message_type, target = _resolve_message_target(args)
         data = await _api_call(
             "send_msg",
-            message_type=args["message_type"],
-            group_id=int(args["group_id"]) if args.get("group_id") else None,
-            user_id=int(args["user_id"]) if args.get("user_id") else None,
+            message_type=message_type,
+            **target,
             message=args["message"],
         )
         return tool_result(data)
@@ -408,11 +465,11 @@ async def _recall_message(args: dict, **_) -> str:
 
 async def _send_forward_msg(args: dict, **_) -> str:
     try:
+        message_type, target = _resolve_message_target(args)
         data = await _api_call(
             "send_forward_msg",
-            message_type=args["message_type"],
-            group_id=int(args["group_id"]) if args.get("group_id") else None,
-            user_id=int(args["user_id"]) if args.get("user_id") else None,
+            message_type=message_type,
+            **target,
             messages=args["messages"],
         )
         return tool_result(data)
@@ -429,6 +486,8 @@ async def _forward_single_msg(args: dict, **_) -> str:
     """
     try:
         params: dict = {"real_seq": int(args["real_seq"])}
+        if args.get("group_id") and args.get("user_id"):
+            return tool_error("group_id 和 user_id 只能选择一个")
         # Explicit args first so the LLM can target a different chat.
         if args.get("group_id"):
             params["group_id"] = int(args["group_id"])
@@ -458,8 +517,12 @@ async def _forward_single_msg(args: dict, **_) -> str:
 async def _poke(args: dict, **_) -> str:
     try:
         params: dict[str, Any] = {"user_id": int(args["user_id"])}
-        if args.get("group_id"):
-            params["group_id"] = int(args["group_id"])
+        # Explicit targets take precedence, but default to the current group
+        # context so an omitted group_id cannot accidentally turn a group poke
+        # into a private poke.
+        group_id = args.get("group_id") or _current_group_id()
+        if group_id:
+            params["group_id"] = int(group_id)
         await _api_call("send_poke", **params)
         return tool_result({"poked": True})
     except Exception as e:
@@ -511,7 +574,7 @@ async def _mute_group_member(args: dict, **_) -> str:
     if err:
         return tool_error(err)
     try:
-        duration = int(args.get("duration", 600))
+        duration = int(args["duration"])
         await _api_call(
             "set_group_ban",
             group_id=int(args["group_id"]),
@@ -529,8 +592,9 @@ async def _mute_group_whole(args: dict, **_) -> str:
     if err:
         return tool_error(err)
     try:
-        await _api_call("set_group_whole_ban", group_id=int(args["group_id"]), enable=args.get("enable", True))
-        return tool_result({"whole_ban": args.get("enable", True)})
+        enable = bool(args["enable"])
+        await _api_call("set_group_whole_ban", group_id=int(args["group_id"]), enable=enable)
+        return tool_result({"whole_ban": enable})
     except Exception as e:
         logger.warning("tool call failed: %s", e)
         return tool_error(str(e))
@@ -545,9 +609,9 @@ async def _set_group_admin(args: dict, **_) -> str:
             "set_group_admin",
             group_id=int(args["group_id"]),
             user_id=int(args["user_id"]),
-            enable=args.get("enable", True),
+            enable=bool(args["enable"]),
         )
-        return tool_result({"admin_set": args.get("enable", True)})
+        return tool_result({"admin_set": bool(args["enable"])})
     except Exception as e:
         logger.warning("tool call failed: %s", e)
         return tool_error(str(e))
@@ -562,7 +626,7 @@ async def _set_group_card(args: dict, **_) -> str:
             "set_group_card",
             group_id=int(args["group_id"]),
             user_id=int(args["user_id"]),
-            card=args.get("card", ""),
+            card=str(args["card"]),
         )
         return tool_result({"card_set": True})
     except Exception as e:
@@ -599,11 +663,14 @@ async def _handle_group_request(args: dict, **_) -> str:
     if err:
         return tool_error(err)
     try:
+        sub_type = str(args["sub_type"])
+        if sub_type not in {"add", "invite"}:
+            return tool_error("sub_type must be 'add' or 'invite'")
         await _api_call(
             "set_group_add_request",
             flag=args["flag"],
-            sub_type=args.get("sub_type", "add"),
-            approve=args.get("approve", True),
+            sub_type=sub_type,
+            approve=bool(args["approve"]),
             reason=args.get("reason", ""),
         )
         return tool_result({"handled": True})
@@ -620,7 +687,7 @@ async def _handle_friend_request(args: dict, **_) -> str:
         await _api_call(
             "set_friend_add_request",
             flag=args["flag"],
-            approve=args.get("approve", True),
+            approve=bool(args["approve"]),
             remark=args.get("remark", ""),
         )
         return tool_result({"handled": True})
@@ -650,7 +717,7 @@ async def _set_group_special_title(args: dict, **_) -> str:
             "set_group_special_title",
             group_id=int(args["group_id"]),
             user_id=int(args["user_id"]),
-            special_title=args.get("special_title", ""),
+            special_title=str(args["special_title"]),
         )
         return tool_result({"title_set": True})
     except Exception as e:
@@ -694,6 +761,25 @@ async def _set_avatar(args: dict, **_) -> str:
     try:
         await _api_call("set_qq_avatar", file=args["file"])
         return tool_result({"avatar_set": True})
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _upload_file(args: dict, **_) -> str:
+    try:
+        message_type, target = _resolve_message_target(args)
+        file_ref = str(args["file"])
+        name = str(args.get("name") or file_ref.rsplit("/", 1)[-1])
+        if message_type == "group":
+            await _api_call(
+                "upload_group_file", **target, file=file_ref, name=name,
+            )
+        else:
+            await _api_call(
+                "upload_private_file", **target, file=file_ref, name=name,
+            )
+        return tool_result({"uploaded": True, "name": name})
     except Exception as e:
         logger.warning("tool call failed: %s", e)
         return tool_error(str(e))
@@ -774,8 +860,9 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["message_id"],
     )),
     ("onebot_mark_msg_as_read", _mark_msg_as_read, _schema(
-        "onebot_mark_msg_as_read", "标记消息为已读。留空则标记全部已读。",
-        {"real_seq": _int("消息序号(留空标记全部已读)")},
+        "onebot_mark_msg_as_read",
+        "标记消息为已读。标记单条时传 real_seq；标记当前会话全部已读时必须显式传 all=true，两者不能同时传。",
+        {"real_seq": _int("消息序号"), "all": _bool("显式确认标记当前会话全部已读")},
         [],
     )),
     ("onebot_get_file", _get_file, _schema(
@@ -837,6 +924,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "主动发送 QQ 消息到指定群或私聊。"
         "回复当前对话通常直接输出文本即可——系统会自动把你的输出送达,无需调用本工具。"
         "当你需要主动发送消息时使用本工具:在当前会话中分多条发送、推送到其他群或用户、跨会话通知等。"
+        "目标 ID 省略时只会继承同类型的当前会话；目标类型冲突时会拒绝调用。"
         "直接输出文本无法 @ 人,要 @ 某人必须用本工具的 at 段。"
         "message 为 OneBot 11 消息段数组,例如 "
         '纯文本 [{"type":"text","data":{"text":"hello"}}],'
@@ -857,6 +945,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
     ("onebot_send_forward_msg", _send_forward_msg, _schema(
         "onebot_send_forward_msg",
         "发送合并转发消息(统一接口,支持群聊和私聊)。"
+        "目标 ID 省略时只会继承同类型的当前会话；目标类型冲突时会拒绝调用。"
         "messages 为 node 消息段数组,每个 node 包含 name/uin/content 或引用已有消息的 id。"
         "返回 message_id 和 res_id。",
         {
@@ -870,7 +959,8 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
     ("onebot_forward_single_msg", _forward_single_msg, _schema(
         "onebot_forward_single_msg",
         "单条消息转发到群聊或私聊(无需构造 node 数组,比合并转发更轻量)。"
-        "显式传入 group_id/user_id 时优先使用指定目标,否则转发到当前会话;两者皆无则报错。",
+        "显式传入 group_id 或 user_id 时优先使用指定目标,否则转发到当前会话;"
+        "两者同时传入或在无上下文时均未传入会报错。",
         {
             "real_seq": _int("要转发的消息序号(群聊为前缀#后的群内序号,私聊为全局消息ID)"),
             "group_id": _int("目标群号(转发到群聊时填写)"),
@@ -879,8 +969,9 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["real_seq"],
     )),
     ("onebot_poke", _poke, _schema(
-        "onebot_poke", "发送戳一戳（拍一拍）。",
-        {"user_id": _int("目标QQ号"), "group_id": _str("群号（群内戳一拍时填写）")},
+        "onebot_poke",
+        "发送戳一戳（拍一拍）。群聊中省略 group_id 时自动使用当前群；仅跨群操作时需要显式填写。",
+        {"user_id": _int("目标QQ号"), "group_id": _str("目标群号（可选；默认使用当前群聊）")},
         ["user_id"],
     )),
     ("onebot_set_msg_emoji_like", _set_msg_emoji_like, _schema(
@@ -899,28 +990,28 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "user_id"],
     )),
     ("onebot_mute_group_member", _mute_group_member, _schema(
-        "onebot_mute_group_member", "禁言群成员（需管理员权限）。duration=0解除禁言。",
+        "onebot_mute_group_member", "禁言或解除禁言群成员（需管理员权限）。duration 必填，0 表示解除禁言。",
         {
             "group_id": _int("群号"),
             "user_id": _int("目标QQ号"),
-            "duration": _int("禁言时长（秒，默认600）"),
+            "duration": _int("必填；禁言时长（秒），0 表示解除禁言"),
         },
-        ["group_id", "user_id"],
+        ["group_id", "user_id", "duration"],
     )),
     ("onebot_mute_group_whole", _mute_group_whole, _schema(
         "onebot_mute_group_whole", "全员禁言（需管理员权限）。",
-        {"group_id": _int("群号"), "enable": _bool("True开启False关闭")},
-        ["group_id"],
+        {"group_id": _int("群号"), "enable": _bool("必填；True开启，False关闭")},
+        ["group_id", "enable"],
     )),
     ("onebot_set_group_admin", _set_group_admin, _schema(
         "onebot_set_group_admin", "设置/取消群管理员（需群主权限）。",
-        {"group_id": _int("群号"), "user_id": _int("目标QQ号"), "enable": _bool("True设置False取消")},
-        ["group_id", "user_id"],
+        {"group_id": _int("群号"), "user_id": _int("目标QQ号"), "enable": _bool("必填；True设置，False取消")},
+        ["group_id", "user_id", "enable"],
     )),
     ("onebot_set_group_card", _set_group_card, _schema(
-        "onebot_set_group_card", "设置群名片（需管理员权限）。",
+        "onebot_set_group_card", "设置群名片（需管理员权限）。card 必填；显式传空字符串可清空名片。",
         {"group_id": _int("群号"), "user_id": _int("目标QQ号"), "card": _str("群名片内容")},
-        ["group_id", "user_id"],
+        ["group_id", "user_id", "card"],
     )),
     ("onebot_set_group_name", _set_group_name, _schema(
         "onebot_set_group_name", "修改群名（需管理员权限）。",
@@ -940,12 +1031,12 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
             "approve": _bool("是否同意"),
             "reason": _str("拒绝理由"),
         },
-        ["flag"],
+        ["flag", "sub_type", "approve"],
     )),
     ("onebot_handle_friend_request", _handle_friend_request, _schema(
         "onebot_handle_friend_request", "处理好友请求（需管理员权限）。",
         {"flag": _str("请求flag"), "approve": _bool("是否同意"), "remark": _str("备注名")},
-        ["flag"],
+        ["flag", "approve"],
     )),
     ("onebot_delete_friend", _delete_friend, _schema(
         "onebot_delete_friend", "删除好友（需管理员权限）。",
@@ -955,7 +1046,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
     ("onebot_set_group_special_title", _set_group_special_title, _schema(
         "onebot_set_group_special_title", "设置群成员专属头衔（需管理员权限）。空字符串删除头衔。",
         {"group_id": _int("群号"), "user_id": _int("QQ号"), "special_title": _str("专属头衔内容")},
-        ["group_id", "user_id"],
+        ["group_id", "user_id", "special_title"],
     )),
     ("onebot_set_online_status", _set_online_status, _schema(
         "onebot_set_online_status", "设置机器人在线状态（需管理员权限）。status/ext_status 参考 NapCat 状态列表。",
@@ -975,6 +1066,18 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_set_avatar", "设置机器人头像（需管理员权限）。",
         {"file": _str("图片路径或URL")},
         ["file"],
+    )),
+    ("onebot_upload_file", _upload_file, _schema(
+        "onebot_upload_file",
+        "上传群文件或私聊文件。目标 ID 省略时只会继承同类型的当前会话；目标类型冲突时会拒绝调用。",
+        {
+            "message_type": _str("'group' 或 'private'"),
+            "group_id": _int("群号(message_type=group时必填)"),
+            "user_id": _int("QQ号(message_type=private时必填)"),
+            "file": _str("允许目录内的绝对路径或 http(s) URL"),
+            "name": _str("显示文件名(可选)"),
+        },
+        ["message_type", "file"],
     )),
 ]
 

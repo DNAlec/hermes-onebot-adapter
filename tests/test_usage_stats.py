@@ -135,7 +135,7 @@ async def test_usage_api_query_validation_and_clear(tmp_path):
     try:
         now = time.time()
         resp = await client.get(
-            f"/api/usage/stats?start={now - 60}&end={now + 60}&scope=group&bucket=hour"
+            f"/api/v1/usage/stats?start={now - 60}&end={now + 60}&scope=group&bucket=hour"
             "&tz_offset_minutes=480",
             headers=auth,
         )
@@ -145,16 +145,16 @@ async def test_usage_api_query_validation_and_clear(tmp_path):
         assert body["summary"]["total"] == 1
 
         dimensions = await client.get(
-            f"/api/usage/dimensions?start={now - 60}&end={now + 60}", headers=auth,
+            f"/api/v1/usage/dimensions?start={now - 60}&end={now + 60}", headers=auth,
         )
         assert dimensions.status == 200
         assert (await dimensions.json())["groups"][0]["id"] == "42"
 
-        invalid = await client.get("/api/usage/stats?scope=bad", headers=auth)
+        invalid = await client.get("/api/v1/usage/stats?scope=bad", headers=auth)
         assert invalid.status == 400
-        unauthenticated = await client.delete("/api/usage")
+        unauthenticated = await client.delete("/api/v1/usage")
         assert unauthenticated.status == 401
-        cleared = await client.delete("/api/usage", headers=auth)
+        cleared = await client.delete("/api/v1/usage", headers=auth)
         assert cleared.status == 200
         assert (await cleared.json())["deleted"] == 1
     finally:

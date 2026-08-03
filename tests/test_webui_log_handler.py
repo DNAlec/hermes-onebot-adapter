@@ -168,7 +168,7 @@ async def client(tmp_path, monkeypatch):
 
 
 async def test_status_includes_all_ports(client):
-    resp = await client.get("/api/status", headers=_auth())
+    resp = await client.get("/api/v1/status", headers=_auth())
     assert resp.status == 200
     data = await resp.json()
     assert data["onebot_ws_port"] == 18800
@@ -180,7 +180,7 @@ async def test_status_includes_all_ports(client):
 
 
 async def test_logs_endpoint_returns_list(client):
-    resp = await client.get("/api/logs", headers=_auth())
+    resp = await client.get("/api/v1/logs", headers=_auth())
     assert resp.status == 200
     data = await resp.json()
     assert "logs" in data
