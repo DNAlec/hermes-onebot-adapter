@@ -274,11 +274,11 @@ def _verify_session_token(token: str, secret: str, epoch: int, lifetime_hours: i
 def _make_auth_middleware(store: ConfigStore):
     """aiohttp middleware: require a valid signed session token for all /api/* requests.
 
-    ``/api/v1/health`` and ``/api/v1/auth/login`` are exempt
-    endpoint). Static-file routes (``/``, ``/{tail:.*}``) are outside ``/api/``
+    ``/api/v1/health``, ``/api/v1/auth/login``, and ``/api/v1/openapi.json``
+    are public. Static-file routes (``/``, ``/{tail:.*}``) are outside ``/api/``
     and thus unaffected — the SPA shell and login page always load without auth.
 
-    The token must be an HMAC-signed session token issued by ``/api/login``;
+    The token must be an HMAC-signed session token issued by ``/api/v1/auth/login``;
     the raw ``webui_token`` is never accepted by other endpoints.
     """
     @aiohttp.web.middleware
@@ -366,7 +366,7 @@ def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
 
     ``webui_token_epoch`` is internal state used for session invalidation
     and must not be exposed or client-settable; it is stripped here and in
-    ``_put_config`` so a PUT body cannot override the internally-bumped value.
+    ``_put_config`` so a PATCH body cannot override the internally-bumped value.
     """
     d = cfg.to_dict()
     d.pop("webui_token", None)
@@ -482,7 +482,7 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
         try:
             # Bump the token epoch when the lifetime changes so that every
             # already-issued HMAC session token becomes invalid immediately.
-            # Strip client-supplied epoch first so a PUT body can't override
+            # Strip client-supplied epoch first so a PATCH body can't override
             # the internal counter (see _public_config for rationale).
             data.pop("webui_token_epoch", None)
             data.pop("automation_api_key_hash", None)
@@ -1137,12 +1137,13 @@ code{background:#f4f4f4;padding:.1rem .3rem;border-radius:4px}
 .muted{color:#888;font-size:.85rem}
 </style></head><body>
 <h1>Hermes OneBot Adapter</h1>
-<p class="muted">P0 skeleton &mdash; SPA 尚未构建，API 已就绪。</p>
+<p class="muted">SPA 尚未构建，API 已就绪。</p>
 <div class="card"><strong>API</strong><ul>
-<li><code>GET /api/status</code></li>
-<li><code>GET /api/config</code> &middot; <code>PUT /api/config</code></li>
-<li><code>POST /api/install_plugin</code></li>
-<li><code>GET /api/logs</code></li>
+<li><code>GET /api/v1/health</code></li>
+<li><code>POST /api/v1/auth/login</code></li>
+<li><code>GET /api/v1/status</code></li>
+<li><code>GET /api/v1/config</code> &middot; <code>PATCH /api/v1/config</code></li>
+<li><code>GET /api/v1/openapi.json</code></li>
 </ul></div>
 <div class="card"><strong>WebSocket</strong><ul>
 <li>OneBot 反向WS: <code>ws://&lt;host&gt;:18800/onebot</code></li>

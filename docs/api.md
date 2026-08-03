@@ -96,10 +96,11 @@ CLI 还提供：
 - `--revoke-api-key`：清除摘要并关闭自动化 API
 - `--enable-api` / `--disable-api`：启停已有 key 对应的工具 API
 
-WebUI session 可调用以下 key 管理接口：
+WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 
-- `POST /api/v1/automation/key`：生成或轮换 key，响应 `{"api_key":"hoa_...","shown_once":true}`
-- `DELETE /api/v1/automation/key`：撤销 key并关闭自动化 API，响应 `{"revoked":true}`
+**`POST /api/v1/automation/key`**：生成或轮换 key，响应 `{"api_key":"hoa_...","shown_once":true}`。已有 key 会立即失效。
+
+**`DELETE /api/v1/automation/key`**：撤销 key 并关闭自动化 API，响应 `{"revoked":true}`。
 
 服务端仅保存 key 的 SHA-256 摘要；`GET /api/v1/config` 只返回派生字段 `automation_api_key_configured`，不会返回原始 key 或摘要。
 
@@ -129,8 +130,8 @@ WebUI session 可调用以下 key 管理接口：
 响应 `200`：
 ```json
 {
-  "adapter_version": "1.2.0",
-  "plugin_version": "1.2.0",
+  "adapter_version": "x.y.z",
+  "plugin_version": "x.y.z",
   "version_mismatch": false,
   "latest_plugin_status": null,
   "onebot_connected": true,
@@ -140,7 +141,7 @@ WebUI session 可调用以下 key 管理接口：
   "onebot_ws_port": 18800,
   "hermes_ws_port": 18810,
   "webui_port": 18820,
-  "hermes_group_sessions_per_user": true,
+  "hermes_group_sessions_per_user": true
 }
 ```
 
@@ -187,9 +188,11 @@ WebUI session 可调用以下 key 管理接口：
   "hermes_ws_token": "...",
   "hermes_install_dir": "",
   "webui_port": 18820,
-  "webui_token": "...",
   "webui_token_lifetime_hours": 168,
   "webui_trust_proxy_headers": false,
+  "automation_api_enabled": false,
+  "automation_api_key_configured": true,
+  "automation_upload_allowed_roots": ["/tmp/hermes-onebot-adapter-uploads"],
   "log_level": "INFO",
   "log_message_preview": 100,
   "log_file_enabled": true,
@@ -233,7 +236,7 @@ WebUI session 可调用以下 key 管理接口：
 }
 ```
 
-> 注：`webui_token` 在 `GET /api/v1/config` 响应中会被剔除（登录口令不可通过 API 读取），仅可用 `POST /api/v1/auth/login` 验证；此处列出仅为说明字段存在。`webui_token_epoch` 为内部状态，不在 API 中暴露也不接受客户端设置。
+> 注：`webui_token`、`webui_token_epoch` 和 `automation_api_key_hash` 不会出现在响应中；`automation_api_key_configured` 是只读派生字段。原始 WebUI token 仅可通过 `POST /api/v1/auth/login` 验证，自动化 API key 也不会被再次返回。
 
 完整字段说明见 [Config 字段表](#config-字段)。
 
@@ -284,7 +287,7 @@ WebUI session 可调用以下 key 管理接口：
 响应 `200`：
 ```json
 {
-  "adapter_version": "1.1.0b",
+  "adapter_version": "x.y.z",
   "hermes_dir": "/home/user/.hermes/hermes-agent",
   "plugin_dest": "/home/user/.hermes/plugins/onebot/",
   "source": "/path/to/onebot_adapter/hermes_plugin",
@@ -310,7 +313,7 @@ WebUI session 可调用以下 key 管理接口：
 响应 `200`（安装路径不安全时）：
 ```json
 {
-  "adapter_version": "1.1.0b",
+  "adapter_version": "x.y.z",
   "hermes_dir": "/etc",
   "error": "install_dir resolved to /etc, which is outside $HOME"
 }
@@ -325,7 +328,7 @@ WebUI session 可调用以下 key 管理接口：
 响应 `200`：
 ```json
 {
-  "adapter_version": "1.1.0b",
+  "adapter_version": "x.y.z",
   "hermes_dir": "/home/user/.hermes/hermes-agent",
   "plugin_dest": "/home/user/.hermes/plugins/onebot/",
   "removed": true,
@@ -348,7 +351,7 @@ WebUI session 可调用以下 key 管理接口：
 
 - `GET /api/v1/tools`：返回全部工具及参数 JSON Schema。
 - `POST /api/v1/tools/{tool_name}`：调用指定工具。
-- `GET /api/v1/openapi.json`：OpenAPI 3.1 契约。
+**`GET /api/v1/openapi.json`**：返回无需鉴权即可读取的 OpenAPI 3.1 契约。
 
 工具接口只接受自动化 key：
 
@@ -372,6 +375,8 @@ Authorization: Bearer hoa_xxx
 - `500 tool_call_failed`：工具处理器或 OneBot action 调用失败；详细异常仅记录在服务端日志
 
 `onebot_upload_file`、`onebot_set_avatar` 以及消息段/转发节点中的 `file` 引用都会经过相同安全检查。本地路径必须是允许根目录内的绝对普通文件；会解析 `..` 和符号链接后再判断。远程引用只接受 `http`/`https`。
+
+HTTP 工具调用没有 Hermes 当前聊天上下文，因此 `onebot_send_message`、`onebot_send_forward_msg` 和 `onebot_upload_file` 必须显式提供目标：`message_type=group` 时只传 `group_id`，`message_type=private` 时只传 `user_id`。目标缺失、类型冲突或同时传入两个 ID 均返回 `400 validation_error`。`onebot_mark_msg_as_read` 同样要求在正整数 `real_seq` 与 `all=true` 中二选一。
 
 部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文以查询 SeqMap；HTTP 调用没有当前聊天上下文，无法命中带 scope 的映射时会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
 
@@ -472,9 +477,11 @@ Content-Type: application/json
   "group_id": "123456789",
   "name": "测试群",
   "enabled": true,
-  ...
+  "require_mention": false
 }
 ```
+
+实际响应包含完整 GroupConfig 字段，详见下方[字段表](#groupconfig-字段)。
 
 ---
 
