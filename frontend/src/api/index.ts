@@ -146,6 +146,7 @@ export interface Config {
   reaction_emoji_enabled: boolean;
   reaction_emoji_id: string;
   reaction_emoji_id_queued: string;
+  file_upload_timeout: number;
   // ── 发送去重 ──
   send_dedup_enabled: boolean;
   send_dedup_ttl_seconds: number;

@@ -51,9 +51,16 @@ async def test_status_endpoint_with_token(client):
 async def test_config_get_put(client):
     got = await (await client.get("/api/v1/config", headers=_auth())).json()
     assert got["self_id"] == "123"
-    resp = await client.patch("/api/v1/config", json={"self_id": "999", "seq_map_size": 100}, headers=_auth())
+    assert got["file_upload_timeout"] == 600.0
+    resp = await client.patch(
+        "/api/v1/config",
+        json={"self_id": "999", "seq_map_size": 100, "file_upload_timeout": 480},
+        headers=_auth(),
+    )
     assert resp.status == 200
-    assert (await resp.json())["seq_map_size"] == 100
+    updated = await resp.json()
+    assert updated["seq_map_size"] == 100
+    assert updated["file_upload_timeout"] == 480
 
 
 async def test_config_put_audit_records_direct_client_not_untrusted_xff(client):

@@ -355,13 +355,26 @@ def test_api_connected_reflects_transport_state():
 async def test_api_upload_actions_use_action_specific_timeouts():
     transport = MagicMock()
     transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
-    api = OneBotApi(ws_transport=transport)
+    api = OneBotApi(ws_transport=transport, file_upload_timeout=480.0)
 
     await api.call("upload_group_file", {"group_id": 1, "file": "/tmp/a", "name": "a"})
-    assert transport.request.await_args.kwargs["timeout"] == 60.0
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
 
     await api.upload_private_file(2, "/tmp/b", "b")
-    assert transport.request.await_args.kwargs["timeout"] == 600.0
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
+
+
+async def test_api_file_upload_timeout_hot_reload():
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
+    api = OneBotApi(ws_transport=transport, file_upload_timeout=300.0)
+
+    api.update_file_upload_timeout(480.0)
+    await api.call("upload_group_file", {})
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
+
+    await api.call("upload_private_file", {})
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
 
 
 async def test_api_explicit_timeout_overrides_upload_timeout():

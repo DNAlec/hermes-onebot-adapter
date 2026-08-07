@@ -187,13 +187,15 @@ class HermesRelayServer:
                 )
             self._busy_groups.clear()
             self._queues.clear()
-        # 媒体投递模式变化:广播 fresh ready 让插件实时切换缓存策略。
+        # 插件运行时配置变化:广播 fresh ready 让插件实时切换。
         # broadcast_self_id 复用 ready 帧机制,这里用新 config 广播。
         self._config = config
-        if old.media_delivery_mode != config.media_delivery_mode:
+        if (
+            old.media_delivery_mode != config.media_delivery_mode
+            or old.file_upload_timeout != config.file_upload_timeout
+        ):
             logger.info(
-                "relay: media_delivery_mode changed %s -> %s, broadcasting fresh ready",
-                old.media_delivery_mode, config.media_delivery_mode,
+                "relay: plugin runtime config changed, broadcasting fresh ready",
             )
             task = asyncio.create_task(self.broadcast_self_id(config.self_id))
             self._text_tasks.add(task)
@@ -391,6 +393,7 @@ class HermesRelayServer:
             adapter_version=self._adapter_version,
             self_id=self_id,
             media_delivery_mode=self._config.media_delivery_mode,
+            file_upload_timeout=self._config.file_upload_timeout,
         )
         for ws in list(self._clients):
             try:
@@ -425,6 +428,7 @@ class HermesRelayServer:
                 adapter_version=self._adapter_version,
                 self_id=self._config.self_id,
                 media_delivery_mode=self._config.media_delivery_mode,
+                file_upload_timeout=self._config.file_upload_timeout,
             )
         )
         # Replay buffered events so a reconnecting plugin doesn't miss messages.
