@@ -1227,6 +1227,9 @@ class HermesRelayServer:
                 self._text_tasks.add(task)
                 task.add_done_callback(self._text_tasks.discard)
                 task.add_done_callback(_log_task_exception)
+        except ob.UploadOutcomeUnknownError as exc:
+            logger.warning("send outcome unknown and must not be retried automatically: %s", exc)
+            await ws.send_json(result_message(req_id, False, error=str(exc), retryable=False))
         except Exception as exc:
             logger.exception("send failed")
             await ws.send_json(result_message(req_id, False, error=str(exc)))
@@ -1276,6 +1279,9 @@ class HermesRelayServer:
                 action, safe_json(result.get("data")),
             )
             await ws.send_json(result_message(req_id, True, data=result.get("data")))
+        except ob.UploadOutcomeUnknownError as exc:
+            logger.warning("api_call %s outcome unknown: %s", action, exc)
+            await ws.send_json(result_message(req_id, False, error=str(exc), retryable=False))
         except Exception as exc:
             logger.warning("api_call %s failed: %s", action, exc)
             await ws.send_json(result_message(req_id, False, error=str(exc)))
