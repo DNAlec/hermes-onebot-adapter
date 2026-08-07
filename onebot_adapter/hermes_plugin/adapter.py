@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # their own admin/group/user context without racing on instance attributes.
 # Tools read via _current_*() helpers in onebot_tools.py which check the
 # contextvar first, then fall back to the instance attribute for compat.
-_msg_context: contextvars.ContextVar[tuple[bool, str, str] | None] = contextvars.ContextVar(
+_msg_context: contextvars.ContextVar[tuple[bool, str, str, bool] | None] = contextvars.ContextVar(
     "_msg_context", default=None,
 )
 
@@ -633,6 +633,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # instance attributes.  We still set the instance attributes for
         # backward compat with code that reads them directly.
         is_admin = data.get("is_admin", False)
+        is_global_admin = data.get("is_global_admin", False)
         chat_id = data.get("chat_id", "")
         user_id = str(data.get("user_id", ""))
         group_id = ""
@@ -641,7 +642,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # Snapshot the per-message context as a local tuple so _dispatch_event
         # receives it as a parameter rather than reading instance attributes
         # that could be overwritten by a concurrent _handle_event call.
-        msg_ctx = (is_admin, group_id, user_id)
+        msg_ctx = (is_admin, group_id, user_id, is_global_admin)
         timestamp = (
             datetime.fromtimestamp(float(data["timestamp"]), tz=UTC)
             if data.get("timestamp")
@@ -716,7 +717,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     async def _dispatch_event(
         self,
         message_event: Any,
-        msg_ctx: tuple[bool, str, str],
+        msg_ctx: tuple[bool, str, str, bool],
         delivery_ids: list[str] | None = None,
     ) -> None:
         """Run ``handle_message`` off the receive loop.

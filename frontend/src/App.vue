@@ -102,6 +102,7 @@ watch(
         <RouterLink to="/chat">聊天配置</RouterLink>
         <RouterLink to="/commands">指令过滤</RouterLink>
         <RouterLink to="/tools">工具管理</RouterLink>
+        <RouterLink to="/onebot-tools">OneBot 工具</RouterLink>
         <RouterLink to="/advanced">高级设置</RouterLink>
         <RouterLink to="/logs">日志</RouterLink>
       </nav>

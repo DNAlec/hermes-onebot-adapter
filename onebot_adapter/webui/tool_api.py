@@ -53,6 +53,11 @@ def _annotation(prop: dict[str, Any]) -> Any:
     if kind == "boolean":
         return bool
     if kind == "array":
+        item_kind = prop.get("items", {}).get("type")
+        if item_kind == "string":
+            return list[str]
+        if item_kind == "integer":
+            return list[int]
         return list[dict[str, Any]]
     if kind == "object":
         return dict[str, Any]
@@ -120,7 +125,7 @@ def _validate_file_ref(value: str, roots: list[str]) -> None:
 def _validate_file_refs(value: Any, roots: list[str]) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if key == "file" and isinstance(child, str):
+            if key in {"file", "image"} and isinstance(child, str):
                 _validate_file_ref(child, roots)
             else:
                 _validate_file_refs(child, roots)
@@ -152,7 +157,7 @@ async def _call_tool(
 
     handler, _schema = TOOL_MAP[name]
     caller_token = _api_caller.set(caller)
-    context_token = _msg_context.set((True, str(args.get("group_id") or ""), str(args.get("user_id") or "")))
+    context_token = _msg_context.set((True, str(args.get("group_id") or ""), str(args.get("user_id") or ""), True))
     try:
         raw = await handler(args)
     finally:

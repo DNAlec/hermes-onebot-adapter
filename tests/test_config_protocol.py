@@ -117,7 +117,9 @@ def test_protocol_envelopes():
         message_id="1", chat_id="group:42", chat_type="group",
         user_id="u1", user_name="A", text="hi",
     )
-    assert event_message(ev)["type"] == "event"
+    event_frame = event_message(ev)
+    assert event_frame["type"] == "event"
+    assert event_frame["is_global_admin"] is False
     assert ready_message(True, "0.1.0")["onebot_connected"] is True
     assert send_message("send_text", "r1", "group:42", content="x")["action"] == "send_text"
     assert result_message("r1", True, message_id="9")["success"] is True

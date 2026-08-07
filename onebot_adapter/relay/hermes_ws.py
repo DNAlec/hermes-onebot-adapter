@@ -1302,8 +1302,21 @@ class HermesRelayServer:
         """
         if self._seq_map is None:
             return params
-        seq_actions = {"get_msg", "delete_msg", "set_msg_emoji_like", "mark_msg_as_read",
-                   "forward_group_single_msg", "forward_friend_single_msg"}
+        seq_actions = {
+            "cancel_group_todo",
+            "complete_group_todo",
+            "delete_essence_msg",
+            "delete_msg",
+            "fetch_emoji_like",
+            "forward_friend_single_msg",
+            "forward_group_single_msg",
+            "get_emoji_likes",
+            "get_msg",
+            "mark_msg_as_read",
+            "set_essence_msg",
+            "set_group_todo",
+            "set_msg_emoji_like",
+        }
         if action not in seq_actions:
             return params
         real_seq = params.pop("real_seq", None)

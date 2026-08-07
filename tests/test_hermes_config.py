@@ -257,6 +257,79 @@ def test_reset_nonexistent_dir_does_nothing(nonexistent_dir: Path):
     hc.reset_platform_toolsets(str(nonexistent_dir))
 
 
+# ── OneBot per-tool policies ─────────────────────────────────────────────
+
+
+def test_tool_policies_roundtrip_preserves_sibling_config(hermes_dir: Path):
+    data = hc.read_config(str(hermes_dir))
+    data["plugins"] = {
+        "enabled": True,
+        "entries": {
+            "onebot": {"path": "/plugin.py", "other": "keep"},
+            "weather": {"enabled": False},
+        },
+    }
+    yaml = YAML(typ="rt")
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    (hermes_dir / "config.yaml").write_text(buf.getvalue(), encoding="utf-8")
+
+    policies = {
+        "onebot_get_login_info": {"registered": False},
+        "onebot_kick_group_member": {"permission": "everyone"},
+    }
+    hc.write_onebot_tool_policies(str(hermes_dir), policies)
+
+    assert hc.read_onebot_tool_policies(str(hermes_dir)) == policies
+    updated = hc.read_config(str(hermes_dir))
+    assert updated["provider"] == "openai"
+    assert updated["plugins"]["enabled"] is True
+    assert updated["plugins"]["entries"]["weather"]["enabled"] is False
+    assert updated["plugins"]["entries"]["onebot"]["path"] == "/plugin.py"
+    assert updated["plugins"]["entries"]["onebot"]["other"] == "keep"
+
+
+def test_tool_policies_write_creates_full_path(empty_hermes_dir: Path):
+    hc.write_onebot_tool_policies(
+        str(empty_hermes_dir), {"onebot_get_login_info": {"registered": False}}
+    )
+    data = hc.read_config(str(empty_hermes_dir))
+    assert data["plugins"]["entries"]["onebot"]["tool_policies"] == {
+        "onebot_get_login_info": {"registered": False}
+    }
+
+
+def test_read_tool_policies_ignores_malformed_optional_subtree(hermes_dir: Path):
+    (hermes_dir / "config.yaml").write_text(
+        "plugins:\n  entries:\n    onebot:\n      tool_policies: invalid\n", encoding="utf-8"
+    )
+    assert hc.read_onebot_tool_policies(str(hermes_dir)) == {}
+
+
+def test_reset_tool_policies_removes_only_policy_subtree(hermes_dir: Path):
+    hc.write_onebot_tool_policies(
+        str(hermes_dir), {"onebot_get_login_info": {"registered": False}}
+    )
+    data = hc.read_config(str(hermes_dir))
+    data["plugins"]["entries"]["onebot"]["path"] = "/plugin.py"
+    data["plugins"]["entries"]["other"] = {"enabled": True}
+    yaml = YAML(typ="rt")
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    (hermes_dir / "config.yaml").write_text(buf.getvalue(), encoding="utf-8")
+
+    hc.reset_onebot_tool_policies(str(hermes_dir))
+
+    updated = hc.read_config(str(hermes_dir))
+    assert "tool_policies" not in updated["plugins"]["entries"]["onebot"]
+    assert updated["plugins"]["entries"]["onebot"]["path"] == "/plugin.py"
+    assert updated["plugins"]["entries"]["other"]["enabled"] is True
+
+
+def test_reset_tool_policies_is_idempotent(empty_hermes_dir: Path):
+    hc.reset_onebot_tool_policies(str(empty_hermes_dir))
+
+
 # ── read_current_enabled ─────────────────────────────────────────────────
 
 

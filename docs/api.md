@@ -377,11 +377,11 @@ Authorization: Bearer hoa_xxx
 - `503 onebot_unavailable`：OneBot WS 尚未连接
 - `500 tool_call_failed`：工具处理器或 OneBot action 调用失败；详细异常仅记录在服务端日志
 
-`onebot_upload_file`、`onebot_set_avatar` 以及消息段/转发节点中的 `file` 引用都会经过相同安全检查。本地路径必须是允许根目录内的绝对普通文件；会解析 `..` 和符号链接后再判断。远程引用只接受 `http`/`https`。
+`onebot_upload_file`、`onebot_set_avatar`、群头像/相册上传、群公告图片以及消息段/转发节点中的文件引用都会经过相同安全检查。本地路径必须是允许根目录内的绝对普通文件；会解析 `..` 和符号链接后再判断。远程引用只接受 `http`/`https`。
 
 HTTP 工具调用没有 Hermes 当前聊天上下文，因此 `onebot_send_message`、`onebot_send_forward_msg` 和 `onebot_upload_file` 必须显式提供目标：`message_type=group` 时只传 `group_id`，`message_type=private` 时只传 `user_id`。目标缺失、类型冲突或同时传入两个 ID 均返回 `400 validation_error`。`onebot_mark_msg_as_read` 同样要求在正整数 `real_seq` 与 `all=true` 中二选一。
 
-部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文，以便适配器按群号或用户 ID 查询 SeqMap；HTTP 调用不继承该上下文，且这些工具的 HTTP schema 不接受额外的上下文字段，因此会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
+部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文，以便适配器按群号或用户 ID 查询 SeqMap；HTTP 调用不继承该上下文，schema 提供 `group_id`/`user_id` 时应显式传入以查询映射，否则会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
 
 例如发送群消息：
 
@@ -637,6 +637,53 @@ Content-Type: application/json
 ```json
 {"ok": true}
 ```
+
+#### OneBot 逐工具策略
+
+以下接口使用 WebUI session，只管理 Hermes 插件的工具注册和权限，不影响 automation key 对 `/api/v1/tools/*` 的全量访问。
+
+**`GET /api/v1/onebot_tool_policies`**
+
+返回完整工具目录、默认策略、当前生效策略和稀疏覆盖：
+
+```json
+{
+  "catalog": [
+    {
+      "name": "onebot_set_group_portrait",
+      "schema": {"name": "onebot_set_group_portrait"},
+      "default_registered": true,
+      "default_permission": "admin",
+      "category": "群聊",
+      "scope": "group",
+      "packet": false,
+      "caveat": null
+    }
+  ],
+  "effective_policies": {
+    "onebot_set_group_portrait": {"registered": true, "permission": "admin"}
+  },
+  "sparse_policies": {},
+  "restart_required": true
+}
+```
+
+**`PUT /api/v1/onebot_tool_policies`**
+
+```json
+{
+  "policies": {
+    "onebot_get_group_list": {"registered": true, "permission": "everyone"},
+    "onebot_set_group_portrait": {"registered": false, "permission": "admin"}
+  }
+}
+```
+
+`registered=false` 表示 Hermes 下次启动时不注册该工具；`permission` 只接受 `everyone` 或 `admin`。配置写入 `<hermes>/config.yaml` 的 `plugins.entries.onebot.tool_policies`，仅保存偏离默认值的条目。群管理员只能对当前群调用群级 `admin` 工具；跨群及账号级工具要求全局管理员。
+
+**`POST /api/v1/onebot_tool_policies/reset`**
+
+删除 OneBot 工具策略覆盖并恢复全部默认值。注册可见性变更均需重启 Hermes。
 
 ---
 

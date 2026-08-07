@@ -321,6 +321,23 @@ async def test_parser_group_admin():
     assert result is not None
     event = result
     assert event.is_admin is True
+    assert event.is_global_admin is False
+
+
+async def test_parser_global_admin_is_distinguished_from_group_admin():
+    cfg = AdapterConfig(
+        group_require_mention=False,
+        global_admins=["100"],
+        groups={"42": GroupConfig(group_id="42").to_dict()},
+    )
+    result = await parse_event(
+        _msg_event("hi", message_type="group", group_id=42, user_id=100),
+        self_id="999", group_require_mention=False,
+        config=cfg,
+    )
+    assert result is not None
+    assert result.is_admin is True
+    assert result.is_global_admin is True
 
 
 async def test_parser_group_not_admin():

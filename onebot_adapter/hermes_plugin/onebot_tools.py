@@ -13,6 +13,7 @@ share or overwrite authorization state.
 from __future__ import annotations
 
 import contextvars
+import functools
 import json
 import logging
 from collections.abc import Callable
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 _adapter: Any = None  # OneBotAdapter instance (set by register_tools)
 _api_caller: contextvars.ContextVar[Callable[[str, dict[str, Any]], Any] | None] = contextvars.ContextVar(
     "_onebot_api_caller", default=None,
+)
+_tool_authorized: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_onebot_tool_authorized", default=False,
 )
 
 
@@ -123,6 +127,8 @@ except ImportError:
 
 def _check_admin() -> str | None:
     """Return an error string if the current user is not an admin."""
+    if _tool_authorized.get():
+        return None
     ctx = _msg_context.get()
     is_admin = ctx[0] if ctx is not None else False
     if _adapter is None and _api_caller.get() is None:
@@ -135,16 +141,12 @@ def _check_admin() -> str | None:
 def _current_group_id() -> str:
     """获取当前消息的 group_id(供工具传给适配器侧做 real_seq→message_id 转换)。"""
     ctx = _msg_context.get()
-    if ctx is not None:
-        return ctx[1]
     return ctx[1] if ctx is not None else ""
 
 
 def _current_user_id() -> str:
     """获取当前消息的 user_id(DM 场景下 SeqMap 用 user_id 作 scope_id)。"""
     ctx = _msg_context.get()
-    if ctx is not None:
-        return ctx[2]
     return ctx[2] if ctx is not None else ""
 
 
@@ -785,6 +787,345 @@ async def _upload_file(args: dict, **_) -> str:
         return tool_error(str(e))
 
 
+async def _run_action(action: str, **params: Any) -> str:
+    try:
+        return tool_result(await _api_call(action, **params))
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+def _group_seq_params(args: dict) -> dict[str, Any]:
+    params: dict[str, Any] = {"real_seq": int(args["real_seq"])}
+    group_id = args.get("group_id") or _current_group_id()
+    if group_id:
+        params["group_id"] = int(group_id)
+    return params
+
+
+async def _get_essence_msg_list(args: dict, **_) -> str:
+    return await _run_action("get_essence_msg_list", group_id=int(args["group_id"]))
+
+
+async def _set_essence_msg(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("set_essence_msg", **_group_seq_params(args))
+
+
+async def _delete_essence_msg(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("delete_essence_msg", **_group_seq_params(args))
+
+
+async def _get_group_notice(args: dict, **_) -> str:
+    return await _run_action("_get_group_notice", group_id=int(args["group_id"]))
+
+
+async def _send_group_notice(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action(
+        "_send_group_notice", group_id=int(args["group_id"]), content=args["content"], image=args.get("image"),
+        pinned=int(args.get("pinned", 0)), type=int(args.get("type", 1)),
+        confirm_required=int(args.get("confirm_required", 1)),
+        is_show_edit_card=int(args.get("is_show_edit_card", 0)), tip_window_type=int(args.get("tip_window_type", 0)),
+    )
+
+
+async def _del_group_notice(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("_del_group_notice", group_id=int(args["group_id"]), notice_id=args["notice_id"])
+
+
+async def _set_group_sign(args: dict, **_) -> str:
+    return await _run_action("set_group_sign", group_id=int(args["group_id"]))
+
+
+async def _get_group_signed_list(args: dict, **_) -> str:
+    return await _run_action("get_group_signed_list", group_id=int(args["group_id"]))
+
+
+async def _get_qun_album_list(args: dict, **_) -> str:
+    return await _run_action(
+        "get_qun_album_list", group_id=int(args["group_id"]), attach_info=args.get("attach_info", ""),
+    )
+
+
+async def _get_group_album_media_list(args: dict, **_) -> str:
+    return await _run_action(
+        "get_group_album_media_list", group_id=int(args["group_id"]), album_id=args["album_id"],
+        attach_info=args.get("attach_info", ""),
+    )
+
+
+async def _upload_image_to_qun_album(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action(
+        "upload_image_to_qun_album", group_id=int(args["group_id"]), album_id=args["album_id"],
+        album_name=args["album_name"], file=args["file"],
+    )
+
+
+async def _set_group_album_media_like(args: dict, **_) -> str:
+    return await _run_action(
+        "set_group_album_media_like", group_id=int(args["group_id"]), album_id=args["album_id"],
+        batch_id=args["batch_id"], lloc=args.get("lloc"),
+    )
+
+
+async def _cancel_group_album_media_like(args: dict, **_) -> str:
+    return await _run_action(
+        "cancel_group_album_media_like", group_id=int(args["group_id"]), album_id=args["album_id"],
+        batch_id=args["batch_id"], lloc=args.get("lloc"),
+    )
+
+
+async def _do_group_album_comment(args: dict, **_) -> str:
+    return await _run_action(
+        "do_group_album_comment", group_id=int(args["group_id"]), album_id=args["album_id"],
+        lloc=args["lloc"], content=args["content"],
+    )
+
+
+async def _del_group_album_media(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action(
+        "del_group_album_media", group_id=int(args["group_id"]), album_id=args["album_id"], lloc=args["lloc"],
+    )
+
+
+async def _group_todo(args: dict, action: str) -> str:
+    return await _run_action(action, **_group_seq_params(args))
+
+
+async def _set_group_todo(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _group_todo(args, "set_group_todo")
+
+
+async def _complete_group_todo(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _group_todo(args, "complete_group_todo")
+
+
+async def _cancel_group_todo(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _group_todo(args, "cancel_group_todo")
+
+
+async def _set_friend_remark(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("set_friend_remark", user_id=int(args["user_id"]), remark=args["remark"])
+
+
+async def _get_unidirectional_friend_list(args: dict, **_) -> str:
+    return await _run_action("get_unidirectional_friend_list")
+
+
+async def _set_qq_profile(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action(
+        "set_qq_profile", nickname=args["nickname"], personal_note=args.get("personal_note"), sex=args.get("sex"),
+    )
+
+
+async def _nc_get_user_status(args: dict, **_) -> str:
+    return await _run_action("nc_get_user_status", user_id=int(args["user_id"]))
+
+
+async def _get_doubt_friends_add_request(args: dict, **_) -> str:
+    return await _run_action("get_doubt_friends_add_request", count=int(args.get("count", 50)))
+
+
+async def _get_group_ignore_add_request(args: dict, **_) -> str:
+    return await _run_action("get_group_ignore_add_request")
+
+
+async def _fetch_custom_face_detail(args: dict, **_) -> str:
+    return await _run_action("fetch_custom_face_detail", count=int(args.get("count", 48)))
+
+
+async def _add_custom_face(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action(
+        "add_custom_face", file=args["file"], emoji_id=args.get("emoji_id"), package_id=args.get("package_id"),
+        file_name=args.get("file_name"), file_size=args.get("file_size"), md5=args.get("md5"),
+        is_mark_face=args.get("is_mark_face"), is_origin=args.get("is_origin"),
+    )
+
+
+async def _delete_custom_face(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("delete_custom_face", res_id=args.get("res_id"), ids=args.get("ids"))
+
+
+async def _set_custom_face_desc(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action(
+        "set_custom_face_desc", emoji_id=args["emoji_id"], res_id=args["res_id"], md5=args["md5"], desc=args["desc"],
+    )
+
+
+async def _set_group_portrait(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("set_group_portrait", group_id=int(args["group_id"]), file=args["file"])
+
+
+async def _set_group_remark(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("set_group_remark", group_id=int(args["group_id"]), remark=args["remark"])
+
+
+async def _get_group_ignored_notifies(args: dict, **_) -> str:
+    return await _run_action("get_group_ignored_notifies")
+
+
+async def _get_group_shut_list(args: dict, **_) -> str:
+    return await _run_action("get_group_shut_list", group_id=int(args["group_id"]))
+
+
+async def _get_group_info_ex(args: dict, **_) -> str:
+    return await _run_action("get_group_info_ex", group_id=int(args["group_id"]))
+
+
+async def _get_group_detail_info(args: dict, **_) -> str:
+    return await _run_action("get_group_detail_info", group_id=int(args["group_id"]))
+
+
+async def _create_collection(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _run_action("create_collection", rawData=args["rawData"], brief=args["brief"])
+
+
+async def _get_collection_list(args: dict, **_) -> str:
+    return await _run_action("get_collection_list", category=args["category"], count=str(args.get("count", "50")))
+
+
+async def _fetch_emoji_like(args: dict, **_) -> str:
+    params = _group_seq_params(args)
+    params.update({
+        "emojiId": args["emoji_id"], "emojiType": args["emoji_type"],
+        "count": int(args.get("count", 20)), "cookie": args.get("cookie", ""),
+    })
+    return await _run_action("fetch_emoji_like", **params)
+
+
+async def _get_emoji_likes(args: dict, **_) -> str:
+    params = _group_seq_params(args)
+    params.update({
+        "emoji_id": args["emoji_id"], "emoji_type": args.get("emoji_type"),
+        "count": int(args.get("count", 0)),
+    })
+    return await _run_action("get_emoji_likes", **params)
+
+
+async def _group_file_read(args: dict, action: str, **extra: Any) -> str:
+    return await _run_action(action, group_id=int(args["group_id"]), **extra)
+
+
+async def _get_group_file_system_info(args: dict, **_) -> str:
+    return await _group_file_read(args, "get_group_file_system_info")
+
+
+async def _get_group_root_files(args: dict, **_) -> str:
+    return await _group_file_read(args, "get_group_root_files", file_count=int(args.get("file_count", 50)))
+
+
+async def _get_group_files_by_folder(args: dict, **_) -> str:
+    return await _group_file_read(
+        args, "get_group_files_by_folder", folder_id=args["folder_id"], file_count=int(args.get("file_count", 50)),
+    )
+
+
+async def _get_group_file_url(args: dict, **_) -> str:
+    return await _group_file_read(args, "get_group_file_url", file_id=args["file_id"])
+
+
+async def _admin_group_file(args: dict, action: str, **extra: Any) -> str:
+    return await _run_action(action, group_id=int(args["group_id"]), **extra)
+
+
+async def _delete_group_file(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _admin_group_file(args, "delete_group_file", file_id=args["file_id"])
+
+
+async def _create_group_file_folder(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _admin_group_file(args, "create_group_file_folder", folder_name=args["folder_name"])
+
+
+async def _delete_group_folder(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _admin_group_file(args, "delete_group_folder", folder_id=args["folder_id"])
+
+
+async def _move_group_file(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _admin_group_file(
+        args, "move_group_file", file_id=args["file_id"], current_parent_directory=args["current_parent_directory"],
+        target_parent_directory=args["target_parent_directory"],
+    )
+
+
+async def _rename_group_file(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _admin_group_file(
+        args, "rename_group_file", file_id=args["file_id"], current_parent_directory=args["current_parent_directory"],
+        new_name=args["new_name"],
+    )
+
+
+async def _trans_group_file(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    return await _admin_group_file(args, "trans_group_file", file_id=args["file_id"])
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1079,21 +1420,240 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         },
         ["message_type", "file"],
     )),
+    ("onebot_get_essence_msg_list", _get_essence_msg_list, _schema(
+        "onebot_get_essence_msg_list", "获取群精华消息列表。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_set_essence_msg", _set_essence_msg, _schema(
+        "onebot_set_essence_msg", "设置群精华消息（需管理员权限）。",
+        {"real_seq": _int("群内消息序号"), "group_id": _int("群号；默认当前群")}, ["real_seq"],
+    )),
+    ("onebot_delete_essence_msg", _delete_essence_msg, _schema(
+        "onebot_delete_essence_msg", "移除群精华消息（需管理员权限）。",
+        {"real_seq": _int("群内消息序号"), "group_id": _int("群号；默认当前群")}, ["real_seq"],
+    )),
+    ("onebot_get_group_notice", _get_group_notice, _schema(
+        "onebot_get_group_notice", "获取群公告列表。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_send_group_notice", _send_group_notice, _schema(
+        "onebot_send_group_notice", "发布群公告（需管理员权限）。",
+        {
+            "group_id": _int("群号"), "content": _str("公告内容"), "image": _str("图片路径或URL"),
+            "pinned": _int("是否置顶(0/1)"), "type": _int("公告类型，默认1"),
+            "confirm_required": _int("是否需要确认(0/1)"),
+            "is_show_edit_card": _int("是否显示修改群名片引导(0/1)"), "tip_window_type": _int("弹窗类型"),
+        },
+        ["group_id", "content"],
+    )),
+    ("onebot_del_group_notice", _del_group_notice, _schema(
+        "onebot_del_group_notice", "删除群公告（需管理员权限）。",
+        {"group_id": _int("群号"), "notice_id": _str("公告ID")}, ["group_id", "notice_id"],
+    )),
+    ("onebot_set_group_sign", _set_group_sign, _schema(
+        "onebot_set_group_sign", "在指定群签到。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_get_group_signed_list", _get_group_signed_list, _schema(
+        "onebot_get_group_signed_list", "获取指定群今日签到列表。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_get_qun_album_list", _get_qun_album_list, _schema(
+        "onebot_get_qun_album_list", "获取群相册列表。",
+        {"group_id": _int("群号"), "attach_info": _str("分页附加信息")}, ["group_id"],
+    )),
+    ("onebot_get_group_album_media_list", _get_group_album_media_list, _schema(
+        "onebot_get_group_album_media_list", "获取群相册媒体列表。",
+        {"group_id": _int("群号"), "album_id": _str("相册ID"), "attach_info": _str("分页附加信息")},
+        ["group_id", "album_id"],
+    )),
+    ("onebot_upload_image_to_qun_album", _upload_image_to_qun_album, _schema(
+        "onebot_upload_image_to_qun_album", "上传图片到群相册（需管理员权限）。",
+        {
+            "group_id": _int("群号"), "album_id": _str("相册ID"), "album_name": _str("相册名称"),
+            "file": _str("图片路径、URL或Base64"),
+        },
+        ["group_id", "album_id", "album_name", "file"],
+    )),
+    ("onebot_set_group_album_media_like", _set_group_album_media_like, _schema(
+        "onebot_set_group_album_media_like", "点赞群相册媒体。",
+        {
+            "group_id": _int("群号"), "album_id": _str("相册ID"), "batch_id": _str("上传批次ID"),
+            "lloc": _str("媒体ID；点赞整个上传批次时省略"),
+        },
+        ["group_id", "album_id", "batch_id"],
+    )),
+    ("onebot_cancel_group_album_media_like", _cancel_group_album_media_like, _schema(
+        "onebot_cancel_group_album_media_like", "取消点赞群相册媒体。",
+        {
+            "group_id": _int("群号"), "album_id": _str("相册ID"), "batch_id": _str("上传批次ID"),
+            "lloc": _str("媒体ID；操作整个上传批次时省略"),
+        },
+        ["group_id", "album_id", "batch_id"],
+    )),
+    ("onebot_do_group_album_comment", _do_group_album_comment, _schema(
+        "onebot_do_group_album_comment", "评论群相册媒体。",
+        {
+            "group_id": _int("群号"), "album_id": _str("相册ID"), "lloc": _str("媒体ID"),
+            "content": _str("评论内容"),
+        },
+        ["group_id", "album_id", "lloc", "content"],
+    )),
+    ("onebot_del_group_album_media", _del_group_album_media, _schema(
+        "onebot_del_group_album_media", "删除群相册媒体（需管理员权限）。",
+        {"group_id": _int("群号"), "album_id": _str("相册ID"), "lloc": _str("媒体ID")},
+        ["group_id", "album_id", "lloc"],
+    )),
+    ("onebot_set_group_todo", _set_group_todo, _schema(
+        "onebot_set_group_todo", "将群消息设为待办（需管理员权限）。",
+        {"group_id": _int("群号"), "real_seq": _int("群内消息序号")}, ["group_id", "real_seq"],
+    )),
+    ("onebot_complete_group_todo", _complete_group_todo, _schema(
+        "onebot_complete_group_todo", "完成群消息待办（需管理员权限）。",
+        {"group_id": _int("群号"), "real_seq": _int("群内消息序号")}, ["group_id", "real_seq"],
+    )),
+    ("onebot_cancel_group_todo", _cancel_group_todo, _schema(
+        "onebot_cancel_group_todo", "取消群消息待办（需管理员权限）。",
+        {"group_id": _int("群号"), "real_seq": _int("群内消息序号")}, ["group_id", "real_seq"],
+    )),
+    ("onebot_set_friend_remark", _set_friend_remark, _schema(
+        "onebot_set_friend_remark", "设置好友备注（需管理员权限）。",
+        {"user_id": _int("QQ号"), "remark": _str("备注内容")}, ["user_id", "remark"],
+    )),
+    ("onebot_get_unidirectional_friend_list", _get_unidirectional_friend_list, _schema(
+        "onebot_get_unidirectional_friend_list", "获取单向好友列表。", {},
+    )),
+    ("onebot_set_qq_profile", _set_qq_profile, _schema(
+        "onebot_set_qq_profile", "修改机器人QQ资料（需管理员权限）。",
+        {"nickname": _str("昵称"), "personal_note": _str("个性签名"), "sex": _int("性别：0未知、1男、2女")},
+        ["nickname"],
+    )),
+    ("onebot_nc_get_user_status", _nc_get_user_status, _schema(
+        "onebot_nc_get_user_status", "获取指定QQ用户状态。", {"user_id": _int("QQ号")}, ["user_id"],
+    )),
+    ("onebot_get_doubt_friends_add_request", _get_doubt_friends_add_request, _schema(
+        "onebot_get_doubt_friends_add_request", "获取可疑好友申请列表。", {"count": _int("数量，默认50")},
+    )),
+    ("onebot_get_group_ignore_add_request", _get_group_ignore_add_request, _schema(
+        "onebot_get_group_ignore_add_request", "获取被忽略的加群请求。", {},
+    )),
+    ("onebot_fetch_custom_face_detail", _fetch_custom_face_detail, _schema(
+        "onebot_fetch_custom_face_detail", "获取自定义表情详情。", {"count": _int("数量，默认48")},
+    )),
+    ("onebot_add_custom_face", _add_custom_face, _schema(
+        "onebot_add_custom_face", "添加机器人自定义表情（需管理员权限）。",
+        {
+            "file": _str("本地表情文件路径"), "emoji_id": _str("表情ID"), "package_id": _int("表情包ID"),
+            "file_name": _str("文件名"), "file_size": _int("文件大小"), "md5": _str("文件MD5"),
+            "is_mark_face": _bool("是否商城表情"), "is_origin": _bool("是否原图"),
+        },
+        ["file"],
+    )),
+    ("onebot_delete_custom_face", _delete_custom_face, _schema(
+        "onebot_delete_custom_face", "删除机器人自定义表情（需管理员权限）。",
+        {
+            "res_id": _str("资源ID；单个删除时填写"),
+            "ids": {"type": "array", "description": "资源ID列表", "items": {"type": "string"}},
+        },
+    )),
+    ("onebot_set_custom_face_desc", _set_custom_face_desc, _schema(
+        "onebot_set_custom_face_desc", "修改机器人自定义表情描述（需管理员权限）。",
+        {
+            "emoji_id": _str("表情ID"), "res_id": _str("资源ID"), "md5": _str("表情MD5"),
+            "desc": _str("新描述"),
+        },
+        ["emoji_id", "res_id", "md5", "desc"],
+    )),
+    ("onebot_set_group_portrait", _set_group_portrait, _schema(
+        "onebot_set_group_portrait", "设置群头像（需管理员权限）。",
+        {"group_id": _int("群号"), "file": _str("图片路径或URL")}, ["group_id", "file"],
+    )),
+    ("onebot_set_group_remark", _set_group_remark, _schema(
+        "onebot_set_group_remark", "设置机器人侧群备注（需管理员权限）。",
+        {"group_id": _int("群号"), "remark": _str("群备注")}, ["group_id", "remark"],
+    )),
+    ("onebot_get_group_ignored_notifies", _get_group_ignored_notifies, _schema(
+        "onebot_get_group_ignored_notifies", "获取被忽略的入群申请和邀请通知。", {},
+    )),
+    ("onebot_get_group_shut_list", _get_group_shut_list, _schema(
+        "onebot_get_group_shut_list", "获取群禁言成员列表。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_get_group_info_ex", _get_group_info_ex, _schema(
+        "onebot_get_group_info_ex", "获取群扩展信息。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_get_group_detail_info", _get_group_detail_info, _schema(
+        "onebot_get_group_detail_info", "获取群详细信息。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_create_collection", _create_collection, _schema(
+        "onebot_create_collection", "创建机器人账号收藏（需管理员权限）。",
+        {"rawData": _str("收藏原始数据"), "brief": _str("简要描述")}, ["rawData", "brief"],
+    )),
+    ("onebot_get_collection_list", _get_collection_list, _schema(
+        "onebot_get_collection_list", "获取机器人账号收藏列表。",
+        {"category": _str("分类ID"), "count": _int("数量，默认50")}, ["category"],
+    )),
+    ("onebot_fetch_emoji_like", _fetch_emoji_like, _schema(
+        "onebot_fetch_emoji_like", "分页获取消息表情回应详情。",
+        {
+            "real_seq": _int("群内消息序号"), "group_id": _int("群号；默认当前群"),
+            "emoji_id": _str("表情ID"), "emoji_type": _str("表情类型"), "count": _int("数量，默认20"),
+            "cookie": _str("分页Cookie"),
+        },
+        ["real_seq", "emoji_id", "emoji_type"],
+    )),
+    ("onebot_get_emoji_likes", _get_emoji_likes, _schema(
+        "onebot_get_emoji_likes", "获取消息表情回应用户列表。",
+        {
+            "real_seq": _int("群内消息序号"), "group_id": _int("群号；默认当前群"),
+            "emoji_id": _str("表情ID"), "emoji_type": _str("表情类型；可省略"), "count": _int("数量；0表示全部"),
+        },
+        ["real_seq", "emoji_id"],
+    )),
+    ("onebot_get_group_file_system_info", _get_group_file_system_info, _schema(
+        "onebot_get_group_file_system_info", "获取群文件系统容量信息。", {"group_id": _int("群号")}, ["group_id"],
+    )),
+    ("onebot_get_group_root_files", _get_group_root_files, _schema(
+        "onebot_get_group_root_files", "获取群文件根目录内容。",
+        {"group_id": _int("群号"), "file_count": _int("文件数量，默认50")}, ["group_id"],
+    )),
+    ("onebot_get_group_files_by_folder", _get_group_files_by_folder, _schema(
+        "onebot_get_group_files_by_folder", "获取指定群文件夹内容。",
+        {"group_id": _int("群号"), "folder_id": _str("文件夹ID"), "file_count": _int("文件数量，默认50")},
+        ["group_id", "folder_id"],
+    )),
+    ("onebot_get_group_file_url", _get_group_file_url, _schema(
+        "onebot_get_group_file_url", "获取群文件下载URL。",
+        {"group_id": _int("群号"), "file_id": _str("文件ID")}, ["group_id", "file_id"],
+    )),
+    ("onebot_delete_group_file", _delete_group_file, _schema(
+        "onebot_delete_group_file", "删除群文件（需管理员权限）。",
+        {"group_id": _int("群号"), "file_id": _str("文件ID")}, ["group_id", "file_id"],
+    )),
+    ("onebot_create_group_file_folder", _create_group_file_folder, _schema(
+        "onebot_create_group_file_folder", "创建群文件夹（需管理员权限）。",
+        {"group_id": _int("群号"), "folder_name": _str("文件夹名称")}, ["group_id", "folder_name"],
+    )),
+    ("onebot_delete_group_folder", _delete_group_folder, _schema(
+        "onebot_delete_group_folder", "删除群文件夹（需管理员权限）。",
+        {"group_id": _int("群号"), "folder_id": _str("文件夹ID")}, ["group_id", "folder_id"],
+    )),
+    ("onebot_move_group_file", _move_group_file, _schema(
+        "onebot_move_group_file", "移动群文件（需管理员权限）。",
+        {
+            "group_id": _int("群号"), "file_id": _str("文件ID"),
+            "current_parent_directory": _str("当前父目录ID"), "target_parent_directory": _str("目标父目录ID"),
+        },
+        ["group_id", "file_id", "current_parent_directory", "target_parent_directory"],
+    )),
+    ("onebot_rename_group_file", _rename_group_file, _schema(
+        "onebot_rename_group_file", "重命名群文件（需管理员权限）。",
+        {
+            "group_id": _int("群号"), "file_id": _str("文件ID"),
+            "current_parent_directory": _str("当前父目录ID"), "new_name": _str("新文件名"),
+        },
+        ["group_id", "file_id", "current_parent_directory", "new_name"],
+    )),
+    ("onebot_trans_group_file", _trans_group_file, _schema(
+        "onebot_trans_group_file", "转存群文件（需管理员权限）。",
+        {"group_id": _int("群号"), "file_id": _str("文件ID")}, ["group_id", "file_id"],
+    )),
 ]
-
-
-def register_tools(ctx) -> None:
-    """Register all OneBot API tools via the plugin context."""
-    for name, handler, schema in _TOOLS:
-        ctx.register_tool(
-            name=name,
-            toolset=TOOLSET,
-            schema=schema,
-            handler=handler,
-            is_async=True,
-            description=schema["description"],
-            emoji="🐧",
-        )
 
 
 # Names of tools that require admin (call ``_check_admin()`` in their handler).
@@ -1101,18 +1661,262 @@ def register_tools(ctx) -> None:
 # with the handler implementations — each admin handler starts with
 # ``err = _check_admin()``.
 _ADMIN_TOOL_NAMES = frozenset({
+    "onebot_add_custom_face",
+    "onebot_cancel_group_todo",
+    "onebot_complete_group_todo",
+    "onebot_create_collection",
+    "onebot_create_group_file_folder",
+    "onebot_del_group_album_media",
+    "onebot_del_group_notice",
+    "onebot_delete_custom_face",
+    "onebot_delete_essence_msg",
     "onebot_delete_friend",
+    "onebot_delete_group_file",
+    "onebot_delete_group_folder",
     "onebot_handle_friend_request",
     "onebot_handle_group_request",
     "onebot_kick_group_member",
     "onebot_leave_group",
     "onebot_mute_group_member",
     "onebot_mute_group_whole",
+    "onebot_move_group_file",
+    "onebot_rename_group_file",
+    "onebot_send_group_notice",
+    "onebot_set_custom_face_desc",
+    "onebot_set_essence_msg",
+    "onebot_set_friend_remark",
     "onebot_set_avatar",
     "onebot_set_group_admin",
     "onebot_set_group_card",
     "onebot_set_group_name",
+    "onebot_set_group_portrait",
+    "onebot_set_group_remark",
     "onebot_set_group_special_title",
+    "onebot_set_group_todo",
     "onebot_set_online_status",
+    "onebot_set_qq_profile",
+    "onebot_set_signature",
+    "onebot_trans_group_file",
+    "onebot_upload_image_to_qun_album",
+})
+
+# New account-private reads and all newly added mutations default to admin,
+# even when their raw handler historically had no hard-coded check.  The raw
+# handlers stay policy-free so the full-privilege automation API remains
+# unaffected; Hermes registration wraps them below.
+_DEFAULT_ADMIN_TOOL_NAMES = _ADMIN_TOOL_NAMES | frozenset({
+    "onebot_cancel_group_album_media_like",
+    "onebot_do_group_album_comment",
+    "onebot_fetch_custom_face_detail",
+    "onebot_get_collection_list",
+    "onebot_get_doubt_friends_add_request",
+    "onebot_get_group_ignore_add_request",
+    "onebot_get_group_ignored_notifies",
+    "onebot_get_unidirectional_friend_list",
+    "onebot_set_group_album_media_like",
+    "onebot_set_group_sign",
+})
+
+_ACCOUNT_TOOL_NAMES = frozenset({
+    "onebot_add_custom_face",
+    "onebot_create_collection",
+    "onebot_delete_custom_face",
+    "onebot_delete_friend",
+    "onebot_fetch_custom_face",
+    "onebot_fetch_custom_face_detail",
+    "onebot_get_bot_blacklist",
+    "onebot_get_collection_list",
+    "onebot_get_doubt_friends_add_request",
+    "onebot_get_friend_list",
+    "onebot_get_friends_with_category",
+    "onebot_get_group_ignore_add_request",
+    "onebot_get_group_ignored_notifies",
+    "onebot_get_login_info",
+    "onebot_get_profile_like",
+    "onebot_get_recent_contact",
+    "onebot_get_unidirectional_friend_list",
+    "onebot_handle_friend_request",
+    "onebot_nc_get_user_status",
+    "onebot_send_like",
+    "onebot_set_avatar",
+    "onebot_set_custom_face_desc",
+    "onebot_set_friend_remark",
+    "onebot_set_online_status",
+    "onebot_set_qq_profile",
     "onebot_set_signature",
 })
+
+_GROUP_CONTEXT_TOOL_NAMES = frozenset({
+    "onebot_delete_essence_msg",
+    "onebot_fetch_emoji_like",
+    "onebot_get_emoji_likes",
+    "onebot_get_msg",
+    "onebot_handle_group_request",
+    "onebot_mark_msg_as_read",
+    "onebot_recall_message",
+    "onebot_set_essence_msg",
+    "onebot_set_msg_emoji_like",
+})
+
+_PACKET_TOOL_NAMES = frozenset({
+    "onebot_cancel_group_todo",
+    "onebot_complete_group_todo",
+    "onebot_get_group_file_url",
+    "onebot_get_unidirectional_friend_list",
+    "onebot_move_group_file",
+    "onebot_nc_get_user_status",
+    "onebot_rename_group_file",
+    "onebot_set_group_sign",
+    "onebot_set_group_todo",
+    "onebot_trans_group_file",
+})
+
+_TOOL_CAVEATS = {
+    "onebot_delete_essence_msg": "NapCat 4.18.13 对合成精华消息 ID 的回退路径可能交换 seq/random 参数",
+    "onebot_get_group_files_by_folder": "NapCat 4.18.13 只返回文件，folders 固定为空数组",
+    "onebot_get_group_shut_list": "NapCat 查询失败或超时时同样返回空数组",
+    "onebot_set_group_sign": "依赖 Packet backend，返回成功仅表示签到包已发送",
+    "onebot_trans_group_file": "NapCat 4.18.13 会额外要求 Packet backend 可用",
+}
+
+
+def default_tool_permission(name: str) -> str:
+    return "admin" if name in _DEFAULT_ADMIN_TOOL_NAMES else "everyone"
+
+
+def tool_scope(name: str, schema: dict[str, Any]) -> str:
+    if name in _ACCOUNT_TOOL_NAMES:
+        return "account"
+    properties = schema.get("parameters", {}).get("properties", {})
+    if "group_id" in properties or name in _GROUP_CONTEXT_TOOL_NAMES:
+        return "group"
+    return "general"
+
+
+def tool_category(name: str) -> str:
+    if "group_file" in name or name == "onebot_upload_file":
+        return "群文件"
+    if "album" in name:
+        return "群相册"
+    if "group_todo" in name:
+        return "群待办"
+    if "essence" in name or "group_notice" in name:
+        return "精华与公告"
+    if "emoji_like" in name or "emoji_likes" in name:
+        return "消息表情"
+    if "collection" in name:
+        return "收藏"
+    if any(part in name for part in ("friend", "custom_face", "profile", "avatar", "signature", "online")):
+        return "好友与账号"
+    if "group" in name:
+        return "群聊"
+    if any(part in name for part in ("send", "msg", "poke", "recall", "forward")):
+        return "消息"
+    return "基础"
+
+
+def tool_metadata(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "default_registered": True,
+        "default_permission": default_tool_permission(name),
+        "category": tool_category(name),
+        "scope": tool_scope(name, schema),
+        "packet": name in _PACKET_TOOL_NAMES,
+        "caveat": _TOOL_CAVEATS.get(name),
+    }
+
+
+def _load_tool_policies() -> dict[str, dict[str, Any]]:
+    """Read Hermes-only policy at plugin startup; malformed entries fall back safely."""
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        plugins = config.get("plugins", {}) if isinstance(config, dict) else {}
+        entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
+        onebot = entries.get("onebot", {}) if isinstance(entries, dict) else {}
+        raw = onebot.get("tool_policies", {}) if isinstance(onebot, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        return {str(name): policy for name, policy in raw.items() if isinstance(policy, dict)}
+    except Exception as exc:
+        logger.warning("Failed to load OneBot tool policies, using defaults: %s", exc)
+        return {}
+
+
+def _admin_context() -> tuple[bool, str, bool]:
+    ctx = _msg_context.get()
+    if ctx is None:
+        return False, "", False
+    is_admin = bool(ctx[0])
+    group_id = str(ctx[1] or "")
+    # Compatibility with older adapter frames: an admin in DM can only be a
+    # global admin, while group contexts require the explicit fourth field.
+    is_global_admin = bool(ctx[3]) if len(ctx) > 3 else bool(is_admin and not group_id)
+    return is_admin, group_id, is_global_admin
+
+
+def _permission_error(name: str, schema: dict[str, Any], args: dict[str, Any], permission: str) -> str | None:
+    if permission == "everyone":
+        return None
+    is_admin, current_group_id, is_global_admin = _admin_context()
+    if is_global_admin:
+        return None
+    if not is_admin:
+        return "此工具需要管理员权限"
+    scope = tool_scope(name, schema)
+    message_type = str(args.get("message_type") or "")
+    if message_type and message_type != "group":
+        scope = "account"
+    if name == "onebot_forward_single_msg" and args.get("user_id") and not args.get("group_id"):
+        scope = "account"
+    if scope != "group":
+        return "此账号级工具仅允许全局管理员调用"
+    if not current_group_id:
+        return "群管理员只能在当前群调用此工具"
+    target_group_id = str(args.get("group_id") or current_group_id)
+    if target_group_id != current_group_id:
+        return "群管理员不能操作其他群"
+    return None
+
+
+def _wrap_hermes_handler(
+    name: str, handler: Callable, schema: dict[str, Any], permission: str,
+) -> Callable:
+    @functools.wraps(handler)
+    async def wrapped(args: dict, **kwargs: Any) -> str:
+        error = _permission_error(name, schema, args, permission)
+        if error:
+            return tool_error(error)
+        token = _tool_authorized.set(True)
+        try:
+            return await handler(args, **kwargs)
+        finally:
+            _tool_authorized.reset(token)
+
+    return wrapped
+
+
+def register_tools(ctx) -> None:
+    """Register the globally visible Hermes tools with execution-time policy wrappers."""
+    policies = _load_tool_policies()
+    for name, handler, schema in _TOOLS:
+        policy = policies.get(name, {})
+        registered = policy.get("registered", True)
+        permission = policy.get("permission", default_tool_permission(name))
+        if not isinstance(registered, bool):
+            registered = True
+        if not registered:
+            logger.info("OneBot tool hidden by policy: %s", name)
+            continue
+        if permission not in {"everyone", "admin"}:
+            permission = default_tool_permission(name)
+        ctx.register_tool(
+            name=name,
+            toolset=TOOLSET,
+            schema=schema,
+            handler=_wrap_hermes_handler(name, handler, schema, permission),
+            is_async=True,
+            description=schema["description"],
+            emoji="🐧",
+        )
