@@ -218,6 +218,8 @@ class AdapterConfig:
     event_queue_enabled: bool = True            # 总开关:Hermes 不隔离群成员时是否排队
     event_queue_max_per_chat: int = 50          # 单群排队上限,超限拒绝入队
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
+    event_queue_clear_on_session_reset: bool = True  # /new、/reset 时清空当前群待处理队列
+    event_queue_clean_command_enabled: bool = True   # 适配器本地 /clean 清队列命令
 
     # ── 入站消息限流（限额 0=禁用该维度）──
     rate_limit_enabled: bool = False
@@ -287,6 +289,9 @@ class AdapterConfig:
             errors.append("event_queue_max_per_chat must be at least 1")
         if self.event_queue_idle_timeout <= 0:
             errors.append("event_queue_idle_timeout must be positive")
+        for field_name in ("event_queue_clear_on_session_reset", "event_queue_clean_command_enabled"):
+            if not isinstance(getattr(self, field_name), bool):
+                errors.append(f"{field_name} must be bool")
         if not isinstance(self.rate_limit_enabled, bool):
             errors.append("rate_limit_enabled must be bool")
         for scope in ("global", "group", "user"):
@@ -672,6 +677,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
                               "是否对群消息排队串行处理",
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
+        "event_queue_clear_on_session_reset": "群聊排队:/new、/reset 时清空当前群待处理队列(默认开启)",
+        "event_queue_clean_command_enabled": "启用适配器本地 /clean 命令,清空当前群待处理队列且不转发 Hermes",
         "rate_limit_enabled": "入站消息限流总开关;全局/群聊/个人三个维度同时检查,管理员豁免",
         "global_rate_limit_algorithm": "全局限流算法:sliding_window(滑动窗口)|token_bucket(令牌桶)",
         "global_rate_limit_messages": "全局限流消息数;0=禁用该维度",

@@ -153,6 +153,8 @@ export interface Config {
   event_queue_enabled: boolean;
   event_queue_max_per_chat: number;
   event_queue_idle_timeout: number;
+  event_queue_clear_on_session_reset: boolean;
+  event_queue_clean_command_enabled: boolean;
   // ── 入站消息限流 ──
   rate_limit_enabled: boolean;
   global_rate_limit_algorithm: string;

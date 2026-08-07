@@ -18,6 +18,8 @@ def test_config_defaults_validate(tmp_path):
     assert cfg.validate() == []
     assert cfg.bot_blacklist_enabled is True
     assert cfg.bot_blacklist_max_duration_seconds == 86400
+    assert cfg.event_queue_clear_on_session_reset is True
+    assert cfg.event_queue_clean_command_enabled is True
 
 
 def test_config_default_tokens_empty_before_ensure():
@@ -57,11 +59,18 @@ def test_config_roundtrip(tmp_path):
     from onebot_adapter.config import load_config, save_config
 
     p = tmp_path / "cfg.json"
-    cfg = AdapterConfig(self_id="123456", seq_map_size=100)
+    cfg = AdapterConfig(
+        self_id="123456",
+        seq_map_size=100,
+        event_queue_clear_on_session_reset=False,
+        event_queue_clean_command_enabled=False,
+    )
     save_config(cfg, p)
     loaded = load_config(p)
     assert loaded.self_id == "123456"
     assert loaded.seq_map_size == 100
+    assert loaded.event_queue_clear_on_session_reset is False
+    assert loaded.event_queue_clean_command_enabled is False
 
 
 def test_load_config_invalid_json_does_not_fall_back(tmp_path):

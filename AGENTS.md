@@ -115,6 +115,8 @@ Implemented across `config.py` (permission model), `parser.py` (`_check_command_
   - 群 busy → **一律入队** `self._queues[gid]`（FIFO,包括 busy 用户自身）
   - 出队时连续同用户消息自动合并为一条（`\n\n` 拼接 text）
 - `/` 开头的消息：**始终绕过排队直接广播**（与 ring buffer 跳过 /command 同思路）
+- `/new`、`/reset`：`event_queue_clear_on_session_reset=true`（默认）时先清空当前群待处理队列，再广播给 Hermes；不影响当前 busy turn
+- `/clean`：`event_queue_clean_command_enabled=true`（默认）时由适配器本地清空当前群待处理队列并直接回复，不广播给 Hermes
 
 **插件侧判定**（`hermes_plugin/adapter.py::_maybe_register_idle_callback`）：读 `self.config.extra.get("group_sessions_per_user", True)`——与 `BasePlatformAdapter.handle_message`（base.py:4606）完全一致（Hermes 在 `_create_adapter` 时通过 `config.extra.setdefault("group_sessions_per_user", self.config.group_sessions_per_user)` 把顶层值注入 platform extra，run.py:8355-8363）。只有 `group_sessions_per_user=False` 且 chat_id 是群聊形式时才注册 post_delivery callback。callback 用 `generation` 关联当前 gateway run，防 stale run 错误触发 idle。
 
@@ -130,6 +132,8 @@ Implemented across `config.py` (permission model), `parser.py` (`_check_command_
 - `event_queue_enabled`（默认 True）：排队总开关，Hermes 不隔离群成员时是否排队
 - `event_queue_max_per_chat`（默认 50）：单群队列上限，超限拒绝入队
 - `event_queue_idle_timeout`（默认 300.0 秒）：看门狗超时阈值
+- `event_queue_clear_on_session_reset`（默认 True）：使用 `/new`、`/reset` 时清空当前群待处理队列
+- `event_queue_clean_command_enabled`（默认 True）：启用适配器本地 `/clean` 清队列命令
 
 ## Config file
 
