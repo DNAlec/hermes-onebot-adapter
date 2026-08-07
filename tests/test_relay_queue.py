@@ -10,7 +10,7 @@
 - 连续同用户消息出队时合并为一条
 - /命令绕过排队
 - idle 帧 dequeue + dispatch
-- 队列超限丢弃最旧
+- 队列超限拒绝新消息
 - 看门狗超时清空
 - plugin 断开清空 busy
 - ring buffer replay 走排队

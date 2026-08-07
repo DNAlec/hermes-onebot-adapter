@@ -270,7 +270,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 响应 `200`：
 ```json
 {
-  "hermes_dir": "/home/user/.hermes/hermes-agent",
+  "hermes_dir": "/home/user/.hermes",
   "exists": true
 }
 ```
@@ -291,7 +291,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 ```json
 {
   "adapter_version": "x.y.z",
-  "hermes_dir": "/home/user/.hermes/hermes-agent",
+  "hermes_dir": "/home/user/.hermes",
   "plugin_dest": "/home/user/.hermes/plugins/onebot/",
   "source": "/path/to/onebot_adapter/hermes_plugin",
   "copied": ["__init__.py", "adapter.py", "markdown.py", "onebot_tools.py", "plugin.yaml"],
@@ -332,7 +332,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 ```json
 {
   "adapter_version": "x.y.z",
-  "hermes_dir": "/home/user/.hermes/hermes-agent",
+  "hermes_dir": "/home/user/.hermes",
   "plugin_dest": "/home/user/.hermes/plugins/onebot/",
   "removed": true,
   "env_cleaned": true,
@@ -381,7 +381,7 @@ Authorization: Bearer hoa_xxx
 
 HTTP 工具调用没有 Hermes 当前聊天上下文，因此 `onebot_send_message`、`onebot_send_forward_msg` 和 `onebot_upload_file` 必须显式提供目标：`message_type=group` 时只传 `group_id`，`message_type=private` 时只传 `user_id`。目标缺失、类型冲突或同时传入两个 ID 均返回 `400 validation_error`。`onebot_mark_msg_as_read` 同样要求在正整数 `real_seq` 与 `all=true` 中二选一。
 
-部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文以查询 SeqMap；HTTP 调用没有当前聊天上下文，无法命中带 scope 的映射时会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
+部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文，以便适配器按群号或用户 ID 查询 SeqMap；HTTP 调用不继承该上下文，且这些工具的 HTTP schema 不接受额外的上下文字段，因此会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
 
 例如发送群消息：
 
@@ -439,7 +439,7 @@ Content-Type: application/json
       "enabled": true,
       "require_mention": null,
       "mention_first_only": null,
-      "trigger_keywords": [],
+      "trigger_keywords": null,
       "keyword_first_only": null,
       "strip_first_mention": null,
       "custom_prompt": "",
@@ -748,13 +748,13 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 **`GET /api/v1/update_check`**
 
-查询 GitHub 最新 release tag 并与当前适配器版本比较。结果在服务端缓存 1 小时（错误结果缓存 5 分钟）。
+查询 GitHub 最新版本 tag 并与当前适配器版本比较。结果在服务端缓存 1 小时（错误结果缓存 5 分钟）。
 
 响应 `200`（无更新）：
 ```json
 {
-  "current_version": "1.1.0b",
-  "latest_version": "1.1.0b",
+  "current_version": "1.4.0",
+  "latest_version": "1.4.0",
   "has_update": false,
   "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md"
 }
@@ -763,8 +763,8 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 响应 `200`（有更新）：
 ```json
 {
-  "current_version": "1.0.0b3",
-  "latest_version": "1.1.0b",
+  "current_version": "1.3.0",
+  "latest_version": "1.4.0",
   "has_update": true,
   "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md"
 }
@@ -773,8 +773,8 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 响应 `200`（请求失败，含错误字段）：
 ```json
 {
-  "current_version": "1.1.0b",
-  "latest_version": "1.1.0b",
+  "current_version": "1.4.0",
+  "latest_version": "1.4.0",
   "has_update": false,
   "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md",
   "error": "GitHub API returned 403"
@@ -1010,7 +1010,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `reaction_emoji_enabled` | bool | `true` | 消息送达 Hermes 后在原消息贴表情回应；群配置可单独覆盖 |
 | `reaction_emoji_id` | string | `"124"` | 贴表情回应使用的表情 ID（QQ 表情编号） |
 | `reaction_emoji_id_queued` | string | `"123"` | 消息排队时贴的表情 ID（空=不贴表情） |
-| `file_upload_timeout` | float | `600.0` | 群聊和私聊文件上传等待 NapCat 响应的秒数，范围 30–600；群上传超时后继续查询群历史确认结果 |
+| `file_upload_timeout` | float | `600.0` | 群聊和私聊上传均按此秒数等待（范围 30–600）；仅群上传超时后短轮询群历史，无法唯一确认时返回不可自动重试的“结果未知” |
 | `send_dedup_enabled` | bool | `true` | 发送去重开关（防 Gateway send_text 超时重试导致重复发送） |
 | `send_dedup_ttl_seconds` | float | `10.0` | 发送去重 TTL（秒） |
 | `event_queue_enabled` | bool | `true` | 群聊排队总开关：Hermes 不隔离群成员时是否排队 |
@@ -1076,7 +1076,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 ### 触发条件
 
 - Hermes 端 `group_sessions_per_user=false`（插件读 `self.config.extra.get("group_sessions_per_user", True)` 判定，与 `BasePlatformAdapter.handle_message` 完全一致）
-- 适配器端 `event_queue_enabled=true`（WebUI 连接管理页可切换）
+- 适配器端 `event_queue_enabled=true`（WebUI 聊天配置页可切换）
 
 ### 排队规则
 

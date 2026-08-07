@@ -175,7 +175,8 @@ function regenerateOnebotToken() {
 
 function getAdapterUrl() {
   const port = cfg.value?.hermes_ws_port || 18810;
-  return `ws://127.0.0.1:${port}/hermes`;
+  const path = cfg.value?.hermes_ws_path || "/hermes";
+  return `ws://127.0.0.1:${port}${path}`;
 }
 
 function copyAdapterUrl() {

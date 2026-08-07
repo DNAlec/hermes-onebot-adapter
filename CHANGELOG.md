@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-07
+
 ### 新增
 - 新增 `file_upload_timeout` 配置（默认 600 秒，范围 30–600 秒），群聊和私聊文件上传统一使用并支持 WebUI 热更新；Hermes 插件的 RPC 等待上限随配置自动调整
+
+### 变更
+- 发布工作流在构建和上传 PyPI 前执行 Ruff、独立环境测试与 `twine check`，并显示可选 Hermes 协议测试的跳过原因；前端依赖改用 `npm ci` 可复现安装
+- 前端构建链升级到 Vite 8 与 `@vitejs/plugin-vue` 6，清除发布前依赖审计发现的已知漏洞
+- Python 包许可证元数据改用 SPDX 表达式，消除 setuptools 构建弃用警告
 
 ### 修复
 - 跨事件循环返回 OneBot RPC 结果时使用线程安全唤醒，避免工具实际完成后仍等到超时计时器触发才返回
@@ -12,6 +19,7 @@
 
 ### 文档
 - 新增 NapCat `v4.18.13` 群文件完成回调临时诊断补丁、构建产物校验和复现/恢复流程
+- 全面校正 README、REST API、WebUI 帮助文本和维护者指南中的架构、路径、工具数量、队列与媒体行为
 
 ## [1.3.0] - 2026-08-03
 
@@ -157,7 +165,8 @@
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
 
-[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.1.0b...v1.2.0
 [1.1.0b]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.0.0b3...v1.1.0b
