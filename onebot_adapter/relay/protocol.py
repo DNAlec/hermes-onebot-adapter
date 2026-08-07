@@ -192,9 +192,14 @@ def api_call_message(action: str, req_id: str, params: dict[str, Any]) -> dict[s
 
 
 def result_message(
-    req_id: str, success: bool, message_id: str | None = None, error: str | None = None, data: Any = None
+    req_id: str,
+    success: bool,
+    message_id: str | None = None,
+    error: str | None = None,
+    data: Any = None,
+    retryable: bool | None = None,
 ) -> dict[str, Any]:
-    return envelope(
+    result = envelope(
         "result",
         req_id=req_id,
         success=success,
@@ -202,6 +207,9 @@ def result_message(
         error=error,
         data=data,
     )
+    if retryable is not None:
+        result["retryable"] = retryable
+    return result
 
 
 def error_message(code: str, message: str) -> dict[str, Any]:

@@ -75,6 +75,7 @@ except ImportError:
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
 _UPLOAD_RESULT_TIMEOUT = 630.0
+_GROUP_UPLOAD_RESULT_TIMEOUT = 120.0
 _UPLOAD_API_ACTIONS = frozenset({"upload_group_file", "upload_private_file"})
 _RECONNECT_INITIAL_DELAY = 1.0
 _RECONNECT_MAX_DELAY = 30.0
@@ -93,6 +94,8 @@ _VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
 
 def _result_timeout(frame_type: str, action: str) -> float:
     """Return the plugin-side wait limit for an adapter RPC result."""
+    if frame_type == "api_call" and action == "upload_group_file":
+        return _GROUP_UPLOAD_RESULT_TIMEOUT
     if action == "send_document" or (frame_type == "api_call" and action in _UPLOAD_API_ACTIONS):
         return _UPLOAD_RESULT_TIMEOUT
     return _RESULT_TIMEOUT
@@ -1259,11 +1262,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
 
 def _result_to_send_result(result: dict[str, Any]) -> SendResult:
+    success = result.get("success", False)
     return SendResult(
-        success=result.get("success", False),
+        success=success,
         message_id=result.get("message_id"),
         error=result.get("error"),
-        retryable=not result.get("success", False),
+        retryable=result.get("retryable", not success),
     )
 
 

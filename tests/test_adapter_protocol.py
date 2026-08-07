@@ -152,11 +152,23 @@ async def test_rpc_send_failure_cleans_pending_future():
 def test_upload_rpcs_use_long_result_timeout():
     from onebot_adapter.hermes_plugin.adapter import _result_timeout
 
-    assert _result_timeout("api_call", "upload_group_file") == 630.0
+    assert _result_timeout("api_call", "upload_group_file") == 120.0
     assert _result_timeout("api_call", "upload_private_file") == 630.0
     assert _result_timeout("send", "send_document") == 630.0
     assert _result_timeout("api_call", "get_group_info") == 30.0
     assert _result_timeout("send", "send_text") == 30.0
+
+
+def test_result_retryable_override_is_preserved():
+    from onebot_adapter.hermes_plugin.adapter import _result_to_send_result
+
+    result = _result_to_send_result({
+        "success": False,
+        "error": "upload outcome unknown",
+        "retryable": False,
+    })
+    assert result.success is False
+    assert result.retryable is False
 
 
 async def test_handle_text_ready_frame():

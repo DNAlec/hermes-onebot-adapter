@@ -9,6 +9,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from onebot_adapter.config import AdapterConfig
+from onebot_adapter.onebot.api import UploadOutcomeUnknownError
 from onebot_adapter.relay.hermes_ws import HermesRelayServer
 from onebot_adapter.relay.protocol import (
     api_call_message,
@@ -258,6 +259,49 @@ async def test_api_call_passthrough():
                 result = await ws.receive_json(timeout=2)
                 assert result["success"] is True
                 assert result["data"]["group_name"] == "Test"
+    finally:
+        await server.close()
+
+
+async def test_upload_api_call_unknown_outcome_is_not_retryable():
+    app, mock_api, _ = _make_relay_app()
+    mock_api.call = AsyncMock(side_effect=UploadOutcomeUnknownError("upload outcome unknown"))
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(api_call_message("upload_group_file", "r6u", {
+                    "group_id": 42,
+                    "file": "/tmp/a.txt",
+                    "name": "a.txt",
+                }))
+                result = await ws.receive_json(timeout=2)
+                assert result["success"] is False
+                assert result["retryable"] is False
+                assert result["error"] == "upload outcome unknown"
+    finally:
+        await server.close()
+
+
+async def test_send_document_unknown_outcome_is_not_retryable():
+    app, mock_api, _ = _make_relay_app()
+    mock_api.upload_group_file = AsyncMock(side_effect=UploadOutcomeUnknownError("upload outcome unknown"))
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(send_message(
+                    "send_document", "r5u", "group:42",
+                    file_path="/tmp/a.txt", filename="a.txt",
+                ))
+                result = await ws.receive_json(timeout=2)
+                assert result["success"] is False
+                assert result["retryable"] is False
+                assert result["error"] == "upload outcome unknown"
     finally:
         await server.close()
 

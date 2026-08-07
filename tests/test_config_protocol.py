@@ -101,6 +101,7 @@ def test_protocol_envelopes():
     assert ready_message(True, "0.1.0")["onebot_connected"] is True
     assert send_message("send_text", "r1", "group:42", content="x")["action"] == "send_text"
     assert result_message("r1", True, message_id="9")["success"] is True
+    assert result_message("r2", False, retryable=False)["retryable"] is False
 
 
 def test_normalized_event_is_system_notice_default():
