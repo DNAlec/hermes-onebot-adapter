@@ -20,6 +20,7 @@ def test_config_defaults_validate(tmp_path):
     assert cfg.bot_blacklist_max_duration_seconds == 86400
     assert cfg.event_queue_clear_on_session_reset is True
     assert cfg.event_queue_clean_command_enabled is True
+    assert cfg.file_upload_timeout == 600.0
 
 
 def test_config_default_tokens_empty_before_ensure():
@@ -50,9 +51,26 @@ def test_config_media_delivery_mode_valid():
 
 
 def test_protocol_ready_includes_media_delivery_mode():
-    msg = ready_message(True, "0.1.0", self_id="100", media_delivery_mode="cache")
+    msg = ready_message(
+        True,
+        "0.1.0",
+        self_id="100",
+        media_delivery_mode="cache",
+        file_upload_timeout=480.0,
+    )
     assert msg["type"] == "ready"
     assert msg["media_delivery_mode"] == "cache"
+    assert msg["file_upload_timeout"] == 480.0
+
+
+@pytest.mark.parametrize("value", [29, 601, True, "300"])
+def test_config_file_upload_timeout_invalid(value):
+    cfg = AdapterConfig(
+        onebot_ws_token="t1",
+        hermes_ws_token="t2",
+        file_upload_timeout=value,
+    )
+    assert any("file_upload_timeout" in error for error in cfg.validate())
 
 
 def test_config_roundtrip(tmp_path):
@@ -62,6 +80,7 @@ def test_config_roundtrip(tmp_path):
     cfg = AdapterConfig(
         self_id="123456",
         seq_map_size=100,
+        file_upload_timeout=480.0,
         event_queue_clear_on_session_reset=False,
         event_queue_clean_command_enabled=False,
     )
@@ -69,6 +88,7 @@ def test_config_roundtrip(tmp_path):
     loaded = load_config(p)
     assert loaded.self_id == "123456"
     assert loaded.seq_map_size == 100
+    assert loaded.file_upload_timeout == 480.0
     assert loaded.event_queue_clear_on_session_reset is False
     assert loaded.event_queue_clean_command_enabled is False
 

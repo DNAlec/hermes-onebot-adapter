@@ -167,6 +167,7 @@ def ready_message(
     adapter_version: str,
     self_id: str = "",
     media_delivery_mode: str = "passthrough",
+    file_upload_timeout: float = 600.0,
 ) -> dict[str, Any]:
     return envelope(
         "ready",
@@ -174,6 +175,7 @@ def ready_message(
         adapter_version=adapter_version,
         self_id=self_id,
         media_delivery_mode=media_delivery_mode,
+        file_upload_timeout=file_upload_timeout,
     )
 
 

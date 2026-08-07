@@ -84,6 +84,7 @@ def _make_adapter():
     adapter._push_tasks = set()
     adapter._onebot_connected = False
     adapter._self_id = ""
+    adapter._file_upload_timeout = 600.0
     adapter._is_connected = True
     adapter.MAX_MESSAGE_LENGTH = 4500
     # Platform("onebot") requires the platform to be registered; use a mock
@@ -152,9 +153,11 @@ async def test_rpc_send_failure_cleans_pending_future():
 def test_upload_rpcs_use_long_result_timeout():
     from onebot_adapter.hermes_plugin.adapter import _result_timeout
 
-    assert _result_timeout("api_call", "upload_group_file") == 120.0
+    assert _result_timeout("api_call", "upload_group_file") == 640.0
+    assert _result_timeout("api_call", "upload_group_file", 480.0) == 520.0
     assert _result_timeout("api_call", "upload_private_file") == 630.0
-    assert _result_timeout("send", "send_document") == 630.0
+    assert _result_timeout("api_call", "upload_private_file", 480.0) == 510.0
+    assert _result_timeout("send", "send_document") == 640.0
     assert _result_timeout("api_call", "get_group_info") == 30.0
     assert _result_timeout("send", "send_text") == 30.0
 
@@ -178,9 +181,11 @@ async def test_handle_text_ready_frame():
         "onebot_connected": True,
         "adapter_version": "0.1.0",
         "self_id": "123456",
+        "file_upload_timeout": 480.0,
     }))
     assert adapter._onebot_connected is True
     assert adapter._self_id == "123456"
+    assert adapter._file_upload_timeout == 480.0
 
 
 async def test_handle_text_result_resolves_future():
@@ -192,6 +197,26 @@ async def test_handle_text_result_resolves_future():
     assert fut.done()
     assert fut.result()["message_id"] == "99"
     assert "r1" not in adapter._futures
+
+
+async def test_handle_text_result_wakes_future_owner_loop_thread_safely():
+    adapter = _make_adapter()
+    fut = MagicMock()
+    owner_loop = MagicMock()
+    fut.get_loop.return_value = owner_loop
+    adapter._futures["r1"] = fut
+
+    frame = {"type": "result", "req_id": "r1", "success": True}
+    await adapter._handle_text(json.dumps(frame))
+
+    fut.set_result.assert_not_called()
+    owner_loop.call_soon_threadsafe.assert_called_once()
+    callback, callback_fut, callback_data = owner_loop.call_soon_threadsafe.call_args.args
+    assert callback_fut is fut
+    assert callback_data == frame
+    fut.done.return_value = False
+    callback(callback_fut, callback_data)
+    fut.set_result.assert_called_once_with(frame)
 
 
 async def test_request_timeout():

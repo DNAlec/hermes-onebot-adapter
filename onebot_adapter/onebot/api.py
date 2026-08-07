@@ -22,8 +22,6 @@ from onebot_adapter.onebot.ws_api import WsApiTransport
 logger = logging.getLogger(__name__)
 
 _DEBUG_LOG_MAX = 2000
-_GROUP_UPLOAD_TIMEOUT = 60.0
-_PRIVATE_UPLOAD_TIMEOUT = 600.0
 _GROUP_UPLOAD_CONFIRM_DELAYS = (0.0, 2.0, 5.0)
 _GROUP_UPLOAD_CONFIRM_QUERY_TIMEOUT = 8.0
 _GROUP_UPLOAD_CONFIRM_HISTORY_COUNT = 100
@@ -37,8 +35,12 @@ class UploadOutcomeUnknownError(RuntimeError):
 class OneBotApi:
     """OneBot 11 API 客户端,走 WebSocket 传输层调用 OneBot API。"""
 
-    def __init__(self, ws_transport: WsApiTransport) -> None:
+    def __init__(self, ws_transport: WsApiTransport, file_upload_timeout: float = 600.0) -> None:
         self._ws = ws_transport
+        self._file_upload_timeout = file_upload_timeout
+
+    def update_file_upload_timeout(self, timeout: float) -> None:
+        self._file_upload_timeout = timeout
 
     @property
     def connected(self) -> bool:
@@ -55,10 +57,8 @@ class OneBotApi:
         )
         started = time.monotonic()
         started_wall = time.time()
-        if timeout is None and action == "upload_group_file":
-            request_timeout = _GROUP_UPLOAD_TIMEOUT
-        elif timeout is None and action == "upload_private_file":
-            request_timeout = _PRIVATE_UPLOAD_TIMEOUT
+        if timeout is None and action in {"upload_group_file", "upload_private_file"}:
+            request_timeout = self._file_upload_timeout
         else:
             request_timeout = timeout
         try:
