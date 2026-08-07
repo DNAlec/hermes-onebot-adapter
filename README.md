@@ -5,16 +5,17 @@ OneBot 11 适配器服务 + Hermes 插件，经独立服务对接 NapCat / go-cq
 
 ## 架构
 
-```
-OneBot ──WS──  适配器服务  ──WS── Hermes 插件 ── Hermes Agent
+```text
+NapCat ──双向 OneBot 11 WS（事件 + API）── 适配器服务 ──WS── Hermes 插件 ── Hermes Agent
 ```
 
-适配器服务承担全部 OneBot 交互；插件只与适配器服务通信，不直接接触 OneBot；不修改 Hermes 本身的代码。
+适配器服务承担全部 OneBot 交互；事件接收和 API 调用共用同一条 OneBot WebSocket，不需要独立的 OneBot HTTP API 端口。插件只与适配器服务通信，不直接接触 OneBot，也不修改 Hermes 本身的代码。
 
 ## 环境要求
 
 - Python >= 3.11
 - [pipx](https://pipx.pypa.io/)（推荐）或 pip
+- Node.js ^20.19.0 或 >= 22.12.0（仅源码安装或开发时构建前端需要；PyPI 安装不需要）
 
 ## 快速开始
 
@@ -89,7 +90,7 @@ hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
 
 ## 自动化工具 API
 
-自动化 API 默认关闭。它使用独立于 WebUI 登录的全权限 key，可调用 Hermes 插件提供的全部 OneBot 工具以及文件上传工具：
+自动化 API 默认关闭。它使用独立于 WebUI 登录的全权限 key，可调用全部 41 个 OneBot 工具，包括文件上传：
 
 ```bash
 # key 只显示一次；请保存到调用脚本的安全环境变量中
@@ -165,7 +166,7 @@ ws://127.0.0.1:3001
 | 群组管理 | 查看群列表、每群启用/禁用 Bot、群成员过滤 |
 | 指令过滤 | 管理 `/` 指令的权限（所有人 / 管理员 / 禁用） |
 | 工具管理 | 启停 OneBot 平台的 Hermes 工具集 |
-| 高级设置 | 私聊过滤、全局管理员、使用统计开关与保留期、发送去重、序列号映射、日志等 |
+| 高级设置 | 私聊过滤、全局管理员、文件上传超时、使用统计、发送去重、序列号映射、日志等 |
 
 ## 工具集管理
 
@@ -287,7 +288,7 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 `/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。默认情况下，`/new` 和 `/reset` 还会立即丢弃当前群尚未处理的排队消息；`/clean` 可手动执行同样的队列清理，但不会发送给 Hermes。两种清理都不会中断当前正在执行的 turn。
 
-### 配置项（WebUI「连接管理」页面）
+### 配置项（WebUI「聊天配置」页面）
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
@@ -313,7 +314,7 @@ cd frontend && npm install && npm run dev   # 前端开发 (Vite 代理到 :1882
 
 ## 技术栈
 
-- **后端**：aiohttp（WS 服务端/客户端、HTTP API、静态托管）
+- **后端**：aiohttp（WS 服务端/客户端、WebUI REST API、静态托管）
 - **前端**：Vue 3 + Vite + TypeScript + Vue Router
 - **打包**：pyproject.toml + setuptools，`hermes-onebot-adapter` CLI entry point
 

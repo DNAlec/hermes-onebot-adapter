@@ -51,10 +51,10 @@ After frontend changes you must rebuild + copy to `onebot_adapter/webui/static/`
 Tag a version and push — CI handles the rest:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-`v*` tags trigger `.github/workflows/publish.yml`: check-out full history → build frontend via `scripts/build_frontend.sh` → `python -m build` → `pypa/gh-action-pypi-publish`. Uses PyPI Trusted Publishing (OIDC) — no token to manage. Update `CHANGELOG.md` before tagging.
+`v*` tags trigger `.github/workflows/publish.yml`: check-out full history → install dev/build dependencies → validate the tag against the setuptools-scm version → `ruff check .` → `pytest -q -rs` → build/audit the frontend via `scripts/build_frontend.sh` → build/check distributions → `pypa/gh-action-pypi-publish`. The standalone runner skips the 11 Hermes protocol tests because Hermes is not installed; run the local gate in a Hermes environment before tagging. Uses PyPI Trusted Publishing (OIDC) — no token to manage. Update `CHANGELOG.md` before tagging.
 
 After PyPI publishes, a maintainer running `pipx upgrade hermes-onebot-adapter` will receive the new version. A local source install must rebuild the frontend first (`./scripts/build_frontend.sh`).
 
@@ -87,7 +87,7 @@ Key modules:
 
 ## Conventions and gotchas
 
-- **Hermes host imports are optional.** `hermes_plugin/adapter.py` and `onebot_tools.py` wrap `from gateway.*` / `from hermes_cli.*` / `from tools.registry` in try/except. When unavailable, base classes fall back to `object` and helper functions to no-ops. Tests in `test_adapter_protocol.py` skip entirely if Hermes isn't importable (expects `$HERMES_AGENT_DIR`, default `/home/alec/.hermes/hermes-agent`). When Hermes **is** installed, `Platform("onebot")` requires the platform to be registered first (the test module calls `register(ctx)` at import time to handle this); the 8 tests in this file exercise the plugin WS protocol.
+- **Hermes host imports are optional.** `hermes_plugin/adapter.py` and `onebot_tools.py` wrap `from gateway.*` / `from hermes_cli.*` / `from tools.registry` in try/except. When unavailable, base classes fall back to `object` and helper functions to no-ops. Tests in `test_adapter_protocol.py` skip entirely if Hermes isn't importable (expects `$HERMES_AGENT_DIR`, default `/home/alec/.hermes/hermes-agent`). When Hermes **is** installed, `Platform("onebot")` requires the platform to be registered first (the test module calls `register(ctx)` at import time to handle this); the 11 tests in this file exercise the plugin WS protocol.
 - **`asyncio_mode = "auto"`** — async test functions need no `@pytest.mark.asyncio` decorator. Just write `async def test_x():`.
 - **Config hot-reload.** `ConfigStore.update()` notifies listeners via `store.on_change(cb)`. Async callbacks are scheduled with `create_task`. Components implement `update_config(new_cfg)` to pick up changes without rebuilding. When adding a new config field that components must react to, wire it in `AdapterService._on_config_change`.
 - **Automation API.** Disabled by default via `automation_api_enabled`. The single full-privilege key is generated/rotated in WebUI or with top-level CLI flags; only its SHA-256 digest (`automation_api_key_hash`) is persisted. Never expose the digest through `GET /api/v1/config`, accept the key in a query string, or bypass `automation_upload_allowed_roots` for HTTP-supplied local media paths.
@@ -128,7 +128,7 @@ Implemented across `config.py` (permission model), `parser.py` (`_check_command_
 
 **与 ring buffer 的关系**：push_event 始终写 ring buffer（用于 plugin 重连重放）；replay 时走 `_enqueue_or_broadcast` 重新评估排队状态，避免重连瞬间把多条 shared 群消息一次性推给 plugin。
 
-**配置**（`config.py`，WebUI「连接管理」页可调）：
+**配置**（`config.py`，WebUI「聊天配置」页可调）：
 - `event_queue_enabled`（默认 True）：排队总开关，Hermes 不隔离群成员时是否排队
 - `event_queue_max_per_chat`（默认 50）：单群队列上限，超限拒绝入队
 - `event_queue_idle_timeout`（默认 300.0 秒）：看门狗超时阈值

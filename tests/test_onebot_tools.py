@@ -83,7 +83,7 @@ def test_toolset_constant():
 
 
 def test_tool_count():
-    # 24 read-only/messaging + 2 bot blacklist + 14 admin = 40
+    # Keep the canonical plugin and HTTP automation catalogs at 41 tools.
     assert len(_TOOLS) == 41
 
 

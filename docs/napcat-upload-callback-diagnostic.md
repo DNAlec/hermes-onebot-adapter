@@ -11,12 +11,13 @@ bundle immediately after the controlled reproduction.
 
 ## Prepare
 
-Build from the exact deployed tag so unrelated NapCat changes do not affect the result:
+Build from the exact deployed tag so unrelated NapCat changes do not affect the result. Run these commands from the
+adapter repository root:
 
 ```bash
 git clone --branch v4.18.13 --depth 1 https://github.com/NapNeko/NapCatQQ.git /tmp/NapCatQQ-v4.18.13
 git -C /tmp/NapCatQQ-v4.18.13 apply \
-  /home/alec/workspace/hermes-onebot-adapter/scripts/napcat-v4.18.13-upload-callback-diagnostic.patch
+  "$PWD/scripts/napcat-v4.18.13-upload-callback-diagnostic.patch"
 cd /tmp/NapCatQQ-v4.18.13
 corepack pnpm install --frozen-lockfile
 corepack pnpm build:webui
@@ -33,13 +34,6 @@ The diagnostic bundle is expected at:
 ```
 
 Before deployment, confirm that the bundle contains `UploadCallbackDiag`.
-
-The bundle prepared during the initial investigation is currently at:
-
-```text
-/tmp/opencode/NapCatQQ-v4.18.13-check/packages/napcat-shell/dist/napcat.mjs
-SHA-256: 2b5f0d3fd301137bf1da66c2ec23fcdfa7890b0acc9b9b1189435302b96bd1a9
-```
 
 ## Deploy Later
 
