@@ -210,6 +210,8 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "send_dedup_enabled": true,
   "send_dedup_ttl_seconds": 10.0,
   "event_queue_enabled": true,
+  "event_queue_clear_on_session_reset": true,
+  "event_queue_clean_command_enabled": true,
   "event_queue_max_per_chat": 50,
   "event_queue_idle_timeout": 300.0,
   "rate_limit_enabled": false,
@@ -1012,6 +1014,8 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `event_queue_enabled` | bool | `true` | 群聊排队总开关：Hermes 不隔离群成员时是否排队 |
 | `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限拒绝入队（详见[群聊消息排队](#群聊消息排队)） |
 | `event_queue_idle_timeout` | float | `300.0` | 群聊排队：plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy 状态 |
+| `event_queue_clear_on_session_reset` | bool | `true` | 使用 `/new`、`/reset` 时清空当前群待处理队列 |
+| `event_queue_clean_command_enabled` | bool | `true` | 启用适配器本地 `/clean` 命令；清空当前群待处理队列且不转发 Hermes |
 | `rate_limit_enabled` | bool | `false` | 入站消息限流总开关；全局/群聊/个人三维度同时检查，管理员豁免 |
 | `global_rate_limit_algorithm` | string | `"sliding_window"` | 全局限流算法：`sliding_window` / `token_bucket` |
 | `global_rate_limit_messages` | int | `0` | 全局限流消息数；`0`=禁用该维度 |
@@ -1081,7 +1085,9 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
 | 群 busy | 入队等待（含 busy 用户自身）；出队时连续同用户消息合并为一条 |
-| `/` 开头的消息 | **始终直接转发**（绕过排队） |
+| `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
+| `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
+| 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
 ### idle 信号
 

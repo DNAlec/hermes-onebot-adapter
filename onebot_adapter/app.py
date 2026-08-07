@@ -388,7 +388,7 @@ class AdapterService:
                 await self._maybe_react_queued(event)
             elif outcome == "broadcast":
                 await self._maybe_react_delivered(event)
-            # "dropped": neither queued nor delivered — do not react.
+            # "handled" / "dropped": not delivered to Hermes, so do not react.
 
     async def _maybe_react_delivered(self, event) -> None:
         """消息送达 Hermes(广播或出队)后在原消息上贴表情回应(可配置)。

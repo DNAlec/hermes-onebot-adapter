@@ -144,6 +144,8 @@ async function saveGlobal() {
       event_queue_enabled: c.event_queue_enabled,
       event_queue_max_per_chat: c.event_queue_max_per_chat,
       event_queue_idle_timeout: c.event_queue_idle_timeout,
+      event_queue_clear_on_session_reset: c.event_queue_clear_on_session_reset,
+      event_queue_clean_command_enabled: c.event_queue_clean_command_enabled,
       rate_limit_enabled: c.rate_limit_enabled,
       global_rate_limit_algorithm: c.global_rate_limit_algorithm,
       global_rate_limit_messages: c.global_rate_limit_messages,
@@ -528,6 +530,14 @@ function resetHint() {
       <label class="checkbox-row">
         <input type="checkbox" v-model="cfg.event_queue_enabled" />
         <span>启用群聊排队</span>
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.event_queue_clear_on_session_reset" />
+        <span>使用 /new 或 /reset 时清空当前群的待处理队列</span>
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.event_queue_clean_command_enabled" />
+        <span>启用适配器本地 /clean 命令（清空当前群队列，不发送给 Hermes）</span>
       </label>
       <label>
         单群队列上限

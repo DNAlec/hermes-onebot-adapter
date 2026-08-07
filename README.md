@@ -271,7 +271,9 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy，转发 |
 | 群 busy | 入队等待（含 busy 用户自身）；出队时连续同用户消息合并为一条 |
-| `/` 开头的消息 | **始终直接转发**（绕过排队） |
+| `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
+| `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
+| 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
 ### Hermes 会话隔离配置
 
@@ -281,7 +283,7 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后插件向适配器发 `idle` 帧，适配器清空 busy 并从队列取下一条转发。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
 
-`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。
+`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。默认情况下，`/new` 和 `/reset` 还会立即丢弃当前群尚未处理的排队消息；`/clean` 可手动执行同样的队列清理，但不会发送给 Hermes。两种清理都不会中断当前正在执行的 turn。
 
 ### 配置项（WebUI「连接管理」页面）
 
@@ -290,6 +292,8 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 | `event_queue_enabled` | `true` | 排队总开关：Hermes 不隔离群成员时是否排队 |
 | `event_queue_max_per_chat` | `50` | 单群队列上限，超限拒绝入队 |
 | `event_queue_idle_timeout` | `300.0` | plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy |
+| `event_queue_clear_on_session_reset` | `true` | 使用 `/new`、`/reset` 时清空当前群待处理队列 |
+| `event_queue_clean_command_enabled` | `true` | 启用适配器本地 `/clean` 清队列命令 |
 
 ## 开发
 
