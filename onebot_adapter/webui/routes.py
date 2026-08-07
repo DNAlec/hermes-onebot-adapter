@@ -1039,7 +1039,7 @@ def _onebot_tool_catalog() -> list[dict[str, Any]]:
             default_registered = _field("default_registered", True)
             default_permission = _field(
                 "default_permission",
-                "admin" if name in onebot_tools._ADMIN_TOOL_NAMES else "everyone",
+                onebot_tools.default_tool_permission(name),
             )
             if not isinstance(default_registered, bool):
                 raise ValueError(f"OneBot tool {name} has an invalid default_registered")

@@ -179,12 +179,36 @@ def test_register_tools_calls_ctx():
     ctx = MagicMock()
     ctx.register_tool = MagicMock()
     register_tools(ctx)
-    assert ctx.register_tool.call_count == len(_TOOLS)
+    assert ctx.register_tool.call_count == len(_TOOLS) - 4
     # Check first call
     first_call = ctx.register_tool.call_args_list[0]
     assert first_call.kwargs["toolset"] == TOOLSET
     assert first_call.kwargs["is_async"] is True
     assert first_call.kwargs["emoji"] == "🐧"
+
+
+def test_default_hidden_tools_are_not_registered():
+    ctx = MagicMock()
+    register_tools(ctx)
+    names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
+    assert {
+        "onebot_mark_msg_as_read",
+        "onebot_get_recent_contact",
+        "onebot_set_friend_remark",
+        "onebot_set_group_remark",
+    }.isdisjoint(names)
+
+
+def test_default_hidden_tool_can_be_explicitly_registered(monkeypatch):
+    monkeypatch.setattr(
+        onebot_tools,
+        "_load_tool_policies",
+        lambda: {"onebot_mark_msg_as_read": {"registered": True}},
+    )
+    ctx = MagicMock()
+    register_tools(ctx)
+    names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
+    assert "onebot_mark_msg_as_read" in names
 
 
 def test_register_tools_skips_hidden_policy(monkeypatch):
@@ -197,7 +221,42 @@ def test_register_tools_skips_hidden_policy(monkeypatch):
     register_tools(ctx)
     names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
     assert "onebot_get_login_info" not in names
-    assert len(names) == 88
+    assert len(names) == 84
+
+
+def test_descriptions_only_name_qq_group_permission_requirements():
+    descriptions = {name: schema["description"] for name, _, schema in _TOOLS}
+    assert all("需管理员权限" not in description for description in descriptions.values())
+    assert "需群聊管理员权限" in descriptions["onebot_kick_group_member"]
+    assert "需群聊管理员权限" in descriptions["onebot_set_group_portrait"]
+    assert "管理员权限" not in descriptions["onebot_set_friend_remark"]
+    assert "管理员权限" not in descriptions["onebot_set_group_remark"]
+
+
+def test_exact_default_admin_tool_set():
+    expected = {
+        "onebot_set_group_portrait",
+        "onebot_set_qq_profile",
+        "onebot_set_avatar",
+        "onebot_set_signature",
+        "onebot_delete_friend",
+        "onebot_handle_friend_request",
+        "onebot_handle_group_request",
+        "onebot_leave_group",
+        "onebot_set_group_name",
+        "onebot_set_group_card",
+        "onebot_set_group_admin",
+        "onebot_mute_group_whole",
+        "onebot_mute_group_member",
+        "onebot_kick_group_member",
+    }
+    actual = {name for name, _, _ in _TOOLS if onebot_tools.default_tool_permission(name) == "admin"}
+    assert actual == expected
+    assert all(
+        onebot_tools.default_tool_permission(name) == "everyone"
+        for name, _, _ in _TOOLS
+        if name not in expected
+    )
 
 
 def _registered_handler(ctx: MagicMock, name: str):

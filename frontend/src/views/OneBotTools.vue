@@ -27,6 +27,13 @@ function validPermission(value: unknown): OneBotToolPermission {
   return value === "admin" ? "admin" : "everyone";
 }
 
+function errorMessage(error: any): string {
+  const payload = error?.response?.data?.error;
+  if (typeof payload === "string") return payload;
+  if (payload && typeof payload.message === "string") return payload.message;
+  return error?.message || "请求失败";
+}
+
 function catalogEntries(data: OneBotToolPoliciesState): OneBotToolCatalogEntry[] {
   const raw = data.catalog ?? data.tools ?? [];
   if (Array.isArray(raw)) return raw;
@@ -83,7 +90,7 @@ async function load() {
   try {
     applyState(await getOneBotToolPolicies());
   } catch (error: any) {
-    message.value = "加载失败: " + (error.response?.data?.error || error.message);
+    message.value = "加载失败: " + errorMessage(error);
     messageType.value = "error";
   } finally {
     loading.value = false;
@@ -152,7 +159,7 @@ async function save() {
     message.value = "配置已保存。注册可见性变更需重启 Hermes 后生效。";
     messageType.value = "success";
   } catch (error: any) {
-    message.value = "保存失败: " + (error.response?.data?.error || error.message);
+    message.value = "保存失败: " + errorMessage(error);
     messageType.value = "error";
   } finally {
     saving.value = false;
@@ -169,7 +176,7 @@ async function reset() {
     message.value = "已重置为默认策略。注册可见性变更需重启 Hermes 后生效。";
     messageType.value = "success";
   } catch (error: any) {
-    message.value = "重置失败: " + (error.response?.data?.error || error.message);
+    message.value = "重置失败: " + errorMessage(error);
     messageType.value = "error";
   } finally {
     saving.value = false;
