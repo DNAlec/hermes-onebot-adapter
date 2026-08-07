@@ -1322,7 +1322,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
     )),
     # ── Admin (require admin) ──
     ("onebot_kick_group_member", _kick_group_member, _schema(
-        "onebot_kick_group_member", "将成员踢出群聊（需管理员权限）。",
+        "onebot_kick_group_member", "将成员踢出群聊（需群聊管理员权限）。",
         {
             "group_id": _int("群号"),
             "user_id": _int("目标QQ号"),
@@ -1331,7 +1331,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "user_id"],
     )),
     ("onebot_mute_group_member", _mute_group_member, _schema(
-        "onebot_mute_group_member", "禁言或解除禁言群成员（需管理员权限）。duration 必填，0 表示解除禁言。",
+        "onebot_mute_group_member", "禁言或解除禁言群成员（需群聊管理员权限）。duration 必填，0 表示解除禁言。",
         {
             "group_id": _int("群号"),
             "user_id": _int("目标QQ号"),
@@ -1340,7 +1340,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "user_id", "duration"],
     )),
     ("onebot_mute_group_whole", _mute_group_whole, _schema(
-        "onebot_mute_group_whole", "全员禁言（需管理员权限）。",
+        "onebot_mute_group_whole", "全员禁言（需群聊管理员权限）。",
         {"group_id": _int("群号"), "enable": _bool("必填；True开启，False关闭")},
         ["group_id", "enable"],
     )),
@@ -1350,22 +1350,23 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "user_id", "enable"],
     )),
     ("onebot_set_group_card", _set_group_card, _schema(
-        "onebot_set_group_card", "设置群名片（需管理员权限）。card 必填；显式传空字符串可清空名片。",
+        "onebot_set_group_card",
+        "设置群名片（为其他成员设置时需群聊管理员权限）。card 必填；显式传空字符串可清空名片。",
         {"group_id": _int("群号"), "user_id": _int("目标QQ号"), "card": _str("群名片内容")},
         ["group_id", "user_id", "card"],
     )),
     ("onebot_set_group_name", _set_group_name, _schema(
-        "onebot_set_group_name", "修改群名（需管理员权限）。",
+        "onebot_set_group_name", "修改群名（需群聊管理员权限）。",
         {"group_id": _int("群号"), "group_name": _str("新群名")},
         ["group_id", "group_name"],
     )),
     ("onebot_leave_group", _leave_group, _schema(
-        "onebot_leave_group", "退出群聊（需管理员权限）。",
+        "onebot_leave_group", "退出群聊。",
         {"group_id": _int("群号")},
         ["group_id"],
     )),
     ("onebot_handle_group_request", _handle_group_request, _schema(
-        "onebot_handle_group_request", "处理加群请求/邀请（需管理员权限）。",
+        "onebot_handle_group_request", "处理加群请求/邀请（处理加群申请需群聊管理员权限）。",
         {
             "flag": _str("请求flag（从事件中获取）"),
             "sub_type": _str("'add'加群 或 'invite'邀请"),
@@ -1375,22 +1376,22 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["flag", "sub_type", "approve"],
     )),
     ("onebot_handle_friend_request", _handle_friend_request, _schema(
-        "onebot_handle_friend_request", "处理好友请求（需管理员权限）。",
+        "onebot_handle_friend_request", "处理好友请求。",
         {"flag": _str("请求flag"), "approve": _bool("是否同意"), "remark": _str("备注名")},
         ["flag", "approve"],
     )),
     ("onebot_delete_friend", _delete_friend, _schema(
-        "onebot_delete_friend", "删除好友（需管理员权限）。",
+        "onebot_delete_friend", "删除好友。",
         {"user_id": _int("QQ号")},
         ["user_id"],
     )),
     ("onebot_set_group_special_title", _set_group_special_title, _schema(
-        "onebot_set_group_special_title", "设置群成员专属头衔（需管理员权限）。空字符串删除头衔。",
+        "onebot_set_group_special_title", "设置群成员专属头衔（需群主权限）。空字符串删除头衔。",
         {"group_id": _int("群号"), "user_id": _int("QQ号"), "special_title": _str("专属头衔内容")},
         ["group_id", "user_id", "special_title"],
     )),
     ("onebot_set_online_status", _set_online_status, _schema(
-        "onebot_set_online_status", "设置机器人在线状态（需管理员权限）。status/ext_status 参考 NapCat 状态列表。",
+        "onebot_set_online_status", "设置机器人在线状态。status/ext_status 参考 NapCat 状态列表。",
         {
             "status": _int("在线状态编号"),
             "ext_status": _int("扩展状态编号"),
@@ -1399,12 +1400,12 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["status", "ext_status"],
     )),
     ("onebot_set_signature", _set_signature, _schema(
-        "onebot_set_signature", "设置机器人个性签名（需管理员权限）。",
+        "onebot_set_signature", "设置机器人个性签名。",
         {"longNick": _str("个性签名内容")},
         ["longNick"],
     )),
     ("onebot_set_avatar", _set_avatar, _schema(
-        "onebot_set_avatar", "设置机器人头像（需管理员权限）。",
+        "onebot_set_avatar", "设置机器人头像。",
         {"file": _str("图片路径或URL")},
         ["file"],
     )),
@@ -1424,18 +1425,18 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_get_essence_msg_list", "获取群精华消息列表。", {"group_id": _int("群号")}, ["group_id"],
     )),
     ("onebot_set_essence_msg", _set_essence_msg, _schema(
-        "onebot_set_essence_msg", "设置群精华消息（需管理员权限）。",
+        "onebot_set_essence_msg", "设置群精华消息（需群聊管理员权限）。",
         {"real_seq": _int("群内消息序号"), "group_id": _int("群号；默认当前群")}, ["real_seq"],
     )),
     ("onebot_delete_essence_msg", _delete_essence_msg, _schema(
-        "onebot_delete_essence_msg", "移除群精华消息（需管理员权限）。",
+        "onebot_delete_essence_msg", "移除群精华消息（需群聊管理员权限）。",
         {"real_seq": _int("群内消息序号"), "group_id": _int("群号；默认当前群")}, ["real_seq"],
     )),
     ("onebot_get_group_notice", _get_group_notice, _schema(
         "onebot_get_group_notice", "获取群公告列表。", {"group_id": _int("群号")}, ["group_id"],
     )),
     ("onebot_send_group_notice", _send_group_notice, _schema(
-        "onebot_send_group_notice", "发布群公告（需管理员权限）。",
+        "onebot_send_group_notice", "发布群公告（需群聊管理员权限）。",
         {
             "group_id": _int("群号"), "content": _str("公告内容"), "image": _str("图片路径或URL"),
             "pinned": _int("是否置顶(0/1)"), "type": _int("公告类型，默认1"),
@@ -1445,7 +1446,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "content"],
     )),
     ("onebot_del_group_notice", _del_group_notice, _schema(
-        "onebot_del_group_notice", "删除群公告（需管理员权限）。",
+        "onebot_del_group_notice", "删除群公告（需群聊管理员权限）。",
         {"group_id": _int("群号"), "notice_id": _str("公告ID")}, ["group_id", "notice_id"],
     )),
     ("onebot_set_group_sign", _set_group_sign, _schema(
@@ -1464,7 +1465,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "album_id"],
     )),
     ("onebot_upload_image_to_qun_album", _upload_image_to_qun_album, _schema(
-        "onebot_upload_image_to_qun_album", "上传图片到群相册（需管理员权限）。",
+        "onebot_upload_image_to_qun_album", "上传图片到群相册。",
         {
             "group_id": _int("群号"), "album_id": _str("相册ID"), "album_name": _str("相册名称"),
             "file": _str("图片路径、URL或Base64"),
@@ -1496,31 +1497,31 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "album_id", "lloc", "content"],
     )),
     ("onebot_del_group_album_media", _del_group_album_media, _schema(
-        "onebot_del_group_album_media", "删除群相册媒体（需管理员权限）。",
+        "onebot_del_group_album_media", "删除群相册媒体。",
         {"group_id": _int("群号"), "album_id": _str("相册ID"), "lloc": _str("媒体ID")},
         ["group_id", "album_id", "lloc"],
     )),
     ("onebot_set_group_todo", _set_group_todo, _schema(
-        "onebot_set_group_todo", "将群消息设为待办（需管理员权限）。",
+        "onebot_set_group_todo", "将群消息设为待办（需群聊管理员权限）。",
         {"group_id": _int("群号"), "real_seq": _int("群内消息序号")}, ["group_id", "real_seq"],
     )),
     ("onebot_complete_group_todo", _complete_group_todo, _schema(
-        "onebot_complete_group_todo", "完成群消息待办（需管理员权限）。",
+        "onebot_complete_group_todo", "完成群消息待办（需群聊管理员权限）。",
         {"group_id": _int("群号"), "real_seq": _int("群内消息序号")}, ["group_id", "real_seq"],
     )),
     ("onebot_cancel_group_todo", _cancel_group_todo, _schema(
-        "onebot_cancel_group_todo", "取消群消息待办（需管理员权限）。",
+        "onebot_cancel_group_todo", "取消群消息待办（需群聊管理员权限）。",
         {"group_id": _int("群号"), "real_seq": _int("群内消息序号")}, ["group_id", "real_seq"],
     )),
     ("onebot_set_friend_remark", _set_friend_remark, _schema(
-        "onebot_set_friend_remark", "设置好友备注（需管理员权限）。",
+        "onebot_set_friend_remark", "设置好友备注。",
         {"user_id": _int("QQ号"), "remark": _str("备注内容")}, ["user_id", "remark"],
     )),
     ("onebot_get_unidirectional_friend_list", _get_unidirectional_friend_list, _schema(
         "onebot_get_unidirectional_friend_list", "获取单向好友列表。", {},
     )),
     ("onebot_set_qq_profile", _set_qq_profile, _schema(
-        "onebot_set_qq_profile", "修改机器人QQ资料（需管理员权限）。",
+        "onebot_set_qq_profile", "修改机器人QQ资料。",
         {"nickname": _str("昵称"), "personal_note": _str("个性签名"), "sex": _int("性别：0未知、1男、2女")},
         ["nickname"],
     )),
@@ -1537,7 +1538,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_fetch_custom_face_detail", "获取自定义表情详情。", {"count": _int("数量，默认48")},
     )),
     ("onebot_add_custom_face", _add_custom_face, _schema(
-        "onebot_add_custom_face", "添加机器人自定义表情（需管理员权限）。",
+        "onebot_add_custom_face", "添加机器人自定义表情。",
         {
             "file": _str("本地表情文件路径"), "emoji_id": _str("表情ID"), "package_id": _int("表情包ID"),
             "file_name": _str("文件名"), "file_size": _int("文件大小"), "md5": _str("文件MD5"),
@@ -1546,14 +1547,14 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["file"],
     )),
     ("onebot_delete_custom_face", _delete_custom_face, _schema(
-        "onebot_delete_custom_face", "删除机器人自定义表情（需管理员权限）。",
+        "onebot_delete_custom_face", "删除机器人自定义表情。",
         {
             "res_id": _str("资源ID；单个删除时填写"),
             "ids": {"type": "array", "description": "资源ID列表", "items": {"type": "string"}},
         },
     )),
     ("onebot_set_custom_face_desc", _set_custom_face_desc, _schema(
-        "onebot_set_custom_face_desc", "修改机器人自定义表情描述（需管理员权限）。",
+        "onebot_set_custom_face_desc", "修改机器人自定义表情描述。",
         {
             "emoji_id": _str("表情ID"), "res_id": _str("资源ID"), "md5": _str("表情MD5"),
             "desc": _str("新描述"),
@@ -1561,11 +1562,11 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["emoji_id", "res_id", "md5", "desc"],
     )),
     ("onebot_set_group_portrait", _set_group_portrait, _schema(
-        "onebot_set_group_portrait", "设置群头像（需管理员权限）。",
+        "onebot_set_group_portrait", "设置群头像（需群聊管理员权限）。",
         {"group_id": _int("群号"), "file": _str("图片路径或URL")}, ["group_id", "file"],
     )),
     ("onebot_set_group_remark", _set_group_remark, _schema(
-        "onebot_set_group_remark", "设置机器人侧群备注（需管理员权限）。",
+        "onebot_set_group_remark", "设置机器人侧群备注。",
         {"group_id": _int("群号"), "remark": _str("群备注")}, ["group_id", "remark"],
     )),
     ("onebot_get_group_ignored_notifies", _get_group_ignored_notifies, _schema(
@@ -1581,7 +1582,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_get_group_detail_info", "获取群详细信息。", {"group_id": _int("群号")}, ["group_id"],
     )),
     ("onebot_create_collection", _create_collection, _schema(
-        "onebot_create_collection", "创建机器人账号收藏（需管理员权限）。",
+        "onebot_create_collection", "创建机器人账号收藏。",
         {"rawData": _str("收藏原始数据"), "brief": _str("简要描述")}, ["rawData", "brief"],
     )),
     ("onebot_get_collection_list", _get_collection_list, _schema(
@@ -1622,19 +1623,19 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         {"group_id": _int("群号"), "file_id": _str("文件ID")}, ["group_id", "file_id"],
     )),
     ("onebot_delete_group_file", _delete_group_file, _schema(
-        "onebot_delete_group_file", "删除群文件（需管理员权限）。",
+        "onebot_delete_group_file", "删除群文件。",
         {"group_id": _int("群号"), "file_id": _str("文件ID")}, ["group_id", "file_id"],
     )),
     ("onebot_create_group_file_folder", _create_group_file_folder, _schema(
-        "onebot_create_group_file_folder", "创建群文件夹（需管理员权限）。",
+        "onebot_create_group_file_folder", "创建群文件夹。",
         {"group_id": _int("群号"), "folder_name": _str("文件夹名称")}, ["group_id", "folder_name"],
     )),
     ("onebot_delete_group_folder", _delete_group_folder, _schema(
-        "onebot_delete_group_folder", "删除群文件夹（需管理员权限）。",
+        "onebot_delete_group_folder", "删除群文件夹。",
         {"group_id": _int("群号"), "folder_id": _str("文件夹ID")}, ["group_id", "folder_id"],
     )),
     ("onebot_move_group_file", _move_group_file, _schema(
-        "onebot_move_group_file", "移动群文件（需管理员权限）。",
+        "onebot_move_group_file", "移动群文件。",
         {
             "group_id": _int("群号"), "file_id": _str("文件ID"),
             "current_parent_directory": _str("当前父目录ID"), "target_parent_directory": _str("目标父目录ID"),
@@ -1642,7 +1643,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "file_id", "current_parent_directory", "target_parent_directory"],
     )),
     ("onebot_rename_group_file", _rename_group_file, _schema(
-        "onebot_rename_group_file", "重命名群文件（需管理员权限）。",
+        "onebot_rename_group_file", "重命名群文件。",
         {
             "group_id": _int("群号"), "file_id": _str("文件ID"),
             "current_parent_directory": _str("当前父目录ID"), "new_name": _str("新文件名"),
@@ -1650,7 +1651,7 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         ["group_id", "file_id", "current_parent_directory", "new_name"],
     )),
     ("onebot_trans_group_file", _trans_group_file, _schema(
-        "onebot_trans_group_file", "转存群文件（需管理员权限）。",
+        "onebot_trans_group_file", "转存群文件。",
         {"group_id": _int("群号"), "file_id": _str("文件ID")}, ["group_id", "file_id"],
     )),
 ]
@@ -1700,21 +1701,24 @@ _ADMIN_TOOL_NAMES = frozenset({
     "onebot_upload_image_to_qun_album",
 })
 
-# New account-private reads and all newly added mutations default to admin,
-# even when their raw handler historically had no hard-coded check.  The raw
-# handlers stay policy-free so the full-privilege automation API remains
-# unaffected; Hermes registration wraps them below.
-_DEFAULT_ADMIN_TOOL_NAMES = _ADMIN_TOOL_NAMES | frozenset({
-    "onebot_cancel_group_album_media_like",
-    "onebot_do_group_album_comment",
-    "onebot_fetch_custom_face_detail",
-    "onebot_get_collection_list",
-    "onebot_get_doubt_friends_add_request",
-    "onebot_get_group_ignore_add_request",
-    "onebot_get_group_ignored_notifies",
-    "onebot_get_unidirectional_friend_list",
-    "onebot_set_group_album_media_like",
-    "onebot_set_group_sign",
+# Hermes defaults are intentionally narrower than the raw handler checks.
+# The registration wrapper may explicitly authorize an ``everyone`` tool and
+# bypass its legacy handler-level check; HTTP automation remains unrestricted.
+_DEFAULT_ADMIN_TOOL_NAMES = frozenset({
+    "onebot_delete_friend",
+    "onebot_handle_friend_request",
+    "onebot_handle_group_request",
+    "onebot_kick_group_member",
+    "onebot_leave_group",
+    "onebot_mute_group_member",
+    "onebot_mute_group_whole",
+    "onebot_set_avatar",
+    "onebot_set_group_admin",
+    "onebot_set_group_card",
+    "onebot_set_group_name",
+    "onebot_set_group_portrait",
+    "onebot_set_qq_profile",
+    "onebot_set_signature",
 })
 
 _ACCOUNT_TOOL_NAMES = frozenset({
@@ -1779,6 +1783,17 @@ _TOOL_CAVEATS = {
     "onebot_trans_group_file": "NapCat 4.18.13 会额外要求 Packet backend 可用",
 }
 
+_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({
+    "onebot_get_recent_contact",
+    "onebot_mark_msg_as_read",
+    "onebot_set_friend_remark",
+    "onebot_set_group_remark",
+})
+
+
+def default_tool_registered(name: str) -> bool:
+    return name not in _DEFAULT_HIDDEN_TOOL_NAMES
+
 
 def default_tool_permission(name: str) -> str:
     return "admin" if name in _DEFAULT_ADMIN_TOOL_NAMES else "everyone"
@@ -1817,7 +1832,7 @@ def tool_category(name: str) -> str:
 
 def tool_metadata(name: str, schema: dict[str, Any]) -> dict[str, Any]:
     return {
-        "default_registered": True,
+        "default_registered": default_tool_registered(name),
         "default_permission": default_tool_permission(name),
         "category": tool_category(name),
         "scope": tool_scope(name, schema),
@@ -1902,10 +1917,10 @@ def register_tools(ctx) -> None:
     policies = _load_tool_policies()
     for name, handler, schema in _TOOLS:
         policy = policies.get(name, {})
-        registered = policy.get("registered", True)
+        registered = policy.get("registered", default_tool_registered(name))
         permission = policy.get("permission", default_tool_permission(name))
         if not isinstance(registered, bool):
-            registered = True
+            registered = default_tool_registered(name)
         if not registered:
             logger.info("OneBot tool hidden by policy: %s", name)
             continue

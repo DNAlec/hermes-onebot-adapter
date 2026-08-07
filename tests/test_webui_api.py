@@ -258,6 +258,12 @@ async def test_tool_policy_get_returns_tuple_catalog_defaults(tool_policy_client
 
     normal = next(item for item in payload["catalog"] if item["name"] == "onebot_get_login_info")
     admin = next(item for item in payload["catalog"] if item["name"] == "onebot_kick_group_member")
+    hidden_names = {
+        item["name"] for item in payload["catalog"] if item["default_registered"] is False
+    }
+    default_admin_names = {
+        item["name"] for item in payload["catalog"] if item["default_permission"] == "admin"
+    }
     assert normal["default_registered"] is True
     assert normal["default_permission"] == "everyone"
     assert normal["category"] == "基础"
@@ -265,6 +271,29 @@ async def test_tool_policy_get_returns_tuple_catalog_defaults(tool_policy_client
     assert admin["default_permission"] == "admin"
     assert payload["policies"][normal["name"]] == {"registered": True, "permission": "everyone"}
     assert payload["policies"][admin["name"]] == {"registered": True, "permission": "admin"}
+    assert hidden_names == {
+        "onebot_mark_msg_as_read",
+        "onebot_get_recent_contact",
+        "onebot_set_friend_remark",
+        "onebot_set_group_remark",
+    }
+    assert payload["policies"]["onebot_mark_msg_as_read"]["registered"] is False
+    assert default_admin_names == {
+        "onebot_set_group_portrait",
+        "onebot_set_qq_profile",
+        "onebot_set_avatar",
+        "onebot_set_signature",
+        "onebot_delete_friend",
+        "onebot_handle_friend_request",
+        "onebot_handle_group_request",
+        "onebot_leave_group",
+        "onebot_set_group_name",
+        "onebot_set_group_card",
+        "onebot_set_group_admin",
+        "onebot_mute_group_whole",
+        "onebot_mute_group_member",
+        "onebot_kick_group_member",
+    }
     assert payload["sparse_policies"] == {}
 
 
