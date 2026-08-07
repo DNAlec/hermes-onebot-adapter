@@ -311,6 +311,48 @@ export const putHermesTools = (payload: {
 export const resetHermesTools = () =>
   api.post<{ ok: boolean }>("/hermes_tools/reset").then((r) => r.data);
 
+// ── OneBot tool registration and Hermes permission policies ──
+
+export type OneBotToolPermission = "everyone" | "admin";
+
+export interface OneBotToolPolicy {
+  registered: boolean;
+  permission: OneBotToolPermission;
+}
+
+export interface OneBotToolCatalogEntry {
+  name: string;
+  description?: string;
+  schema?: { description?: unknown; [key: string]: unknown };
+  category?: string;
+  scope?: string | string[] | boolean | null;
+  packet?: string | string[] | boolean | null;
+  caveat?: string | string[] | boolean | null;
+  registered?: boolean;
+  permission?: OneBotToolPermission;
+  default_registered?: boolean;
+  default_permission?: OneBotToolPermission;
+  effective?: Partial<OneBotToolPolicy>;
+  effective_policy?: Partial<OneBotToolPolicy>;
+}
+
+export interface OneBotToolPoliciesState {
+  catalog?: OneBotToolCatalogEntry[] | Record<string, OneBotToolCatalogEntry>;
+  tools?: OneBotToolCatalogEntry[] | Record<string, OneBotToolCatalogEntry>;
+  effective?: Record<string, Partial<OneBotToolPolicy>> | Array<Partial<OneBotToolPolicy> & { name: string }>;
+  effective_policies?: Record<string, Partial<OneBotToolPolicy>>;
+  policies?: Record<string, Partial<OneBotToolPolicy>>;
+  sparse_policies?: Record<string, Partial<OneBotToolPolicy>>;
+  restart_required?: boolean;
+}
+
+export const getOneBotToolPolicies = () =>
+  api.get<OneBotToolPoliciesState>("/onebot_tool_policies").then((r) => r.data);
+export const putOneBotToolPolicies = (policies: Record<string, OneBotToolPolicy>) =>
+  api.put<OneBotToolPoliciesState>("/onebot_tool_policies", { policies }).then((r) => r.data);
+export const resetOneBotToolPolicies = () =>
+  api.post<OneBotToolPoliciesState>("/onebot_tool_policies/reset").then((r) => r.data);
+
 // ── Hermes session-isolation mode (group_sessions_per_user) ──
 
 export interface HermesMode {

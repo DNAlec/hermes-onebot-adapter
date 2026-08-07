@@ -49,7 +49,7 @@ async def test_catalog_exposes_all_tools(automation_client):
     response = await client.get("/api/v1/tools", headers=_key_auth())
     assert response.status == 200
     names = {item["name"] for item in (await response.json())["tools"]}
-    assert len(names) == 41
+    assert len(names) == 89
     assert "onebot_upload_file" in names
 
 
@@ -167,6 +167,19 @@ async def test_upload_file_outside_root_is_rejected(automation_client, tmp_path)
         headers=_key_auth(),
     )
     assert response.status == 403
+
+
+async def test_group_notice_image_outside_root_is_rejected(automation_client, tmp_path):
+    client, _, api, _ = automation_client
+    path = tmp_path / "secret.png"
+    path.write_bytes(b"not-an-image")
+    response = await client.post(
+        "/api/v1/tools/onebot_send_group_notice",
+        json={"group_id": 42, "content": "notice", "image": str(path)},
+        headers=_key_auth(),
+    )
+    assert response.status == 403
+    api.call.assert_not_awaited()
 
 
 async def test_api_disabled_even_with_valid_key(automation_client):

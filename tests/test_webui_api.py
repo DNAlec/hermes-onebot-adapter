@@ -1,11 +1,13 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from conftest import make_session_token
 
+from onebot_adapter import hermes_config as hc
 from onebot_adapter.app import AdapterService
 from onebot_adapter.bot_blacklist import BotBlacklistStore
 from onebot_adapter.config import AdapterConfig, ConfigStore, config_path
@@ -32,6 +34,29 @@ async def client(tmp_path, monkeypatch):
     server = TestServer(app)
     await server.start_server()
     yield TestClient(server)
+    await server.close()
+
+
+@pytest.fixture
+async def tool_policy_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(tmp_path / "cfg.json"))
+    hermes_dir = tmp_path / "hermes"
+    hermes_dir.mkdir()
+    (hermes_dir / "config.yaml").write_text(
+        "provider: openai\nplugins:\n  entries:\n    onebot:\n      path: /plugin.py\n",
+        encoding="utf-8",
+    )
+    store = ConfigStore(AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", webui_token=_TOKEN,
+        webui_token_lifetime_hours=24, webui_token_epoch=_EPOCH,
+        hermes_install_dir=str(hermes_dir),
+    ))
+    service = AdapterService(store)
+    server = TestServer(service.build_webui_app())
+    await server.start_server()
+    web_client = TestClient(server)
+    yield web_client, hermes_dir
+    await web_client.close()
     await server.close()
 
 
@@ -215,6 +240,147 @@ async def test_groups_get_requires_auth(client):
 async def test_commands_requires_auth(client):
     resp = await client.get("/api/v1/commands")
     assert resp.status == 401
+
+
+async def test_tool_policy_endpoints_require_webui_auth(tool_policy_client):
+    client, _ = tool_policy_client
+    assert (await client.get("/api/v1/onebot_tool_policies")).status == 401
+    assert (await client.put("/api/v1/onebot_tool_policies", json={})).status == 401
+    assert (await client.post("/api/v1/onebot_tool_policies/reset")).status == 401
+
+
+async def test_tool_policy_get_returns_tuple_catalog_defaults(tool_policy_client):
+    client, _ = tool_policy_client
+    response = await client.get("/api/v1/onebot_tool_policies", headers=_auth())
+    assert response.status == 200
+    payload = await response.json()
+    assert payload["restart_required"] is True
+
+    normal = next(item for item in payload["catalog"] if item["name"] == "onebot_get_login_info")
+    admin = next(item for item in payload["catalog"] if item["name"] == "onebot_kick_group_member")
+    assert normal["default_registered"] is True
+    assert normal["default_permission"] == "everyone"
+    assert normal["category"] == "基础"
+    assert normal["schema"]["name"] == "onebot_get_login_info"
+    assert admin["default_permission"] == "admin"
+    assert payload["policies"][normal["name"]] == {"registered": True, "permission": "everyone"}
+    assert payload["policies"][admin["name"]] == {"registered": True, "permission": "admin"}
+    assert payload["sparse_policies"] == {}
+
+
+def test_tool_policy_catalog_supports_structured_specs(monkeypatch):
+    from onebot_adapter.hermes_plugin import onebot_tools
+    from onebot_adapter.webui import routes
+
+    spec = SimpleNamespace(
+        name="onebot_future",
+        schema={"name": "onebot_future", "description": "future"},
+        default_registered=False,
+        default_permission="admin",
+        category="write",
+        scope="group",
+        caveat="dangerous",
+    )
+    monkeypatch.setattr(onebot_tools, "_TOOLS", [spec])
+    assert routes._onebot_tool_catalog() == [{
+        "name": "onebot_future",
+        "schema": spec.schema,
+        "default_registered": False,
+        "default_permission": "admin",
+        "category": "write",
+        "scope": "group",
+        "packet": False,
+        "caveat": "dangerous",
+    }]
+
+
+async def test_tool_policy_put_writes_only_non_default_fields(tool_policy_client):
+    client, hermes_dir = tool_policy_client
+    response = await client.put(
+        "/api/v1/onebot_tool_policies",
+        json={"policies": {
+            "onebot_get_login_info": {"registered": False, "permission": "everyone"},
+            "onebot_kick_group_member": {"registered": True, "permission": "everyone"},
+            "onebot_get_group_list": {"registered": True, "permission": "everyone"},
+        }},
+        headers=_auth(),
+    )
+    assert response.status == 200
+    payload = await response.json()
+    assert payload["sparse_policies"] == {
+        "onebot_get_login_info": {"registered": False, "permission": "everyone"},
+        "onebot_kick_group_member": {"registered": True, "permission": "everyone"},
+    }
+    assert hc.read_onebot_tool_policies(str(hermes_dir)) == payload["sparse_policies"]
+    assert payload["policies"]["onebot_get_login_info"]["registered"] is False
+    assert payload["policies"]["onebot_kick_group_member"]["permission"] == "everyone"
+
+    config = hc.read_config(str(hermes_dir))
+    assert config["provider"] == "openai"
+    assert config["plugins"]["entries"]["onebot"]["path"] == "/plugin.py"
+
+
+@pytest.mark.parametrize(
+    "policies,error_text",
+    [
+        ({"unknown": {}}, "unknown tool"),
+        ({"onebot_get_login_info": {"enabled": False}}, "unknown policy fields"),
+        ({"onebot_get_login_info": {"registered": 1}}, "must be a boolean"),
+        ({"onebot_get_login_info": {"permission": False}}, "must be everyone or admin"),
+        ({"onebot_get_login_info": {"permission": "owner"}}, "must be everyone or admin"),
+        ({"onebot_get_login_info": False}, "must be an object"),
+    ],
+)
+async def test_tool_policy_put_rejects_invalid_policies(tool_policy_client, policies, error_text):
+    client, hermes_dir = tool_policy_client
+    response = await client.put(
+        "/api/v1/onebot_tool_policies", json={"policies": policies}, headers=_auth()
+    )
+    assert response.status == 400
+    assert error_text in (await response.json())["error"]
+    assert hc.read_onebot_tool_policies(str(hermes_dir)) == {}
+
+
+async def test_tool_policy_reset_removes_only_policy_subtree(tool_policy_client):
+    client, hermes_dir = tool_policy_client
+    hc.write_onebot_tool_policies(
+        str(hermes_dir), {"onebot_get_login_info": {"registered": False}}
+    )
+    response = await client.post("/api/v1/onebot_tool_policies/reset", headers=_auth())
+    assert response.status == 200
+    assert (await response.json())["sparse_policies"] == {}
+    config = hc.read_config(str(hermes_dir))
+    assert "tool_policies" not in config["plugins"]["entries"]["onebot"]
+    assert config["plugins"]["entries"]["onebot"]["path"] == "/plugin.py"
+    assert config["provider"] == "openai"
+
+
+async def test_tool_policy_put_does_not_report_disk_failure(tool_policy_client, monkeypatch):
+    client, _ = tool_policy_client
+
+    def fail_write(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hc, "write_onebot_tool_policies", fail_write)
+    response = await client.put(
+        "/api/v1/onebot_tool_policies",
+        json={"onebot_get_login_info": {"registered": False}},
+        headers=_auth(),
+    )
+    assert response.status == 500
+    assert "disk full" in (await response.json())["error"]
+
+
+async def test_tool_policy_reset_does_not_report_disk_failure(tool_policy_client, monkeypatch):
+    client, _ = tool_policy_client
+
+    def fail_reset(*args, **kwargs):
+        raise OSError("read only")
+
+    monkeypatch.setattr(hc, "reset_onebot_tool_policies", fail_reset)
+    response = await client.post("/api/v1/onebot_tool_policies/reset", headers=_auth())
+    assert response.status == 500
+    assert "read only" in (await response.json())["error"]
 
 
 async def test_send_requires_auth(client):

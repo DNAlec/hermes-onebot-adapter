@@ -110,6 +110,7 @@ class NormalizedEvent:
     reply_to_text: str | None = None
     timestamp: float = 0.0
     is_admin: bool = False
+    is_global_admin: bool = False
     chat_name: str = ""
     real_seq: str = ""
     media_items: list[MediaItem] = field(default_factory=list)
@@ -130,6 +131,7 @@ class NormalizedEvent:
             "reply_to_text": self.reply_to_text,
             "timestamp": self.timestamp,
             "is_admin": self.is_admin,
+            "is_global_admin": self.is_global_admin,
             "chat_name": self.chat_name,
             "real_seq": self.real_seq,
             "media_items": [m.to_dict() for m in self.media_items],
