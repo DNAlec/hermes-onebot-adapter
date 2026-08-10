@@ -13,9 +13,8 @@ from typing import Any
 
 import aiohttp
 
-from onebot_adapter._async_utils import log_task_exception as _log_task_exc
 from onebot_adapter.config import AdapterConfig
-from onebot_adapter.onebot.handler import OneBotHandler
+from onebot_adapter.onebot.handler import OneBotEventDispatcher, OneBotHandler
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.onebot.ws_api import WsApiTransport
@@ -57,7 +56,6 @@ class OneBotForwardClient:
         self._stop = asyncio.Event()
         self.connected = False
         self._connect_attempts = 0
-        self._text_tasks: set[asyncio.Task] = set()
         self._handler = OneBotHandler(
             label="forward",
             config=config,
@@ -71,6 +69,7 @@ class OneBotForwardClient:
             ws_api_transport=ws_api_transport,
             bot_blacklist_match_fn=bot_blacklist_match_fn,
         )
+        self._event_dispatcher = OneBotEventDispatcher(self._handler, label="forward")
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config. The reconnect loop picks up the new token/URL
@@ -98,11 +97,7 @@ class OneBotForwardClient:
                 logger.exception("OneBot forward WS: error during stop")
         self._task = None
         self.connected = False
-        for task in list(self._text_tasks):
-            task.cancel()
-        if self._text_tasks:
-            await asyncio.gather(*self._text_tasks, return_exceptions=True)
-        self._text_tasks.clear()
+        await self._event_dispatcher.stop()
         logger.info("OneBot forward WS client stopped")
 
     async def _run(self) -> None:
@@ -185,10 +180,7 @@ class OneBotForwardClient:
                 if self._stop.is_set():
                     break
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    task = asyncio.create_task(self._handler.handle_text(msg.data))
-                    self._text_tasks.add(task)
-                    task.add_done_callback(self._text_tasks.discard)
-                    task.add_done_callback(_log_task_exc)
+                    self._event_dispatcher.dispatch(msg.data)
                 elif msg.type in (
                     aiohttp.WSMsgType.ERROR,
                     aiohttp.WSMsgType.CLOSE,

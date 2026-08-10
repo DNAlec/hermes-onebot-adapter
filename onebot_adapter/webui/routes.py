@@ -1,6 +1,7 @@
 """WebUI backend HTTP API + static SPA hosting."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -644,7 +645,8 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
         from onebot_adapter import installer
 
         try:
-            result = installer.install(
+            result = await asyncio.to_thread(
+                installer.install,
                 str(target),
                 adapter_url=adapter_url,
                 adapter_token=adapter_token,
@@ -682,7 +684,7 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
         from onebot_adapter import installer
 
         try:
-            result = installer.uninstall(str(target))
+            result = await asyncio.to_thread(installer.uninstall, str(target))
             # Persist the resolved install dir so the config reflects where
             # the plugin was managed, matching _install_plugin's behavior.
             if install_dir and str(target) != store.config.hermes_install_dir:
@@ -895,11 +897,11 @@ def _get_hermes_tools(store: ConfigStore):
                 {"error": "hermes_install_dir 未配置或目录不存在,请先在插件管理页配置"},
                 status=400,
             )
-        available = list_available_toolsets(cfg.hermes_install_dir or None)
+        available = await asyncio.to_thread(list_available_toolsets, cfg.hermes_install_dir or None)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
         try:
-            current = read_current_enabled(cfg.hermes_install_dir or None)
+            current = await asyncio.to_thread(read_current_enabled, cfg.hermes_install_dir or None)
         except Exception as exc:
             logger.warning("read_current_enabled failed: %s", exc)
             current = []
@@ -947,7 +949,7 @@ def _put_hermes_tools(store: ConfigStore):
             )
 
         # 校验:每个 key 必须在 configurable ∪ plugin_keys ∪ mcp_names 中
-        available = list_available_toolsets(cfg.hermes_install_dir or None)
+        available = await asyncio.to_thread(list_available_toolsets, cfg.hermes_install_dir or None)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
         valid_keys: set[str] = set()
@@ -970,7 +972,7 @@ def _put_hermes_tools(store: ConfigStore):
             final = sorted(set(final) | {NO_MCP_SENTINEL})
 
         try:
-            write_platform_toolsets(cfg.hermes_install_dir or None, final)
+            await asyncio.to_thread(write_platform_toolsets, cfg.hermes_install_dir or None, final)
         except FileNotFoundError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
@@ -997,7 +999,7 @@ def _reset_hermes_tools(store: ConfigStore):
                 status=400,
             )
         try:
-            reset_platform_toolsets(cfg.hermes_install_dir or None)
+            await asyncio.to_thread(reset_platform_toolsets, cfg.hermes_install_dir or None)
         except Exception as exc:
             logger.exception("reset platform_toolsets failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1092,7 +1094,10 @@ def _get_onebot_tool_policies(store: ConfigStore):
             return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
         try:
             return aiohttp.web.json_response(
-                _tool_policy_response(_onebot_tool_catalog(), read_onebot_tool_policies(install_dir))
+                _tool_policy_response(
+                    _onebot_tool_catalog(),
+                    await asyncio.to_thread(read_onebot_tool_policies, install_dir),
+                )
             )
         except Exception as exc:
             logger.exception("read OneBot tool policies failed")
@@ -1159,7 +1164,7 @@ def _put_onebot_tool_policies(store: ConfigStore):
                 sparse[name] = {"registered": registered, "permission": permission}
 
         try:
-            write_onebot_tool_policies(install_dir, sparse)
+            await asyncio.to_thread(write_onebot_tool_policies, install_dir, sparse)
         except Exception as exc:
             logger.exception("write OneBot tool policies failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1181,7 +1186,7 @@ def _reset_onebot_tool_policies(store: ConfigStore):
             return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
         try:
             catalog = _onebot_tool_catalog()
-            reset_onebot_tool_policies(install_dir)
+            await asyncio.to_thread(reset_onebot_tool_policies, install_dir)
         except Exception as exc:
             logger.exception("reset OneBot tool policies failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1213,7 +1218,9 @@ def _get_hermes_mode(store: ConfigStore, state: dict[str, Any]):
         from onebot_adapter.hermes_config import read_group_sessions_per_user
 
         try:
-            file_value = read_group_sessions_per_user(cfg.hermes_install_dir or None)
+            file_value = await asyncio.to_thread(
+                read_group_sessions_per_user, cfg.hermes_install_dir or None
+            )
         except Exception as exc:
             return aiohttp.web.json_response(
                 {"error": f"读取 Hermes config.yaml 失败: {exc}"}, status=500,
@@ -1243,7 +1250,9 @@ def _put_hermes_mode(store: ConfigStore):
         from onebot_adapter.hermes_config import write_group_sessions_per_user
 
         try:
-            write_group_sessions_per_user(cfg.hermes_install_dir or None, value)
+            await asyncio.to_thread(
+                write_group_sessions_per_user, cfg.hermes_install_dir or None, value
+            )
         except FileNotFoundError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:

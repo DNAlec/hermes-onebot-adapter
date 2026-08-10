@@ -1,7 +1,6 @@
 """Reverse WebSocket server: OneBot dials out to this endpoint."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -10,9 +9,8 @@ import aiohttp
 import aiohttp.web
 
 from onebot_adapter._async_utils import bearer_token
-from onebot_adapter._async_utils import log_task_exception as _log_task_exc
 from onebot_adapter.config import AdapterConfig
-from onebot_adapter.onebot.handler import OneBotHandler
+from onebot_adapter.onebot.handler import OneBotEventDispatcher, OneBotHandler
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.onebot.ws_api import WsApiTransport
@@ -43,7 +41,6 @@ class OneBotReverseServer:
         self._on_disconnect = on_disconnect
         self._ws_api_transport = ws_api_transport
         self._active: set[aiohttp.web.WebSocketResponse] = set()
-        self._text_tasks: set[asyncio.Task] = set()
         self.connected = False
         self._handler = OneBotHandler(
             label="reverse",
@@ -58,6 +55,7 @@ class OneBotReverseServer:
             ws_api_transport=ws_api_transport,
             bot_blacklist_match_fn=bot_blacklist_match_fn,
         )
+        self._event_dispatcher = OneBotEventDispatcher(self._handler, label="reverse")
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the server (route stays bound)."""
@@ -84,10 +82,7 @@ class OneBotReverseServer:
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    task = asyncio.create_task(self._handler.handle_text(msg.data))
-                    self._text_tasks.add(task)
-                    task.add_done_callback(self._text_tasks.discard)
-                    task.add_done_callback(_log_task_exc)
+                    self._event_dispatcher.dispatch(msg.data)
                 elif msg.type in (
                     aiohttp.WSMsgType.ERROR,
                     aiohttp.WSMsgType.CLOSE,
@@ -113,8 +108,4 @@ class OneBotReverseServer:
             await ws.close()
         self._active.clear()
         self.connected = False
-        for task in list(self._text_tasks):
-            task.cancel()
-        if self._text_tasks:
-            await asyncio.gather(*self._text_tasks, return_exceptions=True)
-        self._text_tasks.clear()
+        await self._event_dispatcher.stop()
