@@ -182,7 +182,7 @@ def test_register_tools_calls_ctx():
     ctx = MagicMock()
     ctx.register_tool = MagicMock()
     register_tools(ctx)
-    assert ctx.register_tool.call_count == len(_TOOLS) - 4
+    assert ctx.register_tool.call_count == len(_TOOLS) - 12
     # Check first call
     first_call = ctx.register_tool.call_args_list[0]
     assert first_call.kwargs["toolset"] == TOOLSET
@@ -199,6 +199,14 @@ def test_default_hidden_tools_are_not_registered():
         "onebot_get_recent_contact",
         "onebot_set_friend_remark",
         "onebot_set_group_remark",
+        "onebot_create_flash_task",
+        "onebot_send_flash_msg",
+        "onebot_get_share_link",
+        "onebot_get_fileset_id",
+        "onebot_get_fileset_info",
+        "onebot_get_flash_file_list",
+        "onebot_get_flash_file_url",
+        "onebot_download_fileset",
     }.isdisjoint(names)
 
 
@@ -224,7 +232,7 @@ def test_register_tools_skips_hidden_policy(monkeypatch):
     register_tools(ctx)
     names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
     assert "onebot_get_login_info" not in names
-    assert len(names) == 95
+    assert len(names) == 87
 
 
 def test_descriptions_only_name_qq_group_permission_requirements():
@@ -322,7 +330,7 @@ async def test_group_admin_cannot_send_admin_flash_to_private_user(monkeypatch):
     monkeypatch.setattr(
         onebot_tools,
         "_load_tool_policies",
-        lambda: {"onebot_send_flash_msg": {"permission": "admin"}},
+        lambda: {"onebot_send_flash_msg": {"registered": True, "permission": "admin"}},
     )
     ctx = MagicMock()
     register_tools(ctx)

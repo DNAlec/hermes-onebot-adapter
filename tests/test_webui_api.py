@@ -276,6 +276,14 @@ async def test_tool_policy_get_returns_tuple_catalog_defaults(tool_policy_client
         "onebot_get_recent_contact",
         "onebot_set_friend_remark",
         "onebot_set_group_remark",
+        "onebot_create_flash_task",
+        "onebot_send_flash_msg",
+        "onebot_get_share_link",
+        "onebot_get_fileset_id",
+        "onebot_get_fileset_info",
+        "onebot_get_flash_file_list",
+        "onebot_get_flash_file_url",
+        "onebot_download_fileset",
     }
     assert payload["policies"]["onebot_mark_msg_as_read"]["registered"] is False
     assert default_admin_names == {

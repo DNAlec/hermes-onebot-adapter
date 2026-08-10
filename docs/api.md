@@ -352,6 +352,8 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 
 自动化 API 默认关闭，使用 WebUI 或 CLI 生成独立 API key 并启用后调用。该 key 拥有全部 OneBot 工具权限。
 
+> **闪传与文件集工具（仅 Windows）**：8 个闪传工具（`onebot_create_flash_task`、`onebot_send_flash_msg`、`onebot_get_share_link`、`onebot_get_fileset_id`、`onebot_get_fileset_info`、`onebot_get_flash_file_list`、`onebot_get_flash_file_url`、`onebot_download_fileset`）依赖 PC 版 QQ 端能力，只有 Windows 版客户端可用，在 Linux 等其他平台运行 NapCat 时调用会失败。它们对 Hermes 默认隐藏，但 HTTP 自动化 API 始终包含完整目录；本地文件路径需位于 `automation_upload_allowed_roots` 内。
+
 - `GET /api/v1/tools`：返回全部工具及参数 JSON Schema。
 - `POST /api/v1/tools/{tool_name}`：调用指定工具。
 **`GET /api/v1/openapi.json`**：返回无需鉴权即可读取的 OpenAPI 3.1 契约。
