@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cd frontend
-npm install
+npm ci
 npm run build
 
 # Copy to source tree

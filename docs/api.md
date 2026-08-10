@@ -207,9 +207,12 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "reaction_emoji_enabled": true,
   "reaction_emoji_id": "124",
   "reaction_emoji_id_queued": "123",
+  "file_upload_timeout": 600.0,
   "send_dedup_enabled": true,
   "send_dedup_ttl_seconds": 10.0,
   "event_queue_enabled": true,
+  "event_queue_clear_on_session_reset": true,
+  "event_queue_clean_command_enabled": true,
   "event_queue_max_per_chat": 50,
   "event_queue_idle_timeout": 300.0,
   "rate_limit_enabled": false,
@@ -267,7 +270,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 响应 `200`：
 ```json
 {
-  "hermes_dir": "/home/user/.hermes/hermes-agent",
+  "hermes_dir": "/home/user/.hermes",
   "exists": true
 }
 ```
@@ -288,7 +291,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 ```json
 {
   "adapter_version": "x.y.z",
-  "hermes_dir": "/home/user/.hermes/hermes-agent",
+  "hermes_dir": "/home/user/.hermes",
   "plugin_dest": "/home/user/.hermes/plugins/onebot/",
   "source": "/path/to/onebot_adapter/hermes_plugin",
   "copied": ["__init__.py", "adapter.py", "markdown.py", "onebot_tools.py", "plugin.yaml"],
@@ -329,7 +332,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 ```json
 {
   "adapter_version": "x.y.z",
-  "hermes_dir": "/home/user/.hermes/hermes-agent",
+  "hermes_dir": "/home/user/.hermes",
   "plugin_dest": "/home/user/.hermes/plugins/onebot/",
   "removed": true,
   "env_cleaned": true,
@@ -348,6 +351,8 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 ### 7. 自动化工具 API
 
 自动化 API 默认关闭，使用 WebUI 或 CLI 生成独立 API key 并启用后调用。该 key 拥有全部 OneBot 工具权限。
+
+> **闪传与文件集工具（仅 Windows）**：8 个闪传工具（`onebot_create_flash_task`、`onebot_send_flash_msg`、`onebot_get_share_link`、`onebot_get_fileset_id`、`onebot_get_fileset_info`、`onebot_get_flash_file_list`、`onebot_get_flash_file_url`、`onebot_download_fileset`）依赖 PC 版 QQ 端能力，只有 Windows 版客户端可用，在 Linux 等其他平台运行 NapCat 时调用会失败。它们对 Hermes 默认隐藏，但 HTTP 自动化 API 始终包含完整目录；本地文件路径需位于 `automation_upload_allowed_roots` 内。
 
 - `GET /api/v1/tools`：返回全部工具及参数 JSON Schema。
 - `POST /api/v1/tools/{tool_name}`：调用指定工具。
@@ -374,11 +379,11 @@ Authorization: Bearer hoa_xxx
 - `503 onebot_unavailable`：OneBot WS 尚未连接
 - `500 tool_call_failed`：工具处理器或 OneBot action 调用失败；详细异常仅记录在服务端日志
 
-`onebot_upload_file`、`onebot_set_avatar` 以及消息段/转发节点中的 `file` 引用都会经过相同安全检查。本地路径必须是允许根目录内的绝对普通文件；会解析 `..` 和符号链接后再判断。远程引用只接受 `http`/`https`。
+`onebot_upload_file`、`onebot_set_avatar`、群头像/相册上传、群公告图片以及消息段/转发节点中的文件引用都会经过相同安全检查。本地路径必须是允许根目录内的绝对普通文件；会解析 `..` 和符号链接后再判断。远程引用只接受 `http`/`https`。
 
 HTTP 工具调用没有 Hermes 当前聊天上下文，因此 `onebot_send_message`、`onebot_send_forward_msg` 和 `onebot_upload_file` 必须显式提供目标：`message_type=group` 时只传 `group_id`，`message_type=private` 时只传 `user_id`。目标缺失、类型冲突或同时传入两个 ID 均返回 `400 validation_error`。`onebot_mark_msg_as_read` 同样要求在正整数 `real_seq` 与 `all=true` 中二选一。
 
-部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文以查询 SeqMap；HTTP 调用没有当前聊天上下文，无法命中带 scope 的映射时会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
+部分消息工具接受 `real_seq`。Hermes 内部调用会自动携带当前聊天上下文，以便适配器按群号或用户 ID 查询 SeqMap；HTTP 调用不继承该上下文，schema 提供 `group_id`/`user_id` 时应显式传入以查询映射，否则会按兼容规则把 `real_seq` 直接作为 `message_id` 传给 OneBot。自动化脚本若需要稳定定位历史消息，应优先使用历史接口返回的实际 `message_id`。
 
 例如发送群消息：
 
@@ -436,7 +441,7 @@ Content-Type: application/json
       "enabled": true,
       "require_mention": null,
       "mention_first_only": null,
-      "trigger_keywords": [],
+      "trigger_keywords": null,
       "keyword_first_only": null,
       "strip_first_mention": null,
       "custom_prompt": "",
@@ -635,6 +640,53 @@ Content-Type: application/json
 {"ok": true}
 ```
 
+#### OneBot 逐工具策略
+
+以下接口使用 WebUI session，只管理 Hermes 插件的工具注册和权限，不影响 automation key 对 `/api/v1/tools/*` 的全量访问。
+
+**`GET /api/v1/onebot_tool_policies`**
+
+返回完整工具目录、默认策略、当前生效策略和稀疏覆盖：
+
+```json
+{
+  "catalog": [
+    {
+      "name": "onebot_set_group_portrait",
+      "schema": {"name": "onebot_set_group_portrait"},
+      "default_registered": true,
+      "default_permission": "admin",
+      "category": "群聊",
+      "scope": "group",
+      "packet": false,
+      "caveat": null
+    }
+  ],
+  "effective_policies": {
+    "onebot_set_group_portrait": {"registered": true, "permission": "admin"}
+  },
+  "sparse_policies": {},
+  "restart_required": true
+}
+```
+
+**`PUT /api/v1/onebot_tool_policies`**
+
+```json
+{
+  "policies": {
+    "onebot_get_group_list": {"registered": true, "permission": "everyone"},
+    "onebot_set_group_portrait": {"registered": false, "permission": "admin"}
+  }
+}
+```
+
+`registered=false` 表示 Hermes 下次启动时不注册该工具；`permission` 只接受 `everyone` 或 `admin`。配置写入 `<hermes>/config.yaml` 的 `plugins.entries.onebot.tool_policies`，仅保存偏离默认值的条目。群管理员只能对当前群调用群级 `admin` 工具；跨群及账号级工具要求全局管理员。
+
+**`POST /api/v1/onebot_tool_policies/reset`**
+
+删除 OneBot 工具策略覆盖并恢复全部默认值。注册可见性变更均需重启 Hermes。
+
 ---
 
 ### 12. Hermes 会话隔离模式
@@ -745,13 +797,13 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 
 **`GET /api/v1/update_check`**
 
-查询 GitHub 最新 release tag 并与当前适配器版本比较。结果在服务端缓存 1 小时（错误结果缓存 5 分钟）。
+查询 GitHub 最新版本 tag 并与当前适配器版本比较。结果在服务端缓存 1 小时（错误结果缓存 5 分钟）。
 
 响应 `200`（无更新）：
 ```json
 {
-  "current_version": "1.1.0b",
-  "latest_version": "1.1.0b",
+  "current_version": "1.4.0",
+  "latest_version": "1.4.0",
   "has_update": false,
   "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md"
 }
@@ -760,8 +812,8 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 响应 `200`（有更新）：
 ```json
 {
-  "current_version": "1.0.0b3",
-  "latest_version": "1.1.0b",
+  "current_version": "1.3.0",
+  "latest_version": "1.4.0",
   "has_update": true,
   "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md"
 }
@@ -770,8 +822,8 @@ OneBot 平台的 `group_sessions_per_user`（Hermes 顶层配置）决定群聊�
 响应 `200`（请求失败，含错误字段）：
 ```json
 {
-  "current_version": "1.1.0b",
-  "latest_version": "1.1.0b",
+  "current_version": "1.4.0",
+  "latest_version": "1.4.0",
   "has_update": false,
   "changelog_url": "https://github.com/DNAlec/hermes-onebot-adapter/blob/main/CHANGELOG.md",
   "error": "GitHub API returned 403"
@@ -1007,11 +1059,14 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `reaction_emoji_enabled` | bool | `true` | 消息送达 Hermes 后在原消息贴表情回应；群配置可单独覆盖 |
 | `reaction_emoji_id` | string | `"124"` | 贴表情回应使用的表情 ID（QQ 表情编号） |
 | `reaction_emoji_id_queued` | string | `"123"` | 消息排队时贴的表情 ID（空=不贴表情） |
+| `file_upload_timeout` | float | `600.0` | 群聊、私聊和闪传上传均按此秒数等待（范围 30–600）；群上传超时后短轮询群历史，闪传超时无法确认结果，均返回不可自动重试的“结果未知” |
 | `send_dedup_enabled` | bool | `true` | 发送去重开关（防 Gateway send_text 超时重试导致重复发送） |
 | `send_dedup_ttl_seconds` | float | `10.0` | 发送去重 TTL（秒） |
 | `event_queue_enabled` | bool | `true` | 群聊排队总开关：Hermes 不隔离群成员时是否排队 |
 | `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限拒绝入队（详见[群聊消息排队](#群聊消息排队)） |
 | `event_queue_idle_timeout` | float | `300.0` | 群聊排队：plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy 状态 |
+| `event_queue_clear_on_session_reset` | bool | `true` | 使用 `/new`、`/reset` 时清空当前群待处理队列 |
+| `event_queue_clean_command_enabled` | bool | `true` | 启用适配器本地 `/clean` 命令；清空当前群待处理队列且不转发 Hermes |
 | `rate_limit_enabled` | bool | `false` | 入站消息限流总开关；全局/群聊/个人三维度同时检查，管理员豁免 |
 | `global_rate_limit_algorithm` | string | `"sliding_window"` | 全局限流算法：`sliding_window` / `token_bucket` |
 | `global_rate_limit_messages` | int | `0` | 全局限流消息数；`0`=禁用该维度 |
@@ -1070,7 +1125,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 ### 触发条件
 
 - Hermes 端 `group_sessions_per_user=false`（插件读 `self.config.extra.get("group_sessions_per_user", True)` 判定，与 `BasePlatformAdapter.handle_message` 完全一致）
-- 适配器端 `event_queue_enabled=true`（WebUI 连接管理页可切换）
+- 适配器端 `event_queue_enabled=true`（WebUI 聊天配置页可切换）
 
 ### 排队规则
 
@@ -1081,7 +1136,9 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
 | 群 busy | 入队等待（含 busy 用户自身）；出队时连续同用户消息合并为一条 |
-| `/` 开头的消息 | **始终直接转发**（绕过排队） |
+| `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
+| `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
+| 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
 ### idle 信号
 

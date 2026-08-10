@@ -11,6 +11,7 @@ const router = createRouter({
     { path: "/chat", name: "chat", component: () => import("../views/Chat.vue") },
     { path: "/commands", name: "commands", component: () => import("../views/Commands.vue") },
     { path: "/tools", name: "tools", component: () => import("../views/Tools.vue") },
+    { path: "/onebot-tools", name: "onebot-tools", component: () => import("../views/OneBotTools.vue") },
     { path: "/advanced", name: "advanced", component: () => import("../views/Advanced.vue") },
     { path: "/logs", name: "logs", component: () => import("../views/Logs.vue") },
   ],

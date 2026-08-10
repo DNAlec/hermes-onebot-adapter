@@ -146,7 +146,10 @@ class AdapterService:
         cfg = self.store.config
         assert self._session is not None
         self._ws_api_transport = WsApiTransport()
-        self._api = OneBotApi(ws_transport=self._ws_api_transport)
+        self._api = OneBotApi(
+            ws_transport=self._ws_api_transport,
+            file_upload_timeout=cfg.file_upload_timeout,
+        )
         self._state["api"] = self._api
         self._state["local_api_call"] = self._handle_local_api_call
         self._name_resolver = NameResolver(self._api)
@@ -388,7 +391,7 @@ class AdapterService:
                 await self._maybe_react_queued(event)
             elif outcome == "broadcast":
                 await self._maybe_react_delivered(event)
-            # "dropped": neither queued nor delivered — do not react.
+            # "handled" / "dropped": not delivered to Hermes, so do not react.
 
     async def _maybe_react_delivered(self, event) -> None:
         """消息送达 Hermes(广播或出队)后在原消息上贴表情回应(可配置)。
@@ -608,6 +611,8 @@ class AdapterService:
             self._onebot_reverse.update_config(new)
         if self._onebot_forward:
             self._onebot_forward.update_config(new)
+        if self._api:
+            self._api.update_file_upload_timeout(new.file_upload_timeout)
         if self._seq_map and old.seq_map_size != new.seq_map_size:
             self._seq_map.update_maxlen(new.seq_map_size)
             logger.info("SeqMap size changed: %d -> %d", old.seq_map_size, new.seq_map_size)

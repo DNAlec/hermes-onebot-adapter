@@ -48,9 +48,17 @@ async def test_catalog_exposes_all_tools(automation_client):
     client, _, _, _ = automation_client
     response = await client.get("/api/v1/tools", headers=_key_auth())
     assert response.status == 200
-    names = {item["name"] for item in (await response.json())["tools"]}
-    assert len(names) == 41
+    tools = {item["name"]: item for item in (await response.json())["tools"]}
+    names = set(tools)
+    assert len(names) == 100
     assert "onebot_upload_file" in names
+    honor_type = tools["onebot_get_group_honor_info"]["parameters"]["properties"]["type"]
+    assert honor_type["anyOf"][0]["enum"] == [
+        "all", "talkative", "performer", "legend", "strong_newbie", "emotion",
+    ]
+    add_type = tools["onebot_set_group_add_option"]["parameters"]["properties"]["add_type"]
+    assert add_type["minimum"] == 0
+    assert add_type["maximum"] == 5
 
 
 async def test_upload_file_from_allowed_root(automation_client):
@@ -76,6 +84,12 @@ async def test_upload_file_from_allowed_root(automation_client):
         ("onebot_send_forward_msg", {"message_type": "private", "messages": []}),
         ("onebot_mark_msg_as_read", {}),
         ("onebot_mark_msg_as_read", {"real_seq": 123, "all": True}),
+        ("onebot_send_flash_msg", {"fileset_id": "f1"}),
+        ("onebot_send_flash_msg", {"fileset_id": "f1", "group_id": 42, "user_id": 7}),
+        ("onebot_get_flash_file_url", {"fileset_id": "f1"}),
+        ("onebot_get_flash_file_url", {"fileset_id": "f1", "file_index": -1}),
+        ("onebot_get_group_honor_info", {"group_id": 42, "type": "current_talkative"}),
+        ("onebot_set_group_add_option", {"group_id": 42, "add_type": 4, "group_question": "q"}),
     ],
 )
 async def test_dependent_tool_parameters_are_validated(automation_client, tool_name, payload):
@@ -167,6 +181,91 @@ async def test_upload_file_outside_root_is_rejected(automation_client, tmp_path)
         headers=_key_auth(),
     )
     assert response.status == 403
+
+
+async def test_group_notice_image_outside_root_is_rejected(automation_client, tmp_path):
+    client, _, api, _ = automation_client
+    path = tmp_path / "secret.png"
+    path.write_bytes(b"not-an-image")
+    response = await client.post(
+        "/api/v1/tools/onebot_send_group_notice",
+        json={"group_id": 42, "content": "notice", "image": str(path)},
+        headers=_key_auth(),
+    )
+    assert response.status == 403
+    api.call.assert_not_awaited()
+
+
+async def test_flash_task_files_outside_root_is_rejected(automation_client, tmp_path):
+    client, _, api, allowed = automation_client
+    inside = allowed / "ok.zip"
+    inside.write_bytes(b"payload")
+    outside = tmp_path / "secret.zip"
+    outside.write_bytes(b"secret")
+    response = await client.post(
+        "/api/v1/tools/onebot_create_flash_task",
+        json={"files": [str(inside), str(outside)], "name": "set"},
+        headers=_key_auth(),
+    )
+    assert response.status == 403
+    api.call.assert_not_awaited()
+
+    ok = await client.post(
+        "/api/v1/tools/onebot_create_flash_task",
+        json={"files": str(inside), "name": "set"},
+        headers=_key_auth(),
+    )
+    assert ok.status == 200
+    assert api.call.await_args.args[0] == "create_flash_task"
+
+
+async def test_flash_task_allows_directory_inside_root(automation_client):
+    client, _, api, allowed = automation_client
+    directory = allowed / "folder"
+    directory.mkdir()
+    (directory / "item.txt").write_text("payload")
+
+    response = await client.post(
+        "/api/v1/tools/onebot_create_flash_task",
+        json={"files": str(directory)},
+        headers=_key_auth(),
+    )
+
+    assert response.status == 200
+    assert api.call.await_args.args == ("create_flash_task", {"files": str(directory), "name": ""})
+
+
+async def test_flash_task_thumb_outside_root_is_rejected(automation_client, tmp_path):
+    client, _, api, allowed = automation_client
+    inside = allowed / "ok.zip"
+    inside.write_bytes(b"payload")
+    outside_thumb = tmp_path / "secret.png"
+    outside_thumb.write_bytes(b"secret")
+
+    response = await client.post(
+        "/api/v1/tools/onebot_create_flash_task",
+        json={"files": str(inside), "thumb_path": str(outside_thumb)},
+        headers=_key_auth(),
+    )
+
+    assert response.status == 403
+    api.call.assert_not_awaited()
+
+
+async def test_flash_inner_failure_is_not_reported_as_success(automation_client):
+    client, _, api, _ = automation_client
+    api.call.return_value = {
+        "data": {"result": -1, "errMsg": "未找到对应文件", "transferUrl": ""},
+    }
+
+    response = await client.post(
+        "/api/v1/tools/onebot_get_flash_file_url",
+        json={"fileset_id": "f1", "file_name": "missing.zip"},
+        headers=_key_auth(),
+    )
+
+    assert response.status == 500
+    assert (await response.json())["error"]["code"] == "tool_call_failed"
 
 
 async def test_api_disabled_even_with_valid_key(automation_client):

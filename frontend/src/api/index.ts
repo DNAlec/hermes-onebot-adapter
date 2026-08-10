@@ -146,6 +146,7 @@ export interface Config {
   reaction_emoji_enabled: boolean;
   reaction_emoji_id: string;
   reaction_emoji_id_queued: string;
+  file_upload_timeout: number;
   // ── 发送去重 ──
   send_dedup_enabled: boolean;
   send_dedup_ttl_seconds: number;
@@ -153,6 +154,8 @@ export interface Config {
   event_queue_enabled: boolean;
   event_queue_max_per_chat: number;
   event_queue_idle_timeout: number;
+  event_queue_clear_on_session_reset: boolean;
+  event_queue_clean_command_enabled: boolean;
   // ── 入站消息限流 ──
   rate_limit_enabled: boolean;
   global_rate_limit_algorithm: string;
@@ -307,6 +310,48 @@ export const putHermesTools = (payload: {
 }) => api.put<{ ok: boolean; saved: string[] }>("/hermes_tools", payload).then((r) => r.data);
 export const resetHermesTools = () =>
   api.post<{ ok: boolean }>("/hermes_tools/reset").then((r) => r.data);
+
+// ── OneBot tool registration and Hermes permission policies ──
+
+export type OneBotToolPermission = "everyone" | "admin";
+
+export interface OneBotToolPolicy {
+  registered: boolean;
+  permission: OneBotToolPermission;
+}
+
+export interface OneBotToolCatalogEntry {
+  name: string;
+  description?: string;
+  schema?: { description?: unknown; [key: string]: unknown };
+  category?: string;
+  scope?: string | string[] | boolean | null;
+  packet?: string | string[] | boolean | null;
+  caveat?: string | string[] | boolean | null;
+  registered?: boolean;
+  permission?: OneBotToolPermission;
+  default_registered?: boolean;
+  default_permission?: OneBotToolPermission;
+  effective?: Partial<OneBotToolPolicy>;
+  effective_policy?: Partial<OneBotToolPolicy>;
+}
+
+export interface OneBotToolPoliciesState {
+  catalog?: OneBotToolCatalogEntry[] | Record<string, OneBotToolCatalogEntry>;
+  tools?: OneBotToolCatalogEntry[] | Record<string, OneBotToolCatalogEntry>;
+  effective?: Record<string, Partial<OneBotToolPolicy>> | Array<Partial<OneBotToolPolicy> & { name: string }>;
+  effective_policies?: Record<string, Partial<OneBotToolPolicy>>;
+  policies?: Record<string, Partial<OneBotToolPolicy>>;
+  sparse_policies?: Record<string, Partial<OneBotToolPolicy>>;
+  restart_required?: boolean;
+}
+
+export const getOneBotToolPolicies = () =>
+  api.get<OneBotToolPoliciesState>("/onebot_tool_policies").then((r) => r.data);
+export const putOneBotToolPolicies = (policies: Record<string, OneBotToolPolicy>) =>
+  api.put<OneBotToolPoliciesState>("/onebot_tool_policies", { policies }).then((r) => r.data);
+export const resetOneBotToolPolicies = () =>
+  api.post<OneBotToolPoliciesState>("/onebot_tool_policies/reset").then((r) => r.data);
 
 // ── Hermes session-isolation mode (group_sessions_per_user) ──
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.relay.hermes_ws import HermesRelayServer
@@ -108,6 +110,32 @@ def test_resolve_seq_params_set_msg_emoji_like():
     assert out["message_id"] == 5000
     assert out["emoji_id"] == "76"
     assert out["group_id"] == "42"
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "cancel_group_todo",
+        "complete_group_todo",
+        "delete_essence_msg",
+        "fetch_emoji_like",
+        "get_emoji_likes",
+        "set_essence_msg",
+        "set_group_todo",
+    ],
+)
+def test_resolve_seq_params_for_new_message_tools(action):
+    sm = SeqMap(maxlen=10)
+    sm.add("42", 100, "5000")
+    relay = _make_relay(sm)
+    params = {"real_seq": 100, "group_id": "42", "extra": "kept"}
+
+    out = relay._resolve_seq_params(action, params)
+
+    assert out["message_id"] == 5000
+    assert out["group_id"] == "42"
+    assert out["extra"] == "kept"
+    assert "real_seq" not in out
 
 
 def test_resolve_seq_params_forward_group_single_msg():

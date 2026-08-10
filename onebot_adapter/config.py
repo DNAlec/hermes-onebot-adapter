@@ -81,8 +81,8 @@ DEFAULT_CHANNEL_PROMPT = (
     "- 群聊前缀 # 后的数字是群内序号(real_seq),不是全局消息 ID(message_id)\n"
     "- onebot_get_msg / onebot_recall_message / onebot_set_msg_emoji_like 等工具的 real_seq 参数填此群内序号\n"
     "- onebot_get_group_msg_history 的 message_seq 参数例外:填消息 ID(message_id),不是群内序号\n"
-    "- 适配器内部维护 real_seq→message_id 映射,自动转换;映射过期时工具返回错误,"
-    "需用 onebot_get_group_msg_history 重新获取\n\n"
+    "- 适配器优先通过 SeqMap 将 real_seq 转为 message_id;未命中时按兼容规则将 real_seq 作为 message_id 透传。"
+    "如需稳定定位历史消息,可用 onebot_get_group_msg_history 获取实际 message_id\n\n"
     "# 出站消息格式(你输出时)\n"
     "- 直接输出文本只能发纯文本,**无法 @ 人**;要 @ 某人必须用 onebot_send_message 工具,"
     "message 参数传 OneBot 11 消息段数组,如 "
@@ -210,6 +210,7 @@ class AdapterConfig:
     reaction_emoji_enabled: bool = True
     reaction_emoji_id: str = "124"
     reaction_emoji_id_queued: str = "123"      # 消息排队时贴的表情ID,空=不贴表情
+    file_upload_timeout: float = 600.0          # 群/私聊/闪传文件上传等待 NapCat 响应的秒数
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
     send_dedup_ttl_seconds: float = 10.0
@@ -218,6 +219,8 @@ class AdapterConfig:
     event_queue_enabled: bool = True            # 总开关:Hermes 不隔离群成员时是否排队
     event_queue_max_per_chat: int = 50          # 单群排队上限,超限拒绝入队
     event_queue_idle_timeout: float = 300.0     # 秒,plugin 崩溃/idle 帧丢失时强制清空 busy
+    event_queue_clear_on_session_reset: bool = True  # /new、/reset 时清空当前群待处理队列
+    event_queue_clean_command_enabled: bool = True   # 适配器本地 /clean 清队列命令
 
     # ── 入站消息限流（限额 0=禁用该维度）──
     rate_limit_enabled: bool = False
@@ -281,12 +284,21 @@ class AdapterConfig:
             errors.append("hermes_ws_token must not be empty")
         if self.seq_map_size <= 0:
             errors.append("seq_map_size must be positive")
+        if (
+            not isinstance(self.file_upload_timeout, (int, float))
+            or isinstance(self.file_upload_timeout, bool)
+            or not 30 <= self.file_upload_timeout <= 600
+        ):
+            errors.append("file_upload_timeout must be a number in [30, 600]")
         if self.send_dedup_ttl_seconds <= 0:
             errors.append("send_dedup_ttl_seconds must be positive")
         if self.event_queue_max_per_chat < 1:
             errors.append("event_queue_max_per_chat must be at least 1")
         if self.event_queue_idle_timeout <= 0:
             errors.append("event_queue_idle_timeout must be positive")
+        for field_name in ("event_queue_clear_on_session_reset", "event_queue_clean_command_enabled"):
+            if not isinstance(getattr(self, field_name), bool):
+                errors.append(f"{field_name} must be bool")
         if not isinstance(self.rate_limit_enabled, bool):
             errors.append("rate_limit_enabled must be bool")
         for scope in ("global", "group", "user"):
@@ -668,10 +680,14 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
         "reaction_emoji_enabled": "消息送达 Hermes 后在原消息贴表情回应;群配置可单独覆盖",
         "reaction_emoji_id": "贴表情回应使用的表情ID(默认 124),QQ 表情编号",
+        "file_upload_timeout": "群/私聊/闪传文件上传等待 NapCat 响应的超时秒数(30-600,默认600);"
+                               "群上传超时后仍会查询群历史保守确认结果",
         "event_queue_enabled": "群聊排队总开关:Hermes 不隔离群成员(group_sessions_per_user=false)时,"
                               "是否对群消息排队串行处理",
         "event_queue_max_per_chat": "群聊排队:单群排队消息上限(默认50),超限拒绝入队",
         "event_queue_idle_timeout": "群聊排队:plugin 无 idle 信号超时(秒,默认300),超时强制清空 busy 状态",
+        "event_queue_clear_on_session_reset": "群聊排队:/new、/reset 时清空当前群待处理队列(默认开启)",
+        "event_queue_clean_command_enabled": "启用适配器本地 /clean 命令,清空当前群待处理队列且不转发 Hermes",
         "rate_limit_enabled": "入站消息限流总开关;全局/群聊/个人三个维度同时检查,管理员豁免",
         "global_rate_limit_algorithm": "全局限流算法:sliding_window(滑动窗口)|token_bucket(令牌桶)",
         "global_rate_limit_messages": "全局限流消息数;0=禁用该维度",

@@ -110,6 +110,7 @@ class NormalizedEvent:
     reply_to_text: str | None = None
     timestamp: float = 0.0
     is_admin: bool = False
+    is_global_admin: bool = False
     chat_name: str = ""
     real_seq: str = ""
     media_items: list[MediaItem] = field(default_factory=list)
@@ -130,6 +131,7 @@ class NormalizedEvent:
             "reply_to_text": self.reply_to_text,
             "timestamp": self.timestamp,
             "is_admin": self.is_admin,
+            "is_global_admin": self.is_global_admin,
             "chat_name": self.chat_name,
             "real_seq": self.real_seq,
             "media_items": [m.to_dict() for m in self.media_items],
@@ -167,6 +169,7 @@ def ready_message(
     adapter_version: str,
     self_id: str = "",
     media_delivery_mode: str = "passthrough",
+    file_upload_timeout: float = 600.0,
 ) -> dict[str, Any]:
     return envelope(
         "ready",
@@ -174,6 +177,7 @@ def ready_message(
         adapter_version=adapter_version,
         self_id=self_id,
         media_delivery_mode=media_delivery_mode,
+        file_upload_timeout=file_upload_timeout,
     )
 
 
@@ -192,9 +196,14 @@ def api_call_message(action: str, req_id: str, params: dict[str, Any]) -> dict[s
 
 
 def result_message(
-    req_id: str, success: bool, message_id: str | None = None, error: str | None = None, data: Any = None
+    req_id: str,
+    success: bool,
+    message_id: str | None = None,
+    error: str | None = None,
+    data: Any = None,
+    retryable: bool | None = None,
 ) -> dict[str, Any]:
-    return envelope(
+    result = envelope(
         "result",
         req_id=req_id,
         success=success,
@@ -202,6 +211,9 @@ def result_message(
         error=error,
         data=data,
     )
+    if retryable is not None:
+        result["retryable"] = retryable
+    return result
 
 
 def error_message(code: str, message: str) -> dict[str, Any]:

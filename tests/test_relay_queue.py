@@ -10,7 +10,7 @@
 - 连续同用户消息出队时合并为一条
 - /命令绕过排队
 - idle 帧 dequeue + dispatch
-- 队列超限丢弃最旧
+- 队列超限拒绝新消息
 - 看门狗超时清空
 - plugin 断开清空 busy
 - ring buffer replay 走排队
@@ -394,17 +394,75 @@ async def test_stop_cleanup_noop_if_idle_arrives_first():
     assert relay._broadcast_event.await_count == 3  # still 3, no extra dequeue
 
 
-async def test_new_and_reset_commands_also_trigger_cleanup():
-    """/new 和 /reset 也触发 delayed cleanup。"""
+async def test_new_and_reset_commands_clear_pending_queue_by_default():
+    """/new 和 /reset 默认丢弃当前群待处理消息,命令本身仍转发 Hermes。"""
     for cmd in ("/new", "/reset"):
-        relay, _, _ = _make_relay(event_queue_idle_timeout=0.01)
+        relay, _, _ = _make_relay()
+        relay._STOP_IDLE_DELAY = 0.01
         relay._broadcast_event = AsyncMock()
-        await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
-        await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
-        await relay._enqueue_or_broadcast(_group_event(cmd, gid="42", uid="100", mid="3"))
-        await asyncio.sleep(3.5)
+        await relay.push_event(_group_event("msg1", gid="42", uid="100", mid="1"))
+        await relay.push_event(_group_event("msg2", gid="42", uid="200", mid="2"))
+        assert len(relay._queues["42"]) == 1
+        assert len(relay._ring_buffer) == 2
+
+        result = await relay.push_event(_group_event(cmd, gid="42", uid="100", mid="3"))
+
+        assert result == "broadcast"
+        assert relay._broadcast_event.await_count == 2
+        assert "42" not in relay._queues
+        assert [entry[1].text for entry in relay._ring_buffer] == ["msg1"]
+        await asyncio.sleep(0.02)
         await asyncio.sleep(0)
-        assert relay._broadcast_event.await_count >= 3, f"{cmd} did not trigger dequeue"
+        assert relay._broadcast_event.await_count == 2
+
+
+async def test_session_reset_queue_clear_can_be_disabled():
+    relay, _, _ = _make_relay(event_queue_clear_on_session_reset=False)
+    relay._STOP_IDLE_DELAY = 0.01
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+
+    await relay._enqueue_or_broadcast(_group_event("/new", gid="42", uid="100", mid="3"))
+
+    assert len(relay._queues["42"]) == 1
+    await asyncio.sleep(0.02)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 3
+    assert relay._broadcast_event.call_args_list[-1][0][0].text == "msg2"
+
+
+async def test_clean_command_clears_only_current_group_without_forwarding():
+    relay, mock_api, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    mock_api.send_group_msg = AsyncMock(return_value={"message_id": 99})
+    await relay.push_event(_group_event("active-42", gid="42", uid="100", mid="1"))
+    await relay.push_event(_group_event("queued-42", gid="42", uid="200", mid="2"))
+    await relay.push_event(_group_event("active-43", gid="43", uid="100", mid="3"))
+    await relay.push_event(_group_event("queued-43", gid="43", uid="200", mid="4"))
+
+    result = await relay.push_event(_group_event("/clean", gid="42", uid="100", mid="5"))
+
+    assert result == "handled"
+    assert relay._broadcast_event.await_count == 2
+    assert "42" not in relay._queues
+    assert [event.text for event in relay._queues["43"]] == ["queued-43"]
+    assert [entry[1].text for entry in relay._ring_buffer] == ["active-42", "active-43", "queued-43"]
+    mock_api.send_group_msg.assert_awaited_once()
+
+
+async def test_clean_command_can_be_disabled_and_forwarded_to_hermes():
+    relay, mock_api, _ = _make_relay(event_queue_clean_command_enabled=False)
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("active", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("queued", gid="42", uid="200", mid="2"))
+
+    result = await relay._enqueue_or_broadcast(_group_event("/clean", gid="42", uid="100", mid="3"))
+
+    assert result == "broadcast"
+    assert relay._broadcast_event.await_count == 2
+    assert len(relay._queues["42"]) == 1
+    mock_api.send_group_msg.assert_not_called()
 
 
 # ── 看门狗 ──────────────────────────────────────────────────────────────

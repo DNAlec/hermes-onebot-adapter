@@ -595,6 +595,8 @@ def test_relay_store_commands():
          "aliases": [], "args_hint": ""},
     ]
     relay._store_commands(commands)
+    assert relay.is_known_command("clean")
+    assert relay.canonical_command_name("clean") == "clean"
     assert relay.is_known_command("help")
     assert relay.is_known_command("kick")
     assert relay.is_known_command("my-tool")
@@ -642,3 +644,16 @@ def test_relay_store_empty_commands_clears_previous():
     # Push empty snapshot
     relay._store_commands([])
     assert not relay.is_known_command("help")
+    assert relay.is_known_command("clean")
+
+
+def test_relay_clean_command_not_known_when_disabled():
+    from onebot_adapter.relay.hermes_ws import HermesRelayServer
+
+    relay = HermesRelayServer(
+        config=AdapterConfig(event_queue_clean_command_enabled=False),
+        api=MagicMock(),
+        adapter_version="test",
+        onebot_connected_fn=lambda: False,
+    )
+    assert not relay.is_known_command("clean")

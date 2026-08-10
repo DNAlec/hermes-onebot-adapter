@@ -35,9 +35,15 @@ logger = logging.getLogger(__name__)
 # their own admin/group/user context without racing on instance attributes.
 # Tools read via _current_*() helpers in onebot_tools.py which check the
 # contextvar first, then fall back to the instance attribute for compat.
-_msg_context: contextvars.ContextVar[tuple[bool, str, str] | None] = contextvars.ContextVar(
+_msg_context: contextvars.ContextVar[tuple[bool, str, str, bool] | None] = contextvars.ContextVar(
     "_msg_context", default=None,
 )
+
+
+def _set_future_result(fut: asyncio.Future[dict[str, Any]], data: dict[str, Any]) -> None:
+    if not fut.done():
+        fut.set_result(data)
+
 
 # ── Lazy imports from the Hermes host ────────────────────────────────────
 # These live in the main Hermes repo and are only available when the plugin
@@ -74,8 +80,9 @@ except ImportError:
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
-_UPLOAD_RESULT_TIMEOUT = 630.0
-_UPLOAD_API_ACTIONS = frozenset({"upload_group_file", "upload_private_file"})
+_DEFAULT_FILE_UPLOAD_TIMEOUT = 600.0
+_GROUP_UPLOAD_CONFIRMATION_MARGIN = 40.0
+_PRIVATE_UPLOAD_MARGIN = 30.0
 _RECONNECT_INITIAL_DELAY = 1.0
 _RECONNECT_MAX_DELAY = 30.0
 # Maximum concurrent in-flight send requests (send_text/send_image/...).
@@ -91,10 +98,18 @@ _PLUGIN_YAML_PATH = Path(__file__).parent / "plugin.yaml"
 _VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
 
 
-def _result_timeout(frame_type: str, action: str) -> float:
+def _result_timeout(
+    frame_type: str,
+    action: str,
+    file_upload_timeout: float = _DEFAULT_FILE_UPLOAD_TIMEOUT,
+) -> float:
     """Return the plugin-side wait limit for an adapter RPC result."""
-    if action == "send_document" or (frame_type == "api_call" and action in _UPLOAD_API_ACTIONS):
-        return _UPLOAD_RESULT_TIMEOUT
+    if action == "send_document" or (frame_type == "api_call" and action == "upload_group_file"):
+        return file_upload_timeout + _GROUP_UPLOAD_CONFIRMATION_MARGIN
+    if frame_type == "api_call" and action == "upload_private_file":
+        return file_upload_timeout + _PRIVATE_UPLOAD_MARGIN
+    if frame_type == "api_call" and action == "create_flash_task":
+        return file_upload_timeout + _PRIVATE_UPLOAD_MARGIN
     return _RESULT_TIMEOUT
 
 # ── Media caching helpers ────────────────────────────────────────────────
@@ -308,6 +323,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._onebot_connected = False
         self._self_id = ""
         self._media_delivery_mode = "passthrough"
+        self._file_upload_timeout = _DEFAULT_FILE_UPLOAD_TIMEOUT
         self._plugin_version = _read_plugin_version()
         self._completed_deliveries: dict[str, None] = {}
 
@@ -553,6 +569,9 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             self._onebot_connected = data.get("onebot_connected", False)
             self._self_id = data.get("self_id", "")
             self._media_delivery_mode = data.get("media_delivery_mode", "passthrough")
+            self._file_upload_timeout = float(
+                data.get("file_upload_timeout", _DEFAULT_FILE_UPLOAD_TIMEOUT)
+            )
             logger.debug(
                 "OneBot: adapter ready (onebot=%s self_id=%s media=%s)",
                 self._onebot_connected, self._self_id or "?", self._media_delivery_mode,
@@ -566,8 +585,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if mtype == "result":
             req_id = data.get("req_id", "")
             fut = self._futures.pop(req_id, None)
-            if fut and not fut.done():
-                fut.set_result(data)
+            if fut:
+                owner_loop = fut.get_loop()
+                if owner_loop is asyncio.get_running_loop():
+                    _set_future_result(fut, data)
+                else:
+                    owner_loop.call_soon_threadsafe(_set_future_result, fut, data)
             return
 
         if mtype == "pong":
@@ -612,6 +635,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # instance attributes.  We still set the instance attributes for
         # backward compat with code that reads them directly.
         is_admin = data.get("is_admin", False)
+        is_global_admin = data.get("is_global_admin", False)
         chat_id = data.get("chat_id", "")
         user_id = str(data.get("user_id", ""))
         group_id = ""
@@ -620,7 +644,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # Snapshot the per-message context as a local tuple so _dispatch_event
         # receives it as a parameter rather than reading instance attributes
         # that could be overwritten by a concurrent _handle_event call.
-        msg_ctx = (is_admin, group_id, user_id)
+        msg_ctx = (is_admin, group_id, user_id, is_global_admin)
         timestamp = (
             datetime.fromtimestamp(float(data["timestamp"]), tz=UTC)
             if data.get("timestamp")
@@ -695,7 +719,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     async def _dispatch_event(
         self,
         message_event: Any,
-        msg_ctx: tuple[bool, str, str],
+        msg_ctx: tuple[bool, str, str, bool],
         delivery_ids: list[str] | None = None,
     ) -> None:
         """Run ``handle_message`` off the receive loop.
@@ -1076,7 +1100,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             try:
                 await self._ws.send_json(msg)
                 try:
-                    result = await asyncio.wait_for(fut, timeout=_result_timeout(frame_type, action))
+                    result = await asyncio.wait_for(
+                        fut,
+                        timeout=_result_timeout(frame_type, action, self._file_upload_timeout),
+                    )
                     logger.debug(
                         "OneBot plugin _rpc result: action=%s req_id=%s success=%s",
                         action, req_id, result.get("success"),
@@ -1259,11 +1286,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
 
 def _result_to_send_result(result: dict[str, Any]) -> SendResult:
+    success = result.get("success", False)
     return SendResult(
-        success=result.get("success", False),
+        success=success,
         message_id=result.get("message_id"),
         error=result.get("error"),
-        retryable=not result.get("success", False),
+        retryable=result.get("retryable", not success),
     )
 
 

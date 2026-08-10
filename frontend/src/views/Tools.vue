@@ -148,7 +148,7 @@ const stats = computed(() => ({
       <h3>⚠ Hermes 安装目录未就绪</h3>
       <p class="hint">
         工具管理需要先配置 <code>hermes_install_dir</code> 并确保目录存在。
-        请前往 <RouterLink to="/hermes">Hermes 插件管理页</RouterLink> 配置安装目录并安装插件,
+        请前往 <RouterLink to="/connections">连接管理页</RouterLink> 配置安装目录并安装插件,
         然后回到本页配置工具集。
       </p>
     </div>
@@ -183,10 +183,10 @@ const stats = computed(() => ({
         </div>
       </div>
 
-      <!-- 插件工具集(含 OneBot 28 个 QQ 工具) -->
+      <!-- 插件工具集（工具数量由后端目录动态返回） -->
       <div v-if="pluginToolsets.length" class="section">
         <h3>🔌 插件工具集</h3>
-        <p class="hint" style="margin-bottom: 0.75rem;">由插件提供的工具集(含 OneBot 28 个 QQ 工具)。</p>
+        <p class="hint" style="margin-bottom: 0.75rem;">由插件提供的工具集，展开后可查看当前工具目录。</p>
         <div v-for="t in pluginToolsets" :key="t.key" class="toolset-row">
           <label class="checkbox-row">
             <input type="checkbox" :checked="checked.has(t.key)" @change="toggle(t.key)" />

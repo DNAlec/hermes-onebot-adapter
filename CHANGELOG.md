@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-10
+
+### 新增
+- 新增 `file_upload_timeout` 配置（默认 600 秒，范围 30–600 秒），群聊、私聊和闪传文件上传统一使用并支持 WebUI 热更新；Hermes 插件的 RPC 等待上限随配置自动调整
+- OneBot 工具目录扩展到 100 项，新增精华与公告、签到、群相册与待办、好友和账号资料、收藏、表情回应查询、完整群文件管理、闪传与文件集、群系统消息、群荣誉及群加群选项能力
+- 新增 WebUI「OneBot 工具」页面和管理 API，可逐项控制工具是否注册给 Hermes 及 `everyone` / `admin` 权限；策略不影响全权限自动化 API
+
+### 变更
+- **闪传与文件集 8 个工具默认对 Hermes 隐藏**：闪传依赖 PC 版 QQ 端能力，仅 Windows 版客户端可用（Linux 等其他平台运行 NapCat 时不可用），且涉及本机文件读取/上传；需要时可在 WebUI「OneBot 工具」页显式启用，HTTP 自动化 API 不受策略影响仍包含完整目录
+- Hermes 工具管理员权限区分全局管理员和群管理员；群管理员只能操作当前群，跨群和账号级工具仅允许全局管理员调用
+- 发布工作流在构建和上传 PyPI 前执行 Ruff、独立环境测试与 `twine check`，并显示可选 Hermes 协议测试的跳过原因；前端依赖改用 `npm ci` 可复现安装
+- 前端构建链升级到 Vite 8 与 `@vitejs/plugin-vue` 6，清除发布前依赖审计发现的已知漏洞
+- Python 包许可证元数据改用 SPDX 表达式，消除 setuptools 构建弃用警告
+
+### 修复
+- 跨事件循环返回 OneBot RPC 结果时使用线程安全唤醒，避免工具实际完成后仍等到超时计时器触发才返回
+- 群文件上传等待 NapCat 响应超时后，自动轮询群历史；仅在时间、发送账号、文件名及可用时文件大小唯一匹配时确认成功，歧义或无结果时返回不可自动重试的“结果未知”，避免 NapCat 已上传但未及时回调导致工具挂起或重复上传
+- OneBot API 错误兼容读取 NapCat 的 `message` / `wording` 字段，不再把 `retcode=1200` 的真实错误显示为 `msg=None`
+
+### 文档
+- 新增 NapCat `v4.18.13` 群文件完成回调临时诊断补丁、构建产物校验和复现/恢复流程
+- 全面校正 README、REST API、WebUI 帮助文本和维护者指南中的架构、路径、工具数量、队列与媒体行为
+
 ## [1.3.0] - 2026-08-03
 
 ### 新增
@@ -146,7 +169,8 @@
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
 
-[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.1.0b...v1.2.0
 [1.1.0b]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.0.0b3...v1.1.0b

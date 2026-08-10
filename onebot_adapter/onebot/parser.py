@@ -383,6 +383,7 @@ async def parse_event(
 
     # ── Group filtering (config-driven) ──────────────────────────────
     is_admin = False
+    is_global_admin = False
     if config and is_group:
         if not config.is_group_user_allowed(group_id, sender_id):
             return None
@@ -395,11 +396,13 @@ async def parse_event(
         keyword_first_only = config.resolve_keyword_first_only(group_id)
         strip_first_mention = config.resolve_strip_first_mention(group_id)
         is_admin = config.is_admin(sender_id, group_id)
+        is_global_admin = sender_id in config.global_admins
         media_delivery_mode = config.media_delivery_mode
     elif config and not is_group:
         if not config.is_dm_allowed(sender_id):
             return None
         is_admin = config.is_admin(sender_id)
+        is_global_admin = sender_id in config.global_admins
         media_delivery_mode = config.media_delivery_mode
 
     include_url = media_delivery_mode != MEDIA_DELIVERY_CACHE
@@ -578,6 +581,7 @@ async def parse_event(
         reply_to_text=reply_to_text,
         timestamp=float(event.get("time", 0) or 0),
         is_admin=is_admin,
+        is_global_admin=is_global_admin,
         chat_name=chat_name,
         real_seq=str(event.get("real_seq", "") or ""),
         media_items=media_items,
@@ -918,6 +922,7 @@ async def _parse_notice_event(
 
     # ── Admin check (group only) ──
     is_admin = config.is_admin(user_id, group_id if is_group else None)
+    is_global_admin = user_id in config.global_admins
 
     logger.debug(
         "parse_notice: synthesized kind=%s chat_id=%s user_id=%s text=%r",
@@ -933,6 +938,7 @@ async def _parse_notice_event(
         text=text,
         timestamp=timestamp,
         is_admin=is_admin,
+        is_global_admin=is_global_admin,
         chat_name=chat_name,
         is_system_notice=True,
         rate_limit_eligible=kind == "poke",

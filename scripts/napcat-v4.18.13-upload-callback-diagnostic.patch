@@ -1,0 +1,66 @@
+diff --git a/packages/napcat-core/apis/msg.ts b/packages/napcat-core/apis/msg.ts
+index be65d9f..099b86c 100644
+--- a/packages/napcat-core/apis/msg.ts
++++ b/packages/napcat-core/apis/msg.ts
+@@ -1,4 +1,4 @@
+-import { ChatType, GetFileListParam, Peer, RawMessage, SendMessageElement, SendStatusType } from '@/napcat-core/types';
++import { ChatType, ElementType, GetFileListParam, Peer, RawMessage, SendMessageElement, SendStatusType } from '@/napcat-core/types';
+ import { GroupFileInfoUpdateItem, InstanceContext, NapCatCore, NodeIKernelMsgService } from '@/napcat-core/index';
+ import { GeneralCallResult } from '@/napcat-core/services/common';
+ 
+@@ -251,6 +251,12 @@ export class NTQQMsgApi {
+     }
+     const msgId = await this.generateMsgUniqueId(peer.chatType);
+     peer.guildId = msgId;
++    const diagnoseFileSend = msgElements.some(element => element.elementType === ElementType.FILE);
++    if (diagnoseFileSend) {
++      this.context.logger.logWarn(
++        `[UploadCallbackDiag] start correlation=${msgId} peer=${peer.peerUid} timeout=${timeout} elements=${msgElements.length}`
++      );
++    }
+     const [, msgList] = await this.core.eventWrapper.callNormalEventV2(
+       'NodeIKernelMsgService/sendMsg',
+       'NodeIKernelMsgListener/onMsgInfoListUpdate',
+@@ -260,10 +266,41 @@ export class NTQQMsgApi {
+         msgElements,
+         new Map(),
+       ],
+-      (ret) => ret.result === 0,
++      (ret) => {
++        if (diagnoseFileSend) {
++          this.context.logger.logWarn(
++            `[UploadCallbackDiag] service correlation=${msgId} result=${ret.result} err=${ret.errMsg ?? ''}`
++          );
++        }
++        return ret.result === 0;
++      },
+       msgRecords => {
++        if (diagnoseFileSend) {
++          const relevant = msgRecords;
++          if (relevant.length > 0) {
++            const snapshot = relevant.map(record => ({
++              expectedCorrelation: msgId,
++              guildId: record.guildId,
++              msgId: record.msgId,
++              msgSeq: record.msgSeq,
++              peerUid: record.peerUid,
++              sendStatus: record.sendStatus,
++              files: record.elements
++                .filter(element => element.elementType === ElementType.FILE)
++                .map(element => ({
++                  name: element.fileElement?.fileName,
++                  uuid: element.fileElement?.fileUuid,
++                  size: element.fileElement?.fileSize,
++                })),
++            }));
++            this.context.logger.logWarn(`[UploadCallbackDiag] update ${JSON.stringify(snapshot)}`);
++          }
++        }
+         for (const msgRecord of msgRecords) {
+           if (msgRecord.guildId === msgId && msgRecord.sendStatus === SendStatusType.KSEND_STATUS_SUCCESS) {
++            if (diagnoseFileSend) {
++              this.context.logger.logWarn(`[UploadCallbackDiag] matched correlation=${msgId} msgId=${msgRecord.msgId}`);
++            }
+             return true;
+           }
+         }

@@ -5,16 +5,17 @@ OneBot 11 适配器服务 + Hermes 插件，经独立服务对接 NapCat / go-cq
 
 ## 架构
 
-```
-OneBot ──WS──  适配器服务  ──WS── Hermes 插件 ── Hermes Agent
+```text
+NapCat ──双向 OneBot 11 WS（事件 + API）── 适配器服务 ──WS── Hermes 插件 ── Hermes Agent
 ```
 
-适配器服务承担全部 OneBot 交互；插件只与适配器服务通信，不直接接触 OneBot；不修改 Hermes 本身的代码。
+适配器服务承担全部 OneBot 交互；事件接收和 API 调用共用同一条 OneBot WebSocket，不需要独立的 OneBot HTTP API 端口。插件只与适配器服务通信，不直接接触 OneBot，也不修改 Hermes 本身的代码。
 
 ## 环境要求
 
 - Python >= 3.11
 - [pipx](https://pipx.pypa.io/)（推荐）或 pip
+- Node.js ^20.19.0 或 >= 22.12.0（仅源码安装或开发时构建前端需要；PyPI 安装不需要）
 
 ## 快速开始
 
@@ -89,7 +90,7 @@ hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
 
 ## 自动化工具 API
 
-自动化 API 默认关闭。它使用独立于 WebUI 登录的全权限 key，可调用 Hermes 插件提供的全部 OneBot 工具以及文件上传工具：
+自动化 API 默认关闭。它使用独立于 WebUI 登录的全权限 key，可调用全部 100 个 OneBot 工具，包括文件上传：
 
 ```bash
 # key 只显示一次；请保存到调用脚本的安全环境变量中
@@ -101,7 +102,7 @@ curl -H "Authorization: Bearer hoa_xxx" \
 
 每个工具使用独立的 RPC 路径 `POST /api/v1/tools/<tool_name>`。完整参数可从 `GET /api/v1/tools` 或 `/api/v1/openapi.json` 获取。HTTP 调用不会继承 Hermes 的当前聊天上下文，发送消息或上传文件时必须显式提供与 `message_type` 匹配的 `group_id` 或 `user_id`。Key 可执行踢人、禁言、退群、删好友等高风险操作，不要放入 URL、日志或前端代码。
 
-本地文件默认只允许来自 `/tmp/hermes-onebot-adapter-uploads`；可在 WebUI 高级设置中调整 `automation_upload_allowed_roots`。qBittorrent hook 需要在其进程环境中设置：
+本地文件默认只允许来自 `/tmp/hermes-onebot-adapter-uploads`；可在 WebUI 高级设置中调整 `automation_upload_allowed_roots`。闪传与文件集工具仅 Windows 版客户端可用，在其他平台调用会失败。qBittorrent hook 需要在其进程环境中设置：
 
 ```bash
 ONEBOT_AUTOMATION_API_KEY=hoa_xxx
@@ -165,7 +166,8 @@ ws://127.0.0.1:3001
 | 群组管理 | 查看群列表、每群启用/禁用 Bot、群成员过滤 |
 | 指令过滤 | 管理 `/` 指令的权限（所有人 / 管理员 / 禁用） |
 | 工具管理 | 启停 OneBot 平台的 Hermes 工具集 |
-| 高级设置 | 私聊过滤、全局管理员、使用统计开关与保留期、发送去重、序列号映射、日志等 |
+| OneBot 工具 | 逐项控制 OneBot 工具是否注册给 Hermes，以及所有人/管理员调用权限 |
+| 高级设置 | 私聊过滤、全局管理员、文件上传超时、使用统计、发送去重、序列号映射、日志等 |
 
 ## 工具集管理
 
@@ -175,13 +177,19 @@ ws://127.0.0.1:3001
 
 ## OneBot API 工具
 
-插件自带 41 个 OneBot 工具（toolset: `onebot`），LLM 可直接调用：
+插件提供 100 个 OneBot 工具（toolset: `onebot`），其中 88 个默认注册给 LLM，其余 12 个默认隐藏，可在 WebUI「OneBot 工具」页启用：
 
-- **只读**：获取群列表/成员/信息、好友列表、消息历史、合并转发内容
+- **只读**：获取群列表/成员/扩展信息、好友、消息历史、精华、公告、禁言列表、签到、相册与收藏
 - **消息**：发送消息、撤回、合并转发、戳一戳、表情回应
-- **文件**：获取文件、上传群文件或私聊文件、设置头像
-- **管理**（需适配器管理员权限）：踢人、禁言、全员禁言、设置管理员/名片/群名、退群、处理加群/好友请求
+- **文件**：获取和上传群/私聊文件，查询群文件目录、容量与下载地址，管理群文件和文件夹
+- **管理**：踢人、禁言、设置群资料、精华、公告、待办、相册、好友资料和自定义表情
 - **动态黑名单**：查看或临时拉黑群聊、私聊或全部会话中的用户；管理员始终豁免
+
+**闪传与文件集（仅 Windows）**：8 个闪传工具（创建/发送闪传任务、分享链接、文件集查询与下载等）默认对 Hermes 隐藏。闪传是 PC 版 QQ 端的能力，**只有 Windows 版客户端可用**，且在 Linux 等平台运行 NapCat 时不可用；同时它们会读取本机文件或写入下载目录。需要时请在 WebUI「OneBot 工具」页显式启用（修改后需重启 Hermes 生效）。HTTP 自动化 API 始终包含这些工具，但调用前请确认 NapCat 运行在 Windows 客户端上。
+
+WebUI「OneBot 工具」页可以为每个工具设置是否注册给 Hermes，以及 `everyone` / `admin` 权限。策略只影响 Hermes，使用 automation key 的 HTTP API 始终保留完整工具目录和全权限。注册状态在 Hermes 启动时读取，修改后需要重启 Hermes；群管理员只能对当前群调用群级管理员工具，跨群和账号级管理员工具仅允许全局管理员调用。维护者可以显式把默认管理员工具降级为所有人。
+
+群聊、私聊和闪传文件上传等待 NapCat 响应的时间统一由 `file_upload_timeout` 控制，默认 600 秒，可在 WebUI 高级设置中调整为 30–600 秒。群上传超时后适配器仍会短轮询群历史进行保守确认；闪传上传超时无法确认结果。两种情况都会返回不可自动重试的“结果未知”，避免重复上传。
 
 ## 使用统计
 
@@ -271,7 +279,9 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy，转发 |
 | 群 busy | 入队等待（含 busy 用户自身）；出队时连续同用户消息合并为一条 |
-| `/` 开头的消息 | **始终直接转发**（绕过排队） |
+| `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
+| `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
+| 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
 ### Hermes 会话隔离配置
 
@@ -281,15 +291,17 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后插件向适配器发 `idle` 帧，适配器清空 busy 并从队列取下一条转发。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
 
-`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。
+`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。默认情况下，`/new` 和 `/reset` 还会立即丢弃当前群尚未处理的排队消息；`/clean` 可手动执行同样的队列清理，但不会发送给 Hermes。两种清理都不会中断当前正在执行的 turn。
 
-### 配置项（WebUI「连接管理」页面）
+### 配置项（WebUI「聊天配置」页面）
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `event_queue_enabled` | `true` | 排队总开关：Hermes 不隔离群成员时是否排队 |
 | `event_queue_max_per_chat` | `50` | 单群队列上限，超限拒绝入队 |
 | `event_queue_idle_timeout` | `300.0` | plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy |
+| `event_queue_clear_on_session_reset` | `true` | 使用 `/new`、`/reset` 时清空当前群待处理队列 |
+| `event_queue_clean_command_enabled` | `true` | 启用适配器本地 `/clean` 清队列命令 |
 
 ## 开发
 
@@ -307,7 +319,7 @@ cd frontend && npm install && npm run dev   # 前端开发 (Vite 代理到 :1882
 
 ## 技术栈
 
-- **后端**：aiohttp（WS 服务端/客户端、HTTP API、静态托管）
+- **后端**：aiohttp（WS 服务端/客户端、WebUI REST API、静态托管）
 - **前端**：Vue 3 + Vite + TypeScript + Vue Router
 - **打包**：pyproject.toml + setuptools，`hermes-onebot-adapter` CLI entry point
 
