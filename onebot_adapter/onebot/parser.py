@@ -74,6 +74,38 @@ class _MediaCounter:
     counter: int = 0  # 0-based; displayed placeholder number = counter + 1
 
 
+@dataclass
+class _ParseOptions:
+    self_id: str
+    group_require_mention: bool
+    api: Any
+    config: AdapterConfig | None
+    name_resolver: NameResolver | None
+    mention_first_only: bool
+    trigger_keywords: list[str] | None
+    keyword_first_only: bool
+    strip_first_mention: bool
+    is_known_command_fn: Callable[[str], bool] | None
+    canonical_command_name_fn: Callable[[str], str] | None
+    media_delivery_mode: str
+    bot_blacklist_match_fn: Callable[[str, str | None], Any] | None
+
+
+@dataclass
+class _MessageState:
+    is_group: bool
+    sender_id: str
+    sender_name: str
+    group_id: str
+    is_admin: bool
+    is_global_admin: bool
+    include_url: bool
+    chat_id: str
+    chat_name: str
+    group_name: str
+    raw_segments: list[dict]
+
+
 # ── Placeholder rendering ────────────────────────────────────────────────
 
 
@@ -367,222 +399,44 @@ async def parse_event(
         )
     if post_type != "message":
         return None
-
-    is_group = event.get("message_type") == "group"
-    sender = event.get("sender", {}) or {}
-    sender_id = str(event.get("user_id", ""))
-    sender_name = seg.sender_display(sender)
-    group_id = str(event.get("group_id", "")) if is_group else ""
-    logger.debug(
-        "parse_event: post_type=%s msg_type=%s user_id=%s card=%r nick=%r group=%s msg_id=%s real_seq=%s segs=%s",
-        event.get("post_type"), event.get("message_type"),
-        sender_id, sender.get("card"), sender.get("nickname"),
-        group_id, event.get("message_id"), event.get("real_seq"),
-        [s.get("type") for s in (event.get("message", []) or [])],
+    options = _ParseOptions(
+        self_id=self_id,
+        group_require_mention=group_require_mention,
+        api=api,
+        config=config,
+        name_resolver=name_resolver,
+        mention_first_only=mention_first_only,
+        trigger_keywords=trigger_keywords,
+        keyword_first_only=keyword_first_only,
+        strip_first_mention=strip_first_mention,
+        is_known_command_fn=is_known_command_fn,
+        canonical_command_name_fn=canonical_command_name_fn,
+        media_delivery_mode=media_delivery_mode,
+        bot_blacklist_match_fn=bot_blacklist_match_fn,
     )
-
-    # ── Group filtering (config-driven) ──────────────────────────────
-    is_admin = False
-    is_global_admin = False
-    if config and is_group:
-        if not config.is_group_user_allowed(group_id, sender_id):
-            return None
-        gc = config.get_group_config(group_id)
-        if not gc.enabled:
-            return None
-        group_require_mention = config.resolve_require_mention(group_id)
-        mention_first_only = config.resolve_mention_first_only(group_id)
-        trigger_keywords = config.resolve_trigger_keywords(group_id)
-        keyword_first_only = config.resolve_keyword_first_only(group_id)
-        strip_first_mention = config.resolve_strip_first_mention(group_id)
-        is_admin = config.is_admin(sender_id, group_id)
-        is_global_admin = sender_id in config.global_admins
-        media_delivery_mode = config.media_delivery_mode
-    elif config and not is_group:
-        if not config.is_dm_allowed(sender_id):
-            return None
-        is_admin = config.is_admin(sender_id)
-        is_global_admin = sender_id in config.global_admins
-        media_delivery_mode = config.media_delivery_mode
-
-    include_url = media_delivery_mode != MEDIA_DELIVERY_CACHE
-
-    # ── chat_id ──────────────────────────────────────────────────────
-    # 群聊固定发 group:<gid>;Hermes 端的 session 隔离由其自己的
-    # group_sessions_per_user 配置决定(适配器通过插件上报获知,用于排队判定)。
-    if is_group:
-        chat_id = f"group:{group_id}"
-    else:
-        chat_id = sender_id
-
-    # ── chat_name (用于 Hermes Source 行) ─────────────────────────────
-    # 群聊: "群号(群名)" 或 "群号";私聊: 发送者昵称
-    # group_name 也用于下方 message_show_group_id 标识。
-    chat_name = ""
-    group_name = ""
-    if is_group:
-        if name_resolver is not None:
-            group_name = await name_resolver.resolve_group_name(group_id)
-        chat_name = f"{group_id}({group_name})" if group_name else str(group_id)
-    else:
-        chat_name = sender_name
-
-    raw_segments: list[dict] = event.get("message", []) or []
-
-    # Group: trigger gating (@-mention and/or keyword), then strip leading @bot
-    if is_group:
-        checks: list[bool] = []
-        if group_require_mention and self_id:
-            if mention_first_only:
-                checks.append(seg.has_bot_mention_first(raw_segments, self_id))
-            else:
-                checks.append(seg.has_bot_mention(raw_segments, self_id))
-        kws = trigger_keywords or []
-        if kws:
-            plain_text = seg.extract_text(raw_segments)
-            if keyword_first_only:
-                checks.append(any(plain_text.startswith(kw) for kw in kws))
-            else:
-                checks.append(any(kw in plain_text for kw in kws))
-        if checks and not any(checks):
-            return None  # some trigger required, none satisfied → drop
-        # 移除首 @bot 段：仅在消息以 @bot 开头时去掉该段(跳过 reply 段)；
-        # 非首 @bot 一律保留以保证消息完整。与 group_require_mention 无关，
-        # 即使不要求 @ 触发，只要消息以 @bot 开头也会被去掉。
-        if self_id and strip_first_mention:
-            raw_segments = seg.strip_first_bot_mention(raw_segments, self_id)
-
-    # ── Bot-managed dynamic blacklist ────────────────────────────────
-    # Run after normal admission + group trigger gating so a blocked user does
-    # not make the bot reply to every unrelated group message. Admin status is
-    # evaluated from the live config on every event and always takes priority.
-    if config and config.bot_blacklist_enabled and not is_admin and bot_blacklist_match_fn is not None:
-        entry = bot_blacklist_match_fn(sender_id, group_id if is_group else None)
-        if entry is not None:
-            return FilteredEvent(
-                chat_id=chat_id,
-                chat_type="group" if is_group else "dm",
-                user_id=sender_id,
-                user_name=sender_name,
-                command_name="",
-                reject_message=_render_bot_blacklist_reject(config, entry, sender_id),
-                message_id=str(event.get("message_id", "")),
-                reply_to_message_id=str(event.get("message_id", "")) or None,
-                timestamp=float(event.get("time", 0) or 0),
-                filter_type="bot_blacklist",
-            )
-
-    # ── /command filter ───────────────────────────────────────────────
-    # After @bot stripping (group) or on raw segments (DM), check whether the
-    # message is a /command and whether the sender has permission to use it.
-    # This runs *before* media placeholder rendering.  Returns a FilteredEvent
-    # when denied; the caller sends the reject message via the OneBot WS API
-    # and skips Hermes forwarding.
-    if config and config.resolve_command_filter_enabled(group_id if is_group else None):
-        filtered = _check_command_filter(
-            event, raw_segments, config, is_group, group_id, sender_id, sender_name,
-            chat_id, is_known_command_fn, canonical_command_name_fn,
-        )
-        if filtered is not None:
-            return filtered
-
-    counter = _MediaCounter()
-    media_items: list[MediaItem] = []
-
-    # Media ordering matches placeholder numbering:
-    #   1. forward media   2. reply media   3. main message media
-    reply_to_text: str | None = None
-    reply_to_id: int | None = None
-
-    # ── Expand merged-forward (合并转发) ──────────────────────────────
-    forward_id = seg.extract_forward_id(raw_segments)
-    forward_text = ""
-    if forward_id and api:
-        logger.debug("parse_event: expanding forward msg_id=%s", forward_id)
-        forward_text = await _expand_forward(
-            api, forward_id, counter, depth=0,
-            name_resolver=name_resolver, group_id=group_id,
-            include_url=include_url, media_items=media_items,
-        )
-        # _expand_messages already wraps the result in
-        # [合并转发开始:1]...[合并转发结束:1] — no extra wrapping here.
-
-    # ── Reply context (引用回复) ──────────────────────────────────────
-    reply_to_id = seg.extract_reply_id(raw_segments)
-    if reply_to_id and api:
-        logger.debug("parse_event: fetching reply context msg_id=%s", reply_to_id)
-        reply_to_text = await _build_reply_context(
-            api, reply_to_id, counter,
-            name_resolver=name_resolver, group_id=group_id,
-            include_url=include_url, media_items=media_items,
-        )
-
-    # ── Main message text + media ─────────────────────────────────────
-    text, media_markers = seg.extract_text_with_placeholders(
-        raw_segments, start_index=counter.counter,
-    )
-    if forward_text:
-        text = forward_text + ("\n" + text if text else "")
-    logger.debug(
-        "parse_event: extracted text len=%d media_markers=%d forward=%s",
-        len(text), len(media_markers), bool(forward_text),
-    )
-
-    for i, marker in enumerate(media_markers):
-        logger.debug(
-            "parse_event: render media %d/%d type=%s url=%s",
-            i + 1, len(media_markers), marker.get("kind"),
-            str(marker.get("url") or marker.get("file_info", {}).get("url", ""))[:120],
-        )
-        counter.counter += 1
-        rendered = _render_url_placeholder(marker, include_url=include_url)
-        text = text.replace(marker["marker"], rendered, 1)
-        if not include_url and _marker_has_url(marker):
-            media_items.append(_marker_to_media_item(marker))
-
-    # ── Resolve @ mentions to @QQ号(昵称) ──────────────────────────────
-    if name_resolver:
-        text = await _resolve_at_mentions(text, group_id, name_resolver)
-
-    # Group chat: prefix sender name + QQ号 (except slash commands)
-    if is_group and text:
-        if text.startswith("/"):
-            pass  # slash command — no sender prefix
-        else:
-            admin_suffix = "(管理员)" if is_admin else ""
-            # 群聊前缀展示 real_seq(群内递增序号),拿不到时回退 message_id
-            group_seq = str(event.get("real_seq", "") or event.get("message_id", ""))
-            prefix = _format_sender_prefix(
-                sender_name, sender_id, group_seq,
-                admin_suffix=admin_suffix,
-            )
-            text = f"{prefix}: {text}"
-
-    # Optional group-id label at the head of the main message text.
-    # Only injected for group chats when ``message_show_group_id`` is on,
-    # and skipped for slash commands.  Format: ``[群:42(测试群)]`` or
-    # ``[群:42]`` when group name is unavailable.
-    if is_group and config and config.resolve_message_show_group_id(group_id) \
-            and text and not text.lstrip().startswith("/"):
-        gid_label = f"{group_id}({group_name})" if group_name else str(group_id)
-        text = f"[群:{gid_label}]\n{text}"
-
+    state = await _prepare_message_state(event, options)
+    if state is None:
+        return None
+    filtered = _filter_message(event, state, options)
+    if filtered is not None:
+        return filtered
+    text, reply_to_id, reply_to_text, media_items = await _render_message(event, state, options)
     if not text:
         return None
 
     norm = NormalizedEvent(
         message_id=str(event.get("message_id", "")),
-        chat_id=chat_id,
-        chat_type="group" if is_group else "dm",
-        user_id=sender_id,
-        user_name=sender_name,
+        chat_id=state.chat_id,
+        chat_type="group" if state.is_group else "dm",
+        user_id=state.sender_id,
+        user_name=state.sender_name,
         text=text,
         reply_to_message_id=str(reply_to_id) if reply_to_id else None,
         reply_to_text=reply_to_text,
         timestamp=float(event.get("time", 0) or 0),
-        is_admin=is_admin,
-        is_global_admin=is_global_admin,
-        chat_name=chat_name,
+        is_admin=state.is_admin,
+        is_global_admin=state.is_global_admin,
+        chat_name=state.chat_name,
         real_seq=str(event.get("real_seq", "") or ""),
         media_items=media_items,
     )
@@ -591,6 +445,247 @@ async def parse_event(
         norm.chat_id, (norm.text or "")[:120],
     )
     return norm
+
+
+async def _prepare_message_state(event: dict[str, Any], options: _ParseOptions) -> _MessageState | None:
+    is_group = event.get("message_type") == "group"
+    sender = event.get("sender", {}) or {}
+    sender_id = str(event.get("user_id", ""))
+    sender_name = seg.sender_display(sender)
+    group_id = str(event.get("group_id", "")) if is_group else ""
+    logger.debug(
+        "parse_event: post_type=%s msg_type=%s user_id=%s card=%r nick=%r group=%s msg_id=%s real_seq=%s segs=%s",
+        event.get("post_type"), event.get("message_type"), sender_id,
+        sender.get("card"), sender.get("nickname"), group_id,
+        event.get("message_id"), event.get("real_seq"),
+        [item.get("type") for item in (event.get("message", []) or [])],
+    )
+    settings = _resolved_message_settings(options, is_group, group_id, sender_id)
+    if settings is None:
+        return None
+    require_mention, mention_first, keywords, keyword_first, strip_mention, is_admin, is_global_admin, mode = settings
+    raw_segments: list[dict] = event.get("message", []) or []
+    if is_group and not _passes_group_trigger(
+        raw_segments,
+        options.self_id,
+        require_mention,
+        mention_first,
+        keywords,
+        keyword_first,
+    ):
+        return None
+    if is_group and options.self_id and strip_mention:
+        raw_segments = seg.strip_first_bot_mention(raw_segments, options.self_id)
+
+    group_name = ""
+    if is_group and options.name_resolver is not None:
+        group_name = await options.name_resolver.resolve_group_name(group_id)
+    chat_id = f"group:{group_id}" if is_group else sender_id
+    chat_name = f"{group_id}({group_name})" if group_name else (group_id if is_group else sender_name)
+    return _MessageState(
+        is_group=is_group,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        group_id=group_id,
+        is_admin=is_admin,
+        is_global_admin=is_global_admin,
+        include_url=mode != MEDIA_DELIVERY_CACHE,
+        chat_id=chat_id,
+        chat_name=chat_name,
+        group_name=group_name,
+        raw_segments=raw_segments,
+    )
+
+
+def _resolved_message_settings(
+    options: _ParseOptions,
+    is_group: bool,
+    group_id: str,
+    sender_id: str,
+) -> tuple[bool, bool, list[str] | None, bool, bool, bool, bool, str] | None:
+    config = options.config
+    if config is None:
+        return (
+            options.group_require_mention,
+            options.mention_first_only,
+            options.trigger_keywords,
+            options.keyword_first_only,
+            options.strip_first_mention,
+            False,
+            False,
+            options.media_delivery_mode,
+        )
+    if is_group:
+        if not config.is_group_user_allowed(group_id, sender_id) or not config.get_group_config(group_id).enabled:
+            return None
+        return (
+            config.resolve_require_mention(group_id),
+            config.resolve_mention_first_only(group_id),
+            config.resolve_trigger_keywords(group_id),
+            config.resolve_keyword_first_only(group_id),
+            config.resolve_strip_first_mention(group_id),
+            config.is_admin(sender_id, group_id),
+            sender_id in config.global_admins,
+            config.media_delivery_mode,
+        )
+    if not config.is_dm_allowed(sender_id):
+        return None
+    return (
+        options.group_require_mention,
+        options.mention_first_only,
+        options.trigger_keywords,
+        options.keyword_first_only,
+        options.strip_first_mention,
+        config.is_admin(sender_id),
+        sender_id in config.global_admins,
+        config.media_delivery_mode,
+    )
+
+
+def _passes_group_trigger(
+    raw_segments: list[dict],
+    self_id: str,
+    require_mention: bool,
+    mention_first: bool,
+    keywords: list[str] | None,
+    keyword_first: bool,
+) -> bool:
+    checks: list[bool] = []
+    if require_mention and self_id:
+        mention_matches = seg.has_bot_mention_first(raw_segments, self_id) if mention_first \
+            else seg.has_bot_mention(raw_segments, self_id)
+        checks.append(mention_matches)
+    if keywords:
+        plain_text = seg.extract_text(raw_segments)
+        keyword_matches = any(plain_text.startswith(keyword) for keyword in keywords) if keyword_first \
+            else any(keyword in plain_text for keyword in keywords)
+        checks.append(keyword_matches)
+    return not checks or any(checks)
+
+
+def _filter_message(
+    event: dict[str, Any], state: _MessageState, options: _ParseOptions,
+) -> FilteredEvent | None:
+    config = options.config
+    if config and config.bot_blacklist_enabled and not state.is_admin \
+            and options.bot_blacklist_match_fn is not None:
+        entry = options.bot_blacklist_match_fn(
+            state.sender_id, state.group_id if state.is_group else None
+        )
+        if entry is not None:
+            return FilteredEvent(
+                chat_id=state.chat_id,
+                chat_type="group" if state.is_group else "dm",
+                user_id=state.sender_id,
+                user_name=state.sender_name,
+                command_name="",
+                reject_message=_render_bot_blacklist_reject(config, entry, state.sender_id),
+                message_id=str(event.get("message_id", "")),
+                reply_to_message_id=str(event.get("message_id", "")) or None,
+                timestamp=float(event.get("time", 0) or 0),
+                filter_type="bot_blacklist",
+            )
+    if config and config.resolve_command_filter_enabled(state.group_id if state.is_group else None):
+        return _check_command_filter(
+            event,
+            state.raw_segments,
+            config,
+            state.is_group,
+            state.group_id,
+            state.sender_id,
+            state.sender_name,
+            state.chat_id,
+            options.is_known_command_fn,
+            options.canonical_command_name_fn,
+        )
+    return None
+
+
+async def _render_message(
+    event: dict[str, Any], state: _MessageState, options: _ParseOptions,
+) -> tuple[str, int | None, str | None, list[MediaItem]]:
+    counter = _MediaCounter()
+    media_items: list[MediaItem] = []
+    forward_text = await _render_forward_context(state, options, counter, media_items)
+    reply_to_id = seg.extract_reply_id(state.raw_segments)
+    reply_to_text = None
+    if reply_to_id and options.api:
+        logger.debug("parse_event: fetching reply context msg_id=%s", reply_to_id)
+        reply_to_text = await _build_reply_context(
+            options.api,
+            reply_to_id,
+            counter,
+            name_resolver=options.name_resolver,
+            group_id=state.group_id,
+            include_url=state.include_url,
+            media_items=media_items,
+        )
+    text = _render_main_segments(state.raw_segments, counter, media_items, state.include_url, forward_text)
+    if options.name_resolver:
+        text = await _resolve_at_mentions(text, state.group_id, options.name_resolver)
+    text = _decorate_group_text(text, event, state, options.config)
+    return text, reply_to_id, reply_to_text, media_items
+
+
+async def _render_forward_context(
+    state: _MessageState,
+    options: _ParseOptions,
+    counter: _MediaCounter,
+    media_items: list[MediaItem],
+) -> str:
+    forward_id = seg.extract_forward_id(state.raw_segments)
+    if not forward_id or not options.api:
+        return ""
+    logger.debug("parse_event: expanding forward msg_id=%s", forward_id)
+    return await _expand_forward(
+        options.api,
+        forward_id,
+        counter,
+        depth=0,
+        name_resolver=options.name_resolver,
+        group_id=state.group_id,
+        include_url=state.include_url,
+        media_items=media_items,
+    )
+
+
+def _render_main_segments(
+    raw_segments: list[dict],
+    counter: _MediaCounter,
+    media_items: list[MediaItem],
+    include_url: bool,
+    forward_text: str,
+) -> str:
+    text, media_markers = seg.extract_text_with_placeholders(raw_segments, start_index=counter.counter)
+    if forward_text:
+        text = forward_text + ("\n" + text if text else "")
+    logger.debug(
+        "parse_event: extracted text len=%d media_markers=%d forward=%s",
+        len(text), len(media_markers), bool(forward_text),
+    )
+    for marker in media_markers:
+        counter.counter += 1
+        text = text.replace(marker["marker"], _render_url_placeholder(marker, include_url=include_url), 1)
+        if not include_url and _marker_has_url(marker):
+            media_items.append(_marker_to_media_item(marker))
+    return text
+
+
+def _decorate_group_text(
+    text: str, event: dict[str, Any], state: _MessageState, config: AdapterConfig | None,
+) -> str:
+    if not state.is_group or not text or text.startswith("/"):
+        return text
+    admin_suffix = "(管理员)" if state.is_admin else ""
+    group_seq = str(event.get("real_seq", "") or event.get("message_id", ""))
+    prefix = _format_sender_prefix(
+        state.sender_name, state.sender_id, group_seq, admin_suffix=admin_suffix,
+    )
+    text = f"{prefix}: {text}"
+    if config and config.resolve_message_show_group_id(state.group_id):
+        gid_label = f"{state.group_id}({state.group_name})" if state.group_name else state.group_id
+        text = f"[群:{gid_label}]\n{text}"
+    return text
 
 
 # ── Reply context ────────────────────────────────────────────────────────
@@ -828,97 +923,27 @@ async def _parse_notice_event(
     if config is None:
         return None
 
-    # ── Determine notice kind and resolve config ──
-    kind = ""  # "poke" | "member_join" | "member_leave"
-    if notice_type == "notify" and sub_type == "poke":
-        # 仅 bot 被戳才推送;戳别人忽略
-        target_id = str(event.get("target_id", ""))
-        if not self_id or target_id != self_id:
-            return None
-        kind = "poke"
-        if not config.resolve_notify_poke_enabled(group_id if is_group else None):
-            return None
-    elif notice_type == "group_increase" and is_group:
-        # 仅其他成员进群;bot 自己进群忽略
-        if not self_id or user_id == self_id:
-            return None
-        kind = "member_join"
-        if not config.resolve_notify_member_change_enabled(group_id):
-            return None
-    elif notice_type == "group_decrease" and is_group:
-        # 仅其他成员退群;bot 自己退群/被踢忽略
-        if not self_id or user_id == self_id:
-            return None
-        # sub_type: leave(主动退群) | kick(被踢) | kick_me(自己被踢,已排除)
-        if sub_type not in ("leave", "kick"):
-            return None
-        kind = "member_leave"
-        if not config.resolve_notify_member_change_enabled(group_id):
-            return None
-    else:
+    kind = _notice_kind(event, self_id, config, group_id, is_group, user_id)
+    if kind is None:
         return None
 
-    # ── User filtering ──
-    # 戳一戳走群/DM 用户过滤;成员变动不走用户过滤。
     if kind == "poke":
-        if is_group:
-            if not config.is_group_user_allowed(group_id, user_id):
-                return None
-        else:
-            if not config.is_dm_allowed(user_id):
-                return None
-
-        # Poke is a direct interaction with the bot, so apply the same
-        # bot-managed blacklist policy as a triggered text message. Static
-        # admission filtering above keeps its existing silent-drop priority.
-        is_admin = config.is_admin(user_id, group_id if is_group else None)
-        if config.bot_blacklist_enabled and not is_admin and bot_blacklist_match_fn is not None:
-            entry = bot_blacklist_match_fn(user_id, group_id if is_group else None)
-            if entry is not None:
-                return FilteredEvent(
-                    chat_id=f"group:{group_id}" if is_group else user_id,
-                    chat_type="group" if is_group else "dm",
-                    user_id=user_id,
-                    user_name="",
-                    command_name="",
-                    reject_message=_render_bot_blacklist_reject(config, entry, user_id),
-                    timestamp=timestamp,
-                    filter_type="bot_blacklist",
-                )
+        allowed, filtered = _filter_poke_notice(
+            config, group_id, is_group, user_id, timestamp, bot_blacklist_match_fn,
+        )
+        if not allowed:
+            return filtered
 
     # ── Resolve user name ──
     user_name = ""
     if name_resolver is not None and user_id:
         user_name = await name_resolver.resolve(user_id, group_id if is_group else "")
 
-    # ── Build chat_id / chat_type / chat_name ──
-    if is_group:
-        chat_id = f"group:{group_id}"
-        chat_type: str = "group"
-        group_name = ""
-        if name_resolver is not None:
-            group_name = await name_resolver.resolve_group_name(group_id)
-        chat_name = f"{group_id}({group_name})" if group_name else str(group_id)
-    else:
-        chat_id = user_id
-        chat_type = "dm"
-        chat_name = user_name or user_id
-
-    # ── Build display name ──
+    chat_id, chat_type, chat_name = await _resolve_notice_chat(
+        group_id, is_group, user_id, user_name, name_resolver,
+    )
     display = user_name or user_id
-
-    # ── Build text ──
-    if kind == "poke":
-        text = f"[系统] 用户 {display}({user_id}) 戳了戳你"
-    elif kind == "member_join":
-        text = f"[系统] 用户 {display}({user_id}) 加入了群聊"
-    elif kind == "member_leave":
-        if sub_type == "kick":
-            text = f"[系统] 用户 {display}({user_id}) 被管理员移出了群聊"
-        else:
-            text = f"[系统] 用户 {display}({user_id}) 退出了群聊"
-    else:
-        return None
+    text = _notice_text(kind, sub_type, display, user_id)
 
     # ── Admin check (group only) ──
     is_admin = config.is_admin(user_id, group_id if is_group else None)
@@ -943,3 +968,84 @@ async def _parse_notice_event(
         is_system_notice=True,
         rate_limit_eligible=kind == "poke",
     )
+
+
+def _notice_kind(
+    event: dict[str, Any],
+    self_id: str,
+    config: AdapterConfig,
+    group_id: str,
+    is_group: bool,
+    user_id: str,
+) -> str | None:
+    notice_type = event.get("notice_type")
+    sub_type = event.get("sub_type", "")
+    if notice_type == "notify" and sub_type == "poke":
+        target_id = str(event.get("target_id", ""))
+        if not self_id or target_id != self_id:
+            return None
+        return "poke" if config.resolve_notify_poke_enabled(group_id if is_group else None) else None
+    if notice_type == "group_increase" and is_group:
+        if not self_id or user_id == self_id:
+            return None
+        return "member_join" if config.resolve_notify_member_change_enabled(group_id) else None
+    if notice_type == "group_decrease" and is_group:
+        if not self_id or user_id == self_id or sub_type not in ("leave", "kick"):
+            return None
+        return "member_leave" if config.resolve_notify_member_change_enabled(group_id) else None
+    return None
+
+
+def _filter_poke_notice(
+    config: AdapterConfig,
+    group_id: str,
+    is_group: bool,
+    user_id: str,
+    timestamp: float,
+    bot_blacklist_match_fn: Callable[[str, str | None], Any] | None,
+) -> tuple[bool, FilteredEvent | None]:
+    admitted = config.is_group_user_allowed(group_id, user_id) if is_group else config.is_dm_allowed(user_id)
+    if not admitted:
+        return False, None
+    is_admin = config.is_admin(user_id, group_id if is_group else None)
+    if not config.bot_blacklist_enabled or is_admin or bot_blacklist_match_fn is None:
+        return True, None
+    entry = bot_blacklist_match_fn(user_id, group_id if is_group else None)
+    if entry is None:
+        return True, None
+    return False, FilteredEvent(
+        chat_id=f"group:{group_id}" if is_group else user_id,
+        chat_type="group" if is_group else "dm",
+        user_id=user_id,
+        user_name="",
+        command_name="",
+        reject_message=_render_bot_blacklist_reject(config, entry, user_id),
+        timestamp=timestamp,
+        filter_type="bot_blacklist",
+    )
+
+
+async def _resolve_notice_chat(
+    group_id: str,
+    is_group: bool,
+    user_id: str,
+    user_name: str,
+    name_resolver: NameResolver | None,
+) -> tuple[str, str, str]:
+    if not is_group:
+        return user_id, "dm", user_name or user_id
+    group_name = await name_resolver.resolve_group_name(group_id) if name_resolver is not None else ""
+    chat_name = f"{group_id}({group_name})" if group_name else group_id
+    return f"group:{group_id}", "group", chat_name
+
+
+def _notice_text(kind: str, sub_type: str, display: str, user_id: str) -> str:
+    if kind == "poke":
+        action = "戳了戳你"
+    elif kind == "member_join":
+        action = "加入了群聊"
+    elif sub_type == "kick":
+        action = "被管理员移出了群聊"
+    else:
+        action = "退出了群聊"
+    return f"[系统] 用户 {display}({user_id}) {action}"

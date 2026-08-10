@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 class UsageStatsStore:
     """Small async facade over a single SQLite connection.
 
-    SQLite work is serialized by a lock. Queries are aggregate-only and each
-    write is a compact transaction, keeping event-loop pauses bounded.
+    SQLite work is serialized by a lock and dispatched to the default thread
+    pool so aggregate queries and slow storage never block the event loop.
     """
 
     def __init__(self, path: Path, retention_days: int = 365) -> None:
@@ -29,7 +29,7 @@ class UsageStatsStore:
         self._cleanup_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        self._open()
+        await asyncio.to_thread(self._open)
         await self.prune()
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
@@ -78,7 +78,7 @@ class UsageStatsStore:
             except asyncio.CancelledError:
                 pass
             self._cleanup_task = None
-        self._close()
+        await asyncio.to_thread(self._close)
 
     def _close(self) -> None:
         with self._lock:
@@ -100,7 +100,7 @@ class UsageStatsStore:
             await self.prune()
 
     async def record(self, event: NormalizedEvent) -> None:
-        self._record(event, time.time())
+        await asyncio.to_thread(self._record, event, time.time())
 
     def _record(self, event: NormalizedEvent, occurred_at: float) -> None:
         conn = self._require_conn()
@@ -135,7 +135,7 @@ class UsageStatsStore:
 
     async def prune(self) -> int:
         cutoff = time.time() - self.retention_days * 86400
-        return self._prune(cutoff)
+        return await asyncio.to_thread(self._prune, cutoff)
 
     def _prune(self, cutoff: float) -> int:
         conn = self._require_conn()
@@ -149,7 +149,7 @@ class UsageStatsStore:
             return cursor.rowcount
 
     async def clear(self) -> int:
-        return self._clear()
+        return await asyncio.to_thread(self._clear)
 
     def _clear(self) -> int:
         conn = self._require_conn()
@@ -161,7 +161,7 @@ class UsageStatsStore:
             return count
 
     async def dimensions(self, start: float, end: float) -> dict[str, list[dict[str, Any]]]:
-        return self._dimensions(start, end)
+        return await asyncio.to_thread(self._dimensions, start, end)
 
     def _dimensions(self, start: float, end: float) -> dict[str, list[dict[str, Any]]]:
         conn = self._require_conn()
@@ -196,7 +196,8 @@ class UsageStatsStore:
         bucket: str,
         tz_offset_minutes: int,
     ) -> dict[str, Any]:
-        return self._query(
+        return await asyncio.to_thread(
+            self._query,
             start,
             end,
             scope,
