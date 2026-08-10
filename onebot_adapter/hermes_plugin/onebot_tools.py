@@ -2044,15 +2044,17 @@ _PACKET_TOOL_NAMES = frozenset({
 })
 
 _TOOL_CAVEATS = {
-    "onebot_create_flash_task": "会读取并上传本机指定路径的文件到腾讯服务器",
+    "onebot_create_flash_task": "会读取并上传本机指定路径的文件到腾讯服务器；仅 Windows 版客户端可用",
     "onebot_delete_essence_msg": "NapCat 4.18.13 对合成精华消息 ID 的回退路径可能交换 seq/random 参数",
-    "onebot_download_fileset": "后台下载整个文件集到 NapCat 本地，无大小/磁盘限制",
-    "onebot_get_flash_file_list": "NapCat 只返回第一层目录，每文件夹最多 18 条，不支持分页",
-    "onebot_get_flash_file_url": "文件名未命中时返回错误；file_index 从 0 开始",
+    "onebot_download_fileset": "后台下载整个文件集到 NapCat 本地，无大小/磁盘限制；仅 Windows 版客户端可用",
+    "onebot_get_fileset_id": "仅 Windows 版客户端可用",
+    "onebot_get_fileset_info": "仅 Windows 版客户端可用",
+    "onebot_get_flash_file_list": "NapCat 只返回第一层目录，每文件夹最多 18 条，不支持分页；仅 Windows 版客户端可用",
+    "onebot_get_flash_file_url": "文件名未命中时返回错误；file_index 从 0 开始；仅 Windows 版客户端可用",
     "onebot_get_group_files_by_folder": "NapCat 4.18.13 只返回文件，folders 固定为空数组",
     "onebot_get_group_shut_list": "NapCat 查询失败或超时时同样返回空数组",
-    "onebot_get_share_link": "生成的外链任何人拿到即可访问",
-    "onebot_send_flash_msg": "任意有效 fileset_id 都可发送到任意群/人",
+    "onebot_get_share_link": "生成的外链任何人拿到即可访问；仅 Windows 版客户端可用",
+    "onebot_send_flash_msg": "任意有效 fileset_id 都可发送到任意群/人；仅 Windows 版客户端可用",
     "onebot_set_group_sign": "依赖 Packet backend，返回成功仅表示签到包已发送",
     "onebot_trans_group_file": "NapCat 4.18.13 会额外要求 Packet backend 可用",
 }
@@ -2062,6 +2064,16 @@ _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({
     "onebot_mark_msg_as_read",
     "onebot_set_friend_remark",
     "onebot_set_group_remark",
+    # 闪传与文件集：仅 Windows 版客户端可用，且涉及本机文件读取/上传，
+    # 默认不注册给 Hermes，需要时在 WebUI「OneBot 工具」页显式启用
+    "onebot_create_flash_task",
+    "onebot_send_flash_msg",
+    "onebot_get_share_link",
+    "onebot_get_fileset_id",
+    "onebot_get_fileset_info",
+    "onebot_get_flash_file_list",
+    "onebot_get_flash_file_url",
+    "onebot_download_fileset",
 })
 
 

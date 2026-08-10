@@ -102,7 +102,7 @@ curl -H "Authorization: Bearer hoa_xxx" \
 
 每个工具使用独立的 RPC 路径 `POST /api/v1/tools/<tool_name>`。完整参数可从 `GET /api/v1/tools` 或 `/api/v1/openapi.json` 获取。HTTP 调用不会继承 Hermes 的当前聊天上下文，发送消息或上传文件时必须显式提供与 `message_type` 匹配的 `group_id` 或 `user_id`。Key 可执行踢人、禁言、退群、删好友等高风险操作，不要放入 URL、日志或前端代码。
 
-本地文件默认只允许来自 `/tmp/hermes-onebot-adapter-uploads`；可在 WebUI 高级设置中调整 `automation_upload_allowed_roots`。qBittorrent hook 需要在其进程环境中设置：
+本地文件默认只允许来自 `/tmp/hermes-onebot-adapter-uploads`；可在 WebUI 高级设置中调整 `automation_upload_allowed_roots`。闪传与文件集工具仅 Windows 版客户端可用，在其他平台调用会失败。qBittorrent hook 需要在其进程环境中设置：
 
 ```bash
 ONEBOT_AUTOMATION_API_KEY=hoa_xxx
@@ -177,13 +177,15 @@ ws://127.0.0.1:3001
 
 ## OneBot API 工具
 
-插件提供 100 个 OneBot 工具（toolset: `onebot`），其中 96 个默认注册给 LLM，其余 4 个可在 WebUI 中启用：
+插件提供 100 个 OneBot 工具（toolset: `onebot`），其中 88 个默认注册给 LLM，其余 12 个默认隐藏，可在 WebUI「OneBot 工具」页启用：
 
 - **只读**：获取群列表/成员/扩展信息、好友、消息历史、精华、公告、禁言列表、签到、相册与收藏
 - **消息**：发送消息、撤回、合并转发、戳一戳、表情回应
-- **文件**：获取和上传群/私聊文件，查询群文件目录、容量与下载地址，管理群文件和文件夹及闪传文件集
+- **文件**：获取和上传群/私聊文件，查询群文件目录、容量与下载地址，管理群文件和文件夹
 - **管理**：踢人、禁言、设置群资料、精华、公告、待办、相册、好友资料和自定义表情
 - **动态黑名单**：查看或临时拉黑群聊、私聊或全部会话中的用户；管理员始终豁免
+
+**闪传与文件集（仅 Windows）**：8 个闪传工具（创建/发送闪传任务、分享链接、文件集查询与下载等）默认对 Hermes 隐藏。闪传是 PC 版 QQ 端的能力，**只有 Windows 版客户端可用**，且在 Linux 等平台运行 NapCat 时不可用；同时它们会读取本机文件或写入下载目录。需要时请在 WebUI「OneBot 工具」页显式启用（修改后需重启 Hermes 生效）。HTTP 自动化 API 始终包含这些工具，但调用前请确认 NapCat 运行在 Windows 客户端上。
 
 WebUI「OneBot 工具」页可以为每个工具设置是否注册给 Hermes，以及 `everyone` / `admin` 权限。策略只影响 Hermes，使用 automation key 的 HTTP API 始终保留完整工具目录和全权限。注册状态在 Hermes 启动时读取，修改后需要重启 Hermes；群管理员只能对当前群调用群级管理员工具，跨群和账号级管理员工具仅允许全局管理员调用。维护者可以显式把默认管理员工具降级为所有人。
 
