@@ -157,6 +157,8 @@ def test_upload_rpcs_use_long_result_timeout():
     assert _result_timeout("api_call", "upload_group_file", 480.0) == 520.0
     assert _result_timeout("api_call", "upload_private_file") == 630.0
     assert _result_timeout("api_call", "upload_private_file", 480.0) == 510.0
+    assert _result_timeout("api_call", "create_flash_task") == 630.0
+    assert _result_timeout("api_call", "create_flash_task", 480.0) == 510.0
     assert _result_timeout("send", "send_document") == 640.0
     assert _result_timeout("api_call", "get_group_info") == 30.0
     assert _result_timeout("send", "send_text") == 30.0

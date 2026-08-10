@@ -363,6 +363,9 @@ async def test_api_upload_actions_use_action_specific_timeouts():
     await api.upload_private_file(2, "/tmp/b", "b")
     assert transport.request.await_args.kwargs["timeout"] == 480.0
 
+    await api.call("create_flash_task", {"files": "/tmp/c"})
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
+
 
 async def test_api_file_upload_timeout_hot_reload():
     transport = MagicMock()
@@ -384,6 +387,17 @@ async def test_api_explicit_timeout_overrides_upload_timeout():
 
     await api.call("upload_group_file", {}, timeout=12.0)
     assert transport.request.await_args.kwargs["timeout"] == 12.0
+
+
+async def test_flash_upload_timeout_reports_unknown_outcome():
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=TimeoutError())
+    api = OneBotApi(ws_transport=transport, file_upload_timeout=480.0)
+
+    with pytest.raises(UploadOutcomeUnknownError, match="may still be uploading"):
+        await api.call("create_flash_task", {"files": "/tmp/a"})
+
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
 
 
 async def test_api_non_upload_action_uses_transport_default_timeout():
