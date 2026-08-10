@@ -52,6 +52,7 @@ async function save() {
       send_dedup_enabled: c.send_dedup_enabled,
       send_dedup_ttl_seconds: c.send_dedup_ttl_seconds,
       seq_map_size: c.seq_map_size,
+      file_upload_timeout: c.file_upload_timeout,
     });
     msg.value = "✅ 配置已保存";
     msgType.value = "success";
@@ -268,6 +269,11 @@ async function revokeApiKey() {
         消息序号映射容量
         <input type="number" v-model.number="cfg.seq_map_size" min="100" max="5000" />
         <span class="hint">real_seq→message_id 全局 FIFO 上限（默认 4500，与 NapCat 5000 对齐）</span>
+      </label>
+      <label>
+        文件上传超时（秒）
+        <input type="number" v-model.number="cfg.file_upload_timeout" min="30" max="600" step="30" />
+        <span class="hint">群聊、私聊和闪传统一使用，默认 600 秒；群上传超时后仍会查询群历史确认结果</span>
       </label>
     </div>
 

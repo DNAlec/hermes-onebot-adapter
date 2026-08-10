@@ -23,15 +23,55 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: "22"
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev]" build twine
+
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+
+          from packaging.version import InvalidVersion, Version
+
+          tag = os.environ["RELEASE_TAG"]
+          release = tag.removeprefix("v")
+          try:
+              parsed = Version(release)
+          except InvalidVersion as exc:
+              raise SystemExit(f"Invalid release tag: {tag}") from exc
+          if not tag.startswith("v") or str(parsed) != release:
+              raise SystemExit(f"Release tag must be a canonical v-prefixed PEP 440 version: {tag}")
+
+          package_version = version("hermes-onebot-adapter")
+          if package_version != release:
+              raise SystemExit(
+                  f"Tag version {release} does not match package version {package_version}"
+              )
+          PY
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q -rs
 
       - name: Build frontend
         run: bash scripts/build_frontend.sh
 
+      - name: Audit frontend dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
       - name: Build Python package
-        run: |
-          pip install build
-          python -m build
+        run: python -m build
+
+      - name: Check distributions
+        run: twine check dist/*
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

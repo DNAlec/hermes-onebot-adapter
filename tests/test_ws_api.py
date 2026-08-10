@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from onebot_adapter.onebot.api import OneBotApi
+from onebot_adapter.onebot import api as api_module
+from onebot_adapter.onebot.api import OneBotApi, UploadOutcomeUnknownError
 from onebot_adapter.onebot.ws_api import WsApiTransport
 
 
@@ -351,16 +352,32 @@ def test_api_connected_reflects_transport_state():
     assert api.connected is False
 
 
-async def test_api_upload_actions_use_long_timeout():
+async def test_api_upload_actions_use_action_specific_timeouts():
     transport = MagicMock()
     transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
-    api = OneBotApi(ws_transport=transport)
+    api = OneBotApi(ws_transport=transport, file_upload_timeout=480.0)
 
     await api.call("upload_group_file", {"group_id": 1, "file": "/tmp/a", "name": "a"})
-    assert transport.request.await_args.kwargs["timeout"] == 600.0
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
 
     await api.upload_private_file(2, "/tmp/b", "b")
-    assert transport.request.await_args.kwargs["timeout"] == 600.0
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
+
+    await api.call("create_flash_task", {"files": "/tmp/c"})
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
+
+
+async def test_api_file_upload_timeout_hot_reload():
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
+    api = OneBotApi(ws_transport=transport, file_upload_timeout=300.0)
+
+    api.update_file_upload_timeout(480.0)
+    await api.call("upload_group_file", {})
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
+
+    await api.call("upload_private_file", {})
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
 
 
 async def test_api_explicit_timeout_overrides_upload_timeout():
@@ -372,6 +389,17 @@ async def test_api_explicit_timeout_overrides_upload_timeout():
     assert transport.request.await_args.kwargs["timeout"] == 12.0
 
 
+async def test_flash_upload_timeout_reports_unknown_outcome():
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=TimeoutError())
+    api = OneBotApi(ws_transport=transport, file_upload_timeout=480.0)
+
+    with pytest.raises(UploadOutcomeUnknownError, match="may still be uploading"):
+        await api.call("create_flash_task", {"files": "/tmp/a"})
+
+    assert transport.request.await_args.kwargs["timeout"] == 480.0
+
+
 async def test_api_non_upload_action_uses_transport_default_timeout():
     transport = MagicMock()
     transport.request = AsyncMock(return_value={"retcode": 0, "data": {}})
@@ -379,6 +407,218 @@ async def test_api_non_upload_action_uses_transport_default_timeout():
 
     await api.call("get_login_info")
     assert transport.request.await_args.kwargs["timeout"] is None
+
+
+async def test_group_upload_timeout_confirmed_by_unique_recent_history(tmp_path, monkeypatch):
+    file_path = tmp_path / "report.txt"
+    file_path.write_text("confirmed", encoding="utf-8")
+    now = api_module.time.time()
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=[
+        TimeoutError(),
+        {
+            "retcode": 0,
+            "data": {
+                "messages": [{
+                    "self_id": 123,
+                    "user_id": 123,
+                    "group_id": 42,
+                    "time": now,
+                    "message_id": 99,
+                    "message": [{
+                        "type": "file",
+                        "data": {
+                            "file": "report.txt",
+                            "file_id": "file-99",
+                            "file_size": file_path.stat().st_size,
+                        },
+                    }],
+                }],
+            },
+        },
+    ])
+    monkeypatch.setattr(api_module, "_GROUP_UPLOAD_CONFIRM_DELAYS", (0.0,))
+    api = OneBotApi(ws_transport=transport)
+
+    result = await api.call("upload_group_file", {
+        "group_id": 42,
+        "file": str(file_path),
+        "name": "report.txt",
+    })
+
+    assert result["data"] == {
+        "file_id": "file-99",
+        "message_id": 99,
+        "confirmed_after_timeout": True,
+    }
+    assert transport.request.await_args_list[1].args[0] == "get_group_msg_history"
+    assert transport.request.await_args_list[1].kwargs["timeout"] == 8.0
+
+
+async def test_group_upload_timeout_without_match_reports_unknown(monkeypatch):
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=[
+        TimeoutError(),
+        {"retcode": 0, "data": {"messages": []}},
+    ])
+    monkeypatch.setattr(api_module, "_GROUP_UPLOAD_CONFIRM_DELAYS", (0.0,))
+    api = OneBotApi(ws_transport=transport)
+
+    with pytest.raises(UploadOutcomeUnknownError, match="may already have been uploaded"):
+        await api.call("upload_group_file", {
+            "group_id": 42,
+            "file": "/tmp/missing.txt",
+            "name": "missing.txt",
+        })
+
+
+async def test_group_upload_timeout_with_multiple_matches_is_ambiguous(monkeypatch):
+    now = api_module.time.time()
+    matching_message = {
+        "self_id": 123,
+        "user_id": 123,
+        "group_id": 42,
+        "time": now,
+        "message": [{"type": "file", "data": {"file": "same.txt"}}],
+    }
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=[
+        TimeoutError(),
+        {"retcode": 0, "data": {"messages": [
+            {**matching_message, "message_id": 1},
+            {**matching_message, "message_id": 2},
+        ]}},
+    ])
+    monkeypatch.setattr(api_module, "_GROUP_UPLOAD_CONFIRM_DELAYS", (0.0,))
+    api = OneBotApi(ws_transport=transport)
+
+    with pytest.raises(UploadOutcomeUnknownError, match="could not be confirmed safely"):
+        await api.call("upload_group_file", {
+            "group_id": 42,
+            "file": "https://example.test/same.txt",
+            "name": "same.txt",
+        })
+
+
+async def test_group_upload_confirmation_detects_duplicate_on_later_poll(monkeypatch):
+    now = api_module.time.time()
+    matching_message = {
+        "self_id": 123,
+        "user_id": 123,
+        "group_id": 42,
+        "time": now,
+        "message": [{"type": "file", "data": {"file": "same.txt"}}],
+    }
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=[
+        TimeoutError(),
+        {"retcode": 0, "data": {"messages": [{**matching_message, "message_id": 1}]}},
+        {"retcode": 0, "data": {"messages": [
+            {**matching_message, "message_id": 1},
+            {**matching_message, "message_id": 2},
+        ]}},
+    ])
+    monkeypatch.setattr(api_module, "_GROUP_UPLOAD_CONFIRM_DELAYS", (0.0, 0.0))
+    api = OneBotApi(ws_transport=transport)
+
+    with pytest.raises(UploadOutcomeUnknownError, match="could not be confirmed safely"):
+        await api.call("upload_group_file", {
+            "group_id": 42,
+            "file": "https://example.test/same.txt",
+            "name": "same.txt",
+        })
+
+
+async def test_group_upload_confirmation_merges_file_id_added_on_later_poll(monkeypatch):
+    now = api_module.time.time()
+    base_message = {
+        "self_id": 123,
+        "user_id": 123,
+        "group_id": 42,
+        "time": now,
+        "message_id": 99,
+    }
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=[
+        TimeoutError(),
+        {"retcode": 0, "data": {"messages": [{
+            **base_message,
+            "message": [{"type": "file", "data": {"file": "same.txt"}}],
+        }]}},
+        {"retcode": 0, "data": {"messages": [{
+            **base_message,
+            "message": [{
+                "type": "file",
+                "data": {"file": "same.txt", "file_id": "file-99"},
+            }],
+        }]}},
+    ])
+    monkeypatch.setattr(api_module, "_GROUP_UPLOAD_CONFIRM_DELAYS", (0.0, 0.0))
+    api = OneBotApi(ws_transport=transport)
+
+    result = await api.call("upload_group_file", {
+        "group_id": 42,
+        "file": "https://example.test/same.txt",
+        "name": "same.txt",
+    })
+
+    assert result["data"]["message_id"] == 99
+    assert result["data"]["file_id"] == "file-99"
+    assert result["data"]["confirmed_after_timeout"] is True
+
+
+async def test_local_group_upload_requires_reported_size(tmp_path, monkeypatch):
+    file_path = tmp_path / "report.txt"
+    file_path.write_text("confirmed", encoding="utf-8")
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=[
+        TimeoutError(),
+        {"retcode": 0, "data": {"messages": [{
+            "self_id": 123,
+            "user_id": 123,
+            "group_id": 42,
+            "time": api_module.time.time(),
+            "message_id": 99,
+            "message": [{"type": "file", "data": {"file": "report.txt"}}],
+        }]}},
+    ])
+    monkeypatch.setattr(api_module, "_GROUP_UPLOAD_CONFIRM_DELAYS", (0.0,))
+    api = OneBotApi(ws_transport=transport)
+
+    with pytest.raises(UploadOutcomeUnknownError, match="could not be confirmed safely"):
+        await api.call("upload_group_file", {
+            "group_id": 42,
+            "file": str(file_path),
+            "name": "report.txt",
+        })
+
+
+async def test_group_upload_explicit_failure_does_not_query_history():
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value={
+        "retcode": 1200,
+        "status": "failed",
+        "message": "rich media transfer failed",
+    })
+    api = OneBotApi(ws_transport=transport)
+
+    with pytest.raises(RuntimeError, match="rich media transfer failed"):
+        await api.call("upload_group_file", {
+            "group_id": 42,
+            "file": "/tmp/a",
+            "name": "a",
+        })
+    assert transport.request.await_count == 1
+
+
+async def test_group_upload_explicit_timeout_does_not_run_confirmation():
+    transport = MagicMock()
+    transport.request = AsyncMock(side_effect=TimeoutError())
+    api = OneBotApi(ws_transport=transport)
+
+    with pytest.raises(TimeoutError):
+        await api.call("upload_group_file", {}, timeout=0.01)
+    assert transport.request.await_count == 1
 
 
 async def test_api_get_login_info_helper():

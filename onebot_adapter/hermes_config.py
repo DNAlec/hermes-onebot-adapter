@@ -213,6 +213,84 @@ def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
     _read_modify_write(hermes_install_dir, modify=_modify)
 
 
+# ── OneBot per-tool policies ──────────────────────────────────────────────
+
+
+def read_onebot_tool_policies(hermes_install_dir: str | None) -> dict[str, dict[str, Any]]:
+    """Read sparse ``plugins.entries.onebot.tool_policies`` overrides.
+
+    Missing sections return an empty mapping. Malformed YAML still raises
+    :class:`HermesConfigParseError`; malformed policy values are ignored so a
+    damaged optional subtree cannot break the management page.
+    """
+    data = read_config(hermes_install_dir)
+    plugins = data.get("plugins") if hasattr(data, "get") else None
+    entries = plugins.get("entries") if hasattr(plugins, "get") else None
+    onebot = entries.get(PLATFORM) if hasattr(entries, "get") else None
+    policies = onebot.get("tool_policies") if hasattr(onebot, "get") else None
+    if not hasattr(policies, "items"):
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for name, policy in policies.items():
+        if not isinstance(name, str) or not hasattr(policy, "items"):
+            continue
+        result[name] = {str(key): value for key, value in policy.items()}
+    return result
+
+
+def write_onebot_tool_policies(
+    hermes_install_dir: str | None,
+    policies: dict[str, dict[str, Any]],
+) -> None:
+    """Replace the sparse OneBot tool policy map while preserving all other config."""
+
+    def _modify(data: Any) -> None:
+        from ruamel.yaml.comments import CommentedMap
+
+        if not hasattr(data, "get"):
+            raise HermesConfigParseError("Hermes config.yaml 顶层必须是映射")
+        plugins = data.get("plugins")
+        if plugins is None:
+            plugins = CommentedMap()
+            data["plugins"] = plugins
+        if not hasattr(plugins, "get"):
+            raise HermesConfigParseError("Hermes config.yaml plugins 必须是映射")
+        entries = plugins.get("entries")
+        if entries is None:
+            entries = CommentedMap()
+            plugins["entries"] = entries
+        if not hasattr(entries, "get"):
+            raise HermesConfigParseError("Hermes config.yaml plugins.entries 必须是映射")
+        onebot = entries.get(PLATFORM)
+        if onebot is None:
+            onebot = CommentedMap()
+            entries[PLATFORM] = onebot
+        if not hasattr(onebot, "get"):
+            raise HermesConfigParseError("Hermes config.yaml plugins.entries.onebot 必须是映射")
+        onebot["tool_policies"] = CommentedMap({
+            str(name): CommentedMap(dict(policy)) for name, policy in policies.items()
+        })
+
+    _read_modify_write(hermes_install_dir, modify=_modify)
+
+
+def reset_onebot_tool_policies(hermes_install_dir: str | None) -> None:
+    """Remove only ``plugins.entries.onebot.tool_policies`` if it exists."""
+    config_path = resolve_hermes_config_path(hermes_install_dir)
+    if config_path is None or not config_path.exists():
+        return
+
+    def _modify(data: Any) -> None:
+        plugins = data.get("plugins") if hasattr(data, "get") else None
+        entries = plugins.get("entries") if hasattr(plugins, "get") else None
+        onebot = entries.get(PLATFORM) if hasattr(entries, "get") else None
+        if hasattr(onebot, "__contains__") and "tool_policies" in onebot:
+            del onebot["tool_policies"]
+
+    _read_modify_write(hermes_install_dir, modify=_modify)
+
+
 # ── 顶层 group_sessions_per_user 读写(供 WebUI 管理)────────────────────
 
 

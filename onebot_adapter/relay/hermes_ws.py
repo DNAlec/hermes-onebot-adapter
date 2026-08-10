@@ -85,7 +85,8 @@ class HermesRelayServer:
     # to be popped without firing.  Hardcoded because they are gateway
     # internals, not plugin commands — the ``commands_snapshot`` registry
     # only carries plugin/builtin slash commands, not generation-bumping ones.
-    _INTERRUPT_COMMANDS = frozenset({"/stop", "/new", "/reset"})
+    _INTERRUPT_COMMANDS = frozenset({"stop", "new", "reset"})
+    _SESSION_RESET_COMMANDS = frozenset({"new", "reset"})
     # Max concurrent OneBot API send calls (send_group_msg / upload_*_file).
     # NapCat serializes API requests on a single WS, so unbounded concurrency
     # queues up at NapCat and inflates latency past the plugin's 30s
@@ -186,13 +187,15 @@ class HermesRelayServer:
                 )
             self._busy_groups.clear()
             self._queues.clear()
-        # 媒体投递模式变化:广播 fresh ready 让插件实时切换缓存策略。
+        # 插件运行时配置变化:广播 fresh ready 让插件实时切换。
         # broadcast_self_id 复用 ready 帧机制,这里用新 config 广播。
         self._config = config
-        if old.media_delivery_mode != config.media_delivery_mode:
+        if (
+            old.media_delivery_mode != config.media_delivery_mode
+            or old.file_upload_timeout != config.file_upload_timeout
+        ):
             logger.info(
-                "relay: media_delivery_mode changed %s -> %s, broadcasting fresh ready",
-                old.media_delivery_mode, config.media_delivery_mode,
+                "relay: plugin runtime config changed, broadcasting fresh ready",
             )
             task = asyncio.create_task(self.broadcast_self_id(config.self_id))
             self._text_tasks.add(task)
@@ -286,10 +289,14 @@ class HermesRelayServer:
         slash command or an alias of one."""
         if not name:
             return False
+        if name == "clean" and self._config.event_queue_clean_command_enabled:
+            return True
         return name in self._commands or name in self._commands_aliases
 
     def canonical_command_name(self, name: str) -> str:
         """Resolve *name* (possibly an alias) to its canonical command name."""
+        if name == "clean" and self._config.event_queue_clean_command_enabled:
+            return name
         if name in self._commands:
             return name
         return self._commands_aliases.get(name, name)
@@ -386,6 +393,7 @@ class HermesRelayServer:
             adapter_version=self._adapter_version,
             self_id=self_id,
             media_delivery_mode=self._config.media_delivery_mode,
+            file_upload_timeout=self._config.file_upload_timeout,
         )
         for ws in list(self._clients):
             try:
@@ -420,6 +428,7 @@ class HermesRelayServer:
                 adapter_version=self._adapter_version,
                 self_id=self._config.self_id,
                 media_delivery_mode=self._config.media_delivery_mode,
+                file_upload_timeout=self._config.file_upload_timeout,
             )
         )
         # Replay buffered events so a reconnecting plugin doesn't miss messages.
@@ -483,6 +492,7 @@ class HermesRelayServer:
 
         - ``"broadcast"``  — the event was delivered to plugin client(s) now.
         - ``"queued"``     — the event was enqueued for a later idle frame.
+        - ``"handled"``    — an adapter-local command handled the event.
         - ``"dropped"``    — the event could not be delivered (queue full or
           zero clients) and was discarded; the caller should NOT react as if
           it had been delivered.
@@ -514,18 +524,32 @@ class HermesRelayServer:
         排队规则:群未 busy → 标记 busy 并广播;群 busy → 一律入队 FIFO
         (包括 busy 用户自身,不再放行同用户消息)。
 
-        Returns ``"broadcast"``, ``"queued"`` or ``"dropped"`` (see push_event).
+        Returns ``"broadcast"``, ``"queued"``, ``"handled"`` or ``"dropped"`` (see push_event).
         """
         gid = self._group_id_of(event)
+        command = self._command_name(event.text)
+        if command == "clean" and self._config.event_queue_clean_command_enabled:
+            cleared = await self._clear_group_queue(gid) if gid is not None else 0
+            if gid is None:
+                message = "当前会话没有群消息队列。"
+            else:
+                message = f"已清空当前群聊的消息队列，共 {cleared} 条。"
+            await self.send_direct_message(event.chat_id, message, reply_to=event.message_id or None)
+            return "handled"
         if gid is None:
             # 私聊 — 不排队
             return await self._broadcast_with_status(event)
         # /命令绕过排队
         if (event.text or "").startswith("/"):
-            cmd = (event.text or "").strip().split(maxsplit=1)[0]
+            if (
+                command in self._SESSION_RESET_COMMANDS
+                and self._config.event_queue_clear_on_session_reset
+            ):
+                await self._clear_group_queue(gid)
             result = await self._broadcast_with_status(event)
-            if result == "broadcast" and cmd in self._INTERRUPT_COMMANDS:
-                task = asyncio.create_task(self._delayed_stop_cleanup(gid))
+            busy_marker = self._busy_groups.get(gid)
+            if result == "broadcast" and command in self._INTERRUPT_COMMANDS and busy_marker is not None:
+                task = asyncio.create_task(self._delayed_stop_cleanup(gid, busy_marker))
                 self._text_tasks.add(task)
                 task.add_done_callback(self._text_tasks.discard)
                 task.add_done_callback(_log_task_exception)
@@ -621,6 +645,44 @@ class HermesRelayServer:
             return None
         gid = cid[len("group:"):]
         return gid or None
+
+    @staticmethod
+    def _command_name(text: str) -> str | None:
+        """Return a normalized leading slash-command name, without ``/``."""
+        if not text.startswith("/"):
+            return None
+        token = text.split(maxsplit=1)[0][1:].lower()
+        if "@" in token:
+            token = token.split("@", 1)[0]
+        if not token or "/" in token:
+            return None
+        return token
+
+    async def _clear_group_queue(self, gid: str) -> int:
+        """Discard pending events for one group without interrupting its active turn."""
+        async with self._get_group_lock(gid):
+            queued = list(self._queues.pop(gid, ()))
+            if not queued:
+                self._schedule_group_lock_cleanup(gid)
+                return 0
+
+            queued_object_ids = {id(event) for event in queued}
+            queued_delivery_ids = {
+                delivery_id
+                for event in queued
+                for delivery_id in (event.delivery_ids or ([event.delivery_id] if event.delivery_id else []))
+            }
+            for entry in list(self._ring_buffer):
+                buffered = entry[1]
+                buffered_ids = set(
+                    buffered.delivery_ids
+                    or ([buffered.delivery_id] if buffered.delivery_id else [])
+                )
+                if id(buffered) in queued_object_ids or buffered_ids.intersection(queued_delivery_ids):
+                    self._ring_buffer.remove(entry)
+            logger.info("relay queue cleared: gid=%s discarded=%d", gid, len(queued))
+        self._schedule_group_lock_cleanup(gid)
+        return len(queued)
 
     def _ensure_watchdog(self) -> None:
         """Start the busy-timeout watchdog if it isn't already running."""
@@ -746,7 +808,7 @@ class HermesRelayServer:
             gid, len(self._queues.get(gid, ())), nxt.user_id, merged_count, nxt.delivery_ids, len(nxt.text or ""),
         )
 
-    async def _delayed_stop_cleanup(self, gid: str) -> None:
+    async def _delayed_stop_cleanup(self, gid: str, busy_marker: tuple[str, float]) -> None:
         """Force-clear a busy slot if the gateway does not fire an idle frame
         within ``_STOP_IDLE_DELAY`` seconds after an interrupting command
         (``/stop``, ``/new``, ``/reset``).
@@ -766,7 +828,7 @@ class HermesRelayServer:
         """
         await asyncio.sleep(self._STOP_IDLE_DELAY)
         async with self._get_group_lock(gid):
-            if gid not in self._busy_groups:
+            if self._busy_groups.get(gid) != busy_marker:
                 return
             logger.info(
                 "relay stop cleanup: gid=%s — no idle after /stop, force-clearing",
@@ -1169,6 +1231,9 @@ class HermesRelayServer:
                 self._text_tasks.add(task)
                 task.add_done_callback(self._text_tasks.discard)
                 task.add_done_callback(_log_task_exception)
+        except ob.UploadOutcomeUnknownError as exc:
+            logger.warning("send outcome unknown and must not be retried automatically: %s", exc)
+            await ws.send_json(result_message(req_id, False, error=str(exc), retryable=False))
         except Exception as exc:
             logger.exception("send failed")
             await ws.send_json(result_message(req_id, False, error=str(exc)))
@@ -1218,6 +1283,9 @@ class HermesRelayServer:
                 action, safe_json(result.get("data")),
             )
             await ws.send_json(result_message(req_id, True, data=result.get("data")))
+        except ob.UploadOutcomeUnknownError as exc:
+            logger.warning("api_call %s outcome unknown: %s", action, exc)
+            await ws.send_json(result_message(req_id, False, error=str(exc), retryable=False))
         except Exception as exc:
             logger.warning("api_call %s failed: %s", action, exc)
             await ws.send_json(result_message(req_id, False, error=str(exc)))
@@ -1234,8 +1302,21 @@ class HermesRelayServer:
         """
         if self._seq_map is None:
             return params
-        seq_actions = {"get_msg", "delete_msg", "set_msg_emoji_like", "mark_msg_as_read",
-                   "forward_group_single_msg", "forward_friend_single_msg"}
+        seq_actions = {
+            "cancel_group_todo",
+            "complete_group_todo",
+            "delete_essence_msg",
+            "delete_msg",
+            "fetch_emoji_like",
+            "forward_friend_single_msg",
+            "forward_group_single_msg",
+            "get_emoji_likes",
+            "get_msg",
+            "mark_msg_as_read",
+            "set_essence_msg",
+            "set_group_todo",
+            "set_msg_emoji_like",
+        }
         if action not in seq_actions:
             return params
         real_seq = params.pop("real_seq", None)
@@ -1264,10 +1345,8 @@ class HermesRelayServer:
             logger.debug("seq_map miss: scope=%s seq=%d -> passthrough as message_id", scope_id, seq_int)
         return params
 
-    async def send_reject_message(self, chat_id: str, message: str, reply_to: str | None = None) -> bool:
-        """Send a reject reply directly via the OneBot WS API (bypassing
-        the Hermes plugin).  Used by the command filter to notify users that
-        their /command was denied.  Returns True on success."""
+    async def send_direct_message(self, chat_id: str, message: str, reply_to: str | None = None) -> bool:
+        """Send a message directly via OneBot, bypassing the Hermes plugin."""
         try:
             is_group, num_id = parse_chat_id(chat_id)
             segs: list[dict] = []
@@ -1284,10 +1363,14 @@ class HermesRelayServer:
                 async with self._send_api_semaphore:
                     resp = await self._api.send_private_msg(num_id, segs)
             logger.debug(
-                "relay send_reject_message: chat_id=%s ok=True msg_id=%s",
+                "relay send_direct_message: chat_id=%s ok=True msg_id=%s",
                 chat_id, resp.get("message_id", ""),
             )
             return True
         except Exception:
-            logger.exception("relay send_reject_message failed chat_id=%s", chat_id)
+            logger.exception("relay send_direct_message failed chat_id=%s", chat_id)
             return False
+
+    async def send_reject_message(self, chat_id: str, message: str, reply_to: str | None = None) -> bool:
+        """Send an adapter-filter rejection directly to the originating chat."""
+        return await self.send_direct_message(chat_id, message, reply_to)

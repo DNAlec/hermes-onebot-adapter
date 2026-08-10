@@ -96,6 +96,9 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_get("/api/v1/hermes_tools", _get_hermes_tools(store))
     app.router.add_put("/api/v1/hermes_tools", _put_hermes_tools(store))
     app.router.add_post("/api/v1/hermes_tools/reset", _reset_hermes_tools(store))
+    app.router.add_get("/api/v1/onebot_tool_policies", _get_onebot_tool_policies(store))
+    app.router.add_put("/api/v1/onebot_tool_policies", _put_onebot_tool_policies(store))
+    app.router.add_post("/api/v1/onebot_tool_policies/reset", _reset_onebot_tool_policies(store))
     # Hermes session-isolation mode (group_sessions_per_user)
     app.router.add_get("/api/v1/hermes_mode", _get_hermes_mode(store, state))
     app.router.add_put("/api/v1/hermes_mode", _put_hermes_mode(store))
@@ -1003,6 +1006,190 @@ def _reset_hermes_tools(store: ConfigStore):
             _client_ip(request, cfg),
         )
         return aiohttp.web.json_response({"ok": True})
+
+    return handler
+
+
+# ── Hermes OneBot per-tool policies ──────────────────────────────────────
+
+
+def _onebot_tool_catalog() -> list[dict[str, Any]]:
+    """Build the catalog lazily so plugin tool changes need no route restart."""
+    from onebot_adapter.hermes_plugin import onebot_tools
+
+    catalog: list[dict[str, Any]] = []
+    for entry in onebot_tools._TOOLS:
+        if isinstance(entry, tuple):
+            name, _handler, schema = entry
+            metadata = onebot_tools.tool_metadata(name, schema)
+            item = {
+                "name": name,
+                "schema": schema,
+                **metadata,
+            }
+        else:
+            def _field(key: str, default: Any = None, source: Any = entry) -> Any:
+                if isinstance(source, dict):
+                    return source.get(key, default)
+                return getattr(source, key, default)
+
+            name = _field("name")
+            if not isinstance(name, str) or not name:
+                raise ValueError("OneBot tool spec has an invalid name")
+            default_registered = _field("default_registered", True)
+            default_permission = _field(
+                "default_permission",
+                onebot_tools.default_tool_permission(name),
+            )
+            if not isinstance(default_registered, bool):
+                raise ValueError(f"OneBot tool {name} has an invalid default_registered")
+            if default_permission not in {"everyone", "admin"}:
+                raise ValueError(f"OneBot tool {name} has an invalid default_permission")
+            item = {
+                "name": name,
+                "schema": _field("schema", {}),
+                "default_registered": default_registered,
+                "default_permission": default_permission,
+                "category": _field("category", "general") or "general",
+                "scope": _field("scope"),
+                "packet": _field("packet", False),
+                "caveat": _field("caveat"),
+            }
+        catalog.append(item)
+    return catalog
+
+
+def _tool_policy_response(catalog: list[dict[str, Any]], stored: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    effective: dict[str, dict[str, Any]] = {}
+    sparse: dict[str, dict[str, Any]] = {}
+    for item in catalog:
+        name = item["name"]
+        policy = stored.get(name, {})
+        registered = policy.get("registered", item["default_registered"])
+        permission = policy.get("permission", item["default_permission"])
+        if not isinstance(registered, bool):
+            registered = item["default_registered"]
+        if permission not in {"everyone", "admin"}:
+            permission = item["default_permission"]
+        effective[name] = {"registered": registered, "permission": permission}
+        if registered != item["default_registered"] or permission != item["default_permission"]:
+            sparse[name] = {"registered": registered, "permission": permission}
+    return {
+        "catalog": catalog,
+        "policies": effective,
+        "effective_policies": effective,
+        "sparse_policies": sparse,
+        "restart_required": True,
+    }
+
+
+def _get_onebot_tool_policies(store: ConfigStore):
+    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+        from onebot_adapter.hermes_config import read_onebot_tool_policies, resolve_hermes_config_path
+
+        install_dir = store.config.hermes_install_dir or None
+        if resolve_hermes_config_path(install_dir) is None:
+            return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
+        try:
+            return aiohttp.web.json_response(
+                _tool_policy_response(_onebot_tool_catalog(), read_onebot_tool_policies(install_dir))
+            )
+        except Exception as exc:
+            logger.exception("read OneBot tool policies failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=500)
+
+    return handler
+
+
+def _put_onebot_tool_policies(store: ConfigStore):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        from onebot_adapter.hermes_config import resolve_hermes_config_path, write_onebot_tool_policies
+
+        install_dir = store.config.hermes_install_dir or None
+        if resolve_hermes_config_path(install_dir) is None:
+            return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
+        try:
+            data = await request.json()
+        except Exception:
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(data, dict):
+            return aiohttp.web.json_response({"error": "policy payload must be an object"}, status=400)
+        if "policies" in data:
+            if set(data) != {"policies"}:
+                return aiohttp.web.json_response({"error": "unknown top-level fields"}, status=400)
+            policies = data["policies"]
+        else:
+            policies = data
+        if not isinstance(policies, dict):
+            return aiohttp.web.json_response({"error": "policies must be an object"}, status=400)
+
+        try:
+            catalog = _onebot_tool_catalog()
+        except Exception as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        defaults = {item["name"]: item for item in catalog}
+        sparse: dict[str, dict[str, Any]] = {}
+        for name, policy in policies.items():
+            if name not in defaults:
+                return aiohttp.web.json_response({"error": f"unknown tool: {name}"}, status=400)
+            if not isinstance(policy, dict):
+                return aiohttp.web.json_response({"error": f"policy for {name} must be an object"}, status=400)
+            unknown_fields = set(policy) - {"registered", "permission"}
+            if unknown_fields:
+                return aiohttp.web.json_response(
+                    {"error": f"unknown policy fields for {name}: {sorted(unknown_fields)}"}, status=400
+                )
+            registered = defaults[name]["default_registered"]
+            permission = defaults[name]["default_permission"]
+            if "registered" in policy:
+                if not isinstance(policy["registered"], bool):
+                    return aiohttp.web.json_response(
+                        {"error": f"registered for {name} must be a boolean"}, status=400
+                    )
+                registered = policy["registered"]
+            if "permission" in policy:
+                if not isinstance(policy["permission"], str) or policy["permission"] not in {"everyone", "admin"}:
+                    return aiohttp.web.json_response(
+                        {"error": f"permission for {name} must be everyone or admin"}, status=400
+                    )
+                permission = policy["permission"]
+            if (registered, permission) != (
+                defaults[name]["default_registered"], defaults[name]["default_permission"]
+            ):
+                sparse[name] = {"registered": registered, "permission": permission}
+
+        try:
+            write_onebot_tool_policies(install_dir, sparse)
+        except Exception as exc:
+            logger.exception("write OneBot tool policies failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        audit_logger.info(
+            "Hermes OneBot tool policies updated source=webui client_ip=%s tools=%d",
+            _client_ip(request, store.config), len(sparse),
+        )
+        return aiohttp.web.json_response(_tool_policy_response(catalog, sparse))
+
+    return handler
+
+
+def _reset_onebot_tool_policies(store: ConfigStore):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        from onebot_adapter.hermes_config import reset_onebot_tool_policies, resolve_hermes_config_path
+
+        install_dir = store.config.hermes_install_dir or None
+        if resolve_hermes_config_path(install_dir) is None:
+            return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
+        try:
+            catalog = _onebot_tool_catalog()
+            reset_onebot_tool_policies(install_dir)
+        except Exception as exc:
+            logger.exception("reset OneBot tool policies failed")
+            return aiohttp.web.json_response({"error": str(exc)}, status=500)
+        audit_logger.warning(
+            "Hermes OneBot tool policies reset source=webui client_ip=%s",
+            _client_ip(request, store.config),
+        )
+        return aiohttp.web.json_response(_tool_policy_response(catalog, {}))
 
     return handler
 

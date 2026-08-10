@@ -6,11 +6,11 @@ import hmac
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import aiohttp.web
-from pydantic import BaseModel, ConfigDict, ValidationError, create_model, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model, model_validator
 
 from onebot_adapter.config import ConfigStore
 from onebot_adapter.hermes_plugin.onebot_tools import _TOOLS, _api_caller, _msg_context
@@ -43,16 +43,61 @@ class _StrictModel(BaseModel):
                 raise ValueError("provide exactly one of real_seq or all=true")
             if real_seq is not None and real_seq <= 0:
                 raise ValueError("real_seq must be positive")
+        if {"fileset_id", "group_id", "user_id"} <= fields.keys():
+            group_id = self.group_id
+            user_id = self.user_id
+            if (group_id is None) == (user_id is None):
+                raise ValueError("provide exactly one of group_id or user_id")
+            if (group_id if group_id is not None else user_id) <= 0:
+                raise ValueError("group_id or user_id must be positive")
+        if {"fileset_id", "file_name", "file_index"} <= fields.keys():
+            if self.file_name is None and self.file_index is None:
+                raise ValueError("provide file_name or file_index")
+            if self.file_index is not None and self.file_index < 0:
+                raise ValueError("file_index must not be negative")
+        if "files" in fields:
+            files = self.files
+            if isinstance(files, str):
+                if not files.strip():
+                    raise ValueError("files must not be empty")
+            elif not files or any(not item.strip() for item in files):
+                raise ValueError("files must contain non-empty paths")
+        if {"add_type", "group_question", "group_answer"} <= fields.keys():
+            if self.add_type not in range(6):
+                raise ValueError("add_type must be between 0 and 5")
+            if self.add_type in {4, 5} and not self.group_question:
+                raise ValueError(f"add_type={self.add_type} requires group_question")
+            if self.add_type == 4 and not self.group_answer:
+                raise ValueError("add_type=4 requires group_answer")
         return self
 
 
 def _annotation(prop: dict[str, Any]) -> Any:
+    if "enum" in prop:
+        return Literal.__getitem__(tuple(prop["enum"]))
+    if "anyOf" in prop:
+        kinds = {child.get("type") for child in prop["anyOf"]}
+        if kinds == {"string", "array"}:
+            return str | list[str]
+        if kinds == {"integer", "string"}:
+            return int | str
+        if kinds == {"integer", "string", "array"}:
+            return int | str | list[str]
     kind = prop.get("type")
     if kind == "integer":
+        minimum = prop.get("minimum")
+        maximum = prop.get("maximum")
+        if minimum is not None or maximum is not None:
+            return Annotated[int, Field(ge=minimum, le=maximum)]
         return int
     if kind == "boolean":
         return bool
     if kind == "array":
+        item_kind = prop.get("items", {}).get("type")
+        if item_kind == "string":
+            return list[str]
+        if item_kind == "integer":
+            return list[int]
         return list[dict[str, Any]]
     if kind == "object":
         return dict[str, Any]
@@ -93,9 +138,17 @@ def _error(code: str, message: str, status: int, *, details: Any = None) -> aioh
     return aiohttp.web.json_response(body, status=status)
 
 
-def _validate_file_ref(value: str, roots: list[str]) -> None:
+def _validate_file_ref(
+    value: str,
+    roots: list[str],
+    *,
+    allow_directory: bool = False,
+    allow_url: bool = True,
+) -> None:
     parsed = urlparse(value)
     if parsed.scheme:
+        if not allow_url:
+            raise PermissionError("URLs are not allowed for this local path")
         if parsed.scheme not in {"http", "https"}:
             raise PermissionError("only http(s) URLs are allowed")
         return
@@ -103,8 +156,9 @@ def _validate_file_ref(value: str, roots: list[str]) -> None:
     if not candidate.is_absolute():
         raise PermissionError("local file path must be absolute")
     resolved = candidate.resolve(strict=True)
-    if not resolved.is_file():
-        raise PermissionError("local file must be a regular file")
+    if not resolved.is_file() and not (allow_directory and resolved.is_dir()):
+        expected = "file or directory" if allow_directory else "regular file"
+        raise PermissionError(f"local path must be a {expected}")
     allowed = False
     for root in roots:
         try:
@@ -120,8 +174,21 @@ def _validate_file_ref(value: str, roots: list[str]) -> None:
 def _validate_file_refs(value: Any, roots: list[str]) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if key == "file" and isinstance(child, str):
+            if key in {"file", "image"} and isinstance(child, str):
                 _validate_file_ref(child, roots)
+            elif key == "thumb_path" and isinstance(child, str):
+                _validate_file_ref(child, roots, allow_url=False)
+            elif key == "files":
+                if isinstance(child, str):
+                    _validate_file_ref(child, roots, allow_directory=True, allow_url=False)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, str):
+                            _validate_file_ref(item, roots, allow_directory=True, allow_url=False)
+                        else:
+                            _validate_file_refs(item, roots)
+                else:
+                    _validate_file_refs(child, roots)
             else:
                 _validate_file_refs(child, roots)
     elif isinstance(value, list):
@@ -152,7 +219,7 @@ async def _call_tool(
 
     handler, _schema = TOOL_MAP[name]
     caller_token = _api_caller.set(caller)
-    context_token = _msg_context.set((True, str(args.get("group_id") or ""), str(args.get("user_id") or "")))
+    context_token = _msg_context.set((True, str(args.get("group_id") or ""), str(args.get("user_id") or ""), True))
     try:
         raw = await handler(args)
     finally:
