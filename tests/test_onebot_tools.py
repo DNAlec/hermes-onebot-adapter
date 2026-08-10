@@ -90,8 +90,8 @@ def test_toolset_constant():
 
 
 def test_tool_count():
-    # Keep the canonical plugin and HTTP automation catalogs at 89 tools.
-    assert len(_TOOLS) == 89
+    # Keep the canonical plugin and HTTP automation catalogs at 100 tools.
+    assert len(_TOOLS) == 100
 
 
 def test_new_canonical_tool_names_are_complete_and_exclude_aliases():
@@ -109,7 +109,10 @@ def test_new_canonical_tool_names_are_complete_and_exclude_aliases():
         "get_emoji_likes", "get_group_file_system_info", "get_group_root_files",
         "get_group_files_by_folder", "get_group_file_url", "delete_group_file",
         "create_group_file_folder", "delete_group_folder", "move_group_file", "rename_group_file",
-        "trans_group_file",
+        "trans_group_file", "create_flash_task", "send_flash_msg", "get_share_link",
+        "get_fileset_id", "get_fileset_info", "get_flash_file_list", "get_flash_file_url",
+        "download_fileset", "get_group_system_msg", "get_group_honor_info",
+        "set_group_add_option",
     }
     names = {name for name, _, _ in _TOOLS}
     assert {f"onebot_{name}" for name in expected} <= names
@@ -221,7 +224,7 @@ def test_register_tools_skips_hidden_policy(monkeypatch):
     register_tools(ctx)
     names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
     assert "onebot_get_login_info" not in names
-    assert len(names) == 84
+    assert len(names) == 95
 
 
 def test_descriptions_only_name_qq_group_permission_requirements():
@@ -249,6 +252,7 @@ def test_exact_default_admin_tool_set():
         "onebot_mute_group_whole",
         "onebot_mute_group_member",
         "onebot_kick_group_member",
+        "onebot_set_group_add_option",
     }
     actual = {name for name, _, _ in _TOOLS if onebot_tools.default_tool_permission(name) == "admin"}
     assert actual == expected
@@ -309,6 +313,25 @@ async def test_group_admin_cannot_call_account_admin_tool(monkeypatch):
     set_adapter(adapter)
 
     raw = await _registered_handler(ctx, "onebot_set_avatar")({"file": "https://example.com/a.png"})
+
+    assert "全局管理员" in _parse(raw)["error"]
+    assert adapter._api_calls == []
+
+
+async def test_group_admin_cannot_send_admin_flash_to_private_user(monkeypatch):
+    monkeypatch.setattr(
+        onebot_tools,
+        "_load_tool_policies",
+        lambda: {"onebot_send_flash_msg": {"permission": "admin"}},
+    )
+    ctx = MagicMock()
+    register_tools(ctx)
+    adapter = MockAdapter(is_admin=True, group_id="42")
+    set_adapter(adapter)
+
+    raw = await _registered_handler(ctx, "onebot_send_flash_msg")({
+        "fileset_id": "f1", "user_id": 100,
+    })
 
     assert "全局管理员" in _parse(raw)["error"]
     assert adapter._api_calls == []
@@ -905,7 +928,7 @@ async def test_all_admin_tools_blocked_without_admin():
     adapter = MockAdapter(is_admin=False)
     set_adapter(adapter)
     admin_tools = [(name, handler) for name, handler, _ in _TOOLS if name in _ADMIN_TOOL_NAMES]
-    assert len(admin_tools) == 37
+    assert len(admin_tools) == 38
     for name, handler in admin_tools:
         raw = await handler({
             "group_id": 1, "user_id": 2, "flag": "x", "group_name": "n", "card": "c",
@@ -1004,3 +1027,151 @@ async def test_get_msg_no_group_id_for_dm():
     _, params = adapter._api_calls[0]
     assert params["user_id"] == "10001000"
     assert "group_id" not in params
+
+
+# ── Flash transfer / filesets / group system actions ─────────────────────
+
+
+async def test_create_flash_task_passes_files():
+    adapter = MockAdapter()
+    adapter._api_results["create_flash_task"] = {
+        "success": True,
+        "data": {
+            "result": 0,
+            "createFlashTransferResult": {
+                "fileSetId": "f1",
+                "shareLink": "https://example.com/share",
+                "expireTime": "123",
+            },
+        },
+    }
+    set_adapter(adapter)
+    raw = await _tool_handler("onebot_create_flash_task")({
+        "files": "/tmp/a.zip",
+        "name": "a",
+    })
+    assert _is_success(raw)
+    assert adapter._api_calls[0] == (
+        "create_flash_task",
+        {"files": "/tmp/a.zip", "name": "a"},
+    )
+    result = _parse(raw)
+    assert result["fileset_id"] == "f1"
+    assert result["share_link"] == "https://example.com/share"
+
+
+async def test_send_flash_msg_requires_exactly_one_target():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    assert _has_error(await _tool_handler("onebot_send_flash_msg")({"fileset_id": "f1"}))
+    assert _has_error(await _tool_handler("onebot_send_flash_msg")({
+        "fileset_id": "f1", "group_id": 1, "user_id": 2,
+    }))
+
+    raw = await _tool_handler("onebot_send_flash_msg")({"fileset_id": "f1", "group_id": 42})
+    assert _is_success(raw)
+    assert adapter._api_calls[0] == (
+        "send_flash_msg",
+        {"fileset_id": "f1", "group_id": 42},
+    )
+    assert _has_error(await _tool_handler("onebot_send_flash_msg")({
+        "fileset_id": "f1", "group_id": 0,
+    }))
+
+
+async def test_get_share_link_and_fileset_id():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    assert _is_success(await _tool_handler("onebot_get_share_link")({"fileset_id": "f1"}))
+    assert adapter._api_calls[0] == ("get_share_link", {"fileset_id": "f1"})
+    assert _is_success(await _tool_handler("onebot_get_fileset_id")({"share_code": "abc123"}))
+    assert adapter._api_calls[1] == ("get_fileset_id", {"share_code": "abc123"})
+
+
+async def test_flash_listing_and_download_tools():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    assert _is_success(await _tool_handler("onebot_get_fileset_info")({"fileset_id": "f1"}))
+    assert _is_success(await _tool_handler("onebot_get_flash_file_list")({"fileset_id": "f1"}))
+    assert _is_success(await _tool_handler("onebot_get_flash_file_url")({
+        "fileset_id": "f1", "file_name": "x.zip",
+    }))
+    assert _is_success(await _tool_handler("onebot_download_fileset")({"fileset_id": "f1"}))
+    assert [call[0] for call in adapter._api_calls] == [
+        "get_fileset_info", "get_flash_file_list", "get_flash_file_url", "download_fileset",
+    ]
+
+
+async def test_flash_file_url_requires_valid_selector():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_get_flash_file_url")
+
+    assert _has_error(await handler({"fileset_id": "f1"}))
+    assert _has_error(await handler({"fileset_id": "f1", "file_index": -1}))
+    assert adapter._api_calls == []
+
+
+async def test_flash_inner_failure_returns_tool_error():
+    adapter = MockAdapter()
+    adapter._api_results["get_flash_file_url"] = {
+        "success": True,
+        "data": {"result": -1, "errMsg": "未找到对应文件", "transferUrl": ""},
+    }
+    set_adapter(adapter)
+
+    raw = await _tool_handler("onebot_get_flash_file_url")({
+        "fileset_id": "f1", "file_name": "missing.zip",
+    })
+
+    assert _has_error(raw)
+    assert "未找到对应文件" in _parse(raw)["error"]
+
+
+async def test_get_group_system_msg_passes_count():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    raw = await _tool_handler("onebot_get_group_system_msg")({})
+    assert _is_success(raw)
+    assert adapter._api_calls[0] == ("get_group_system_msg", {"count": 50})
+
+
+async def test_get_group_honor_info_passes_type():
+    adapter = MockAdapter()
+    set_adapter(adapter)
+    raw = await _tool_handler("onebot_get_group_honor_info")({"group_id": 42, "type": "talkative"})
+    assert _is_success(raw)
+    assert adapter._api_calls[0] == ("get_group_honor_info", {"group_id": 42, "type": "talkative"})
+    assert _has_error(await _tool_handler("onebot_get_group_honor_info")({
+        "group_id": 42, "type": "current_talkative",
+    }))
+
+
+async def test_set_group_add_option_requires_admin():
+    adapter = MockAdapter(is_admin=False)
+    set_adapter(adapter)
+    raw = await _tool_handler("onebot_set_group_add_option")({"group_id": 42, "add_type": 1})
+    assert _has_error(raw)
+    assert adapter._api_calls == []
+
+    admin_adapter = MockAdapter(is_admin=True, group_id="42")
+    set_adapter(admin_adapter)
+    raw = await _tool_handler("onebot_set_group_add_option")({
+        "group_id": 42, "add_type": 4, "group_question": "q", "group_answer": "a",
+    })
+    assert _is_success(raw)
+    assert admin_adapter._api_calls[0] == (
+        "set_group_add_option",
+        {"group_id": 42, "add_type": 4, "group_question": "q", "group_answer": "a"},
+    )
+
+
+async def test_set_group_add_option_validates_question_fields():
+    adapter = MockAdapter(is_admin=True, group_id="42")
+    set_adapter(adapter)
+    handler = _tool_handler("onebot_set_group_add_option")
+
+    assert _has_error(await handler({"group_id": 42, "add_type": 6}))
+    assert _has_error(await handler({"group_id": 42, "add_type": 4, "group_question": "q"}))
+    assert _has_error(await handler({"group_id": 42, "add_type": 5}))
+    assert adapter._api_calls == []

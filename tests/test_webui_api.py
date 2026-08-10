@@ -293,6 +293,7 @@ async def test_tool_policy_get_returns_tuple_catalog_defaults(tool_policy_client
         "onebot_mute_group_whole",
         "onebot_mute_group_member",
         "onebot_kick_group_member",
+        "onebot_set_group_add_option",
     }
     assert payload["sparse_policies"] == {}
 

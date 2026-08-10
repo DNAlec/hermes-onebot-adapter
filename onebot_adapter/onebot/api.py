@@ -57,7 +57,7 @@ class OneBotApi:
         )
         started = time.monotonic()
         started_wall = time.time()
-        if timeout is None and action in {"upload_group_file", "upload_private_file"}:
+        if timeout is None and action in {"upload_group_file", "upload_private_file", "create_flash_task"}:
             request_timeout = self._file_upload_timeout
         else:
             request_timeout = timeout
@@ -85,6 +85,11 @@ class OneBotApi:
                 raise UploadOutcomeUnknownError(
                     f"upload_group_file timed out and could not be confirmed safely "
                     f"(group_id={group_id}, name={name!r}); the file may already have been uploaded, "
+                    "do not retry automatically"
+                ) from exc
+            if action == "create_flash_task" and timeout is None:
+                raise UploadOutcomeUnknownError(
+                    "create_flash_task timed out; the fileset may still be uploading, "
                     "do not retry automatically"
                 ) from exc
             logger.warning(

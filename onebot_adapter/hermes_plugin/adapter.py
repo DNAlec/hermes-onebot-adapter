@@ -108,6 +108,8 @@ def _result_timeout(
         return file_upload_timeout + _GROUP_UPLOAD_CONFIRMATION_MARGIN
     if frame_type == "api_call" and action == "upload_private_file":
         return file_upload_timeout + _PRIVATE_UPLOAD_MARGIN
+    if frame_type == "api_call" and action == "create_flash_task":
+        return file_upload_timeout + _PRIVATE_UPLOAD_MARGIN
     return _RESULT_TIMEOUT
 
 # ── Media caching helpers ────────────────────────────────────────────────

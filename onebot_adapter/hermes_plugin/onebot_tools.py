@@ -92,12 +92,20 @@ def _schema(name: str, desc: str, props: dict, required: list[str] | None = None
     }
 
 
-def _str(desc: str) -> dict:
-    return {"type": "string", "description": desc}
+def _str(desc: str, *, enum: list[str] | None = None) -> dict:
+    schema: dict[str, Any] = {"type": "string", "description": desc}
+    if enum is not None:
+        schema["enum"] = enum
+    return schema
 
 
-def _int(desc: str) -> dict:
-    return {"type": "integer", "description": desc}
+def _int(desc: str, *, minimum: int | None = None, maximum: int | None = None) -> dict:
+    schema: dict[str, Any] = {"type": "integer", "description": desc}
+    if minimum is not None:
+        schema["minimum"] = minimum
+    if maximum is not None:
+        schema["maximum"] = maximum
+    return schema
 
 
 def _bool(desc: str) -> dict:
@@ -106,6 +114,16 @@ def _bool(desc: str) -> dict:
 
 def _array(desc: str) -> dict:
     return {"type": "array", "description": desc, "items": {"type": "object"}}
+
+
+def _str_or_array(desc: str) -> dict:
+    return {
+        "description": desc,
+        "anyOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}},
+        ],
+    }
 
 
 # ── Tool result/error formatting ─────────────────────────────────────────
@@ -795,6 +813,36 @@ async def _run_action(action: str, **params: Any) -> str:
         return tool_error(str(e))
 
 
+def _flash_action_error(data: Any) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    result = data.get("result")
+    if isinstance(result, int) and not isinstance(result, bool) and result != 0:
+        return str(data.get("errMsg") or data.get("errMs") or f"result={result}")
+    err_code = data.get("errCode")
+    if isinstance(err_code, int) and not isinstance(err_code, bool) and err_code != 0:
+        return str(data.get("errMsg") or f"errCode={err_code}")
+    send_status = data.get("rsp", {}).get("sendStatus") if isinstance(data.get("rsp"), dict) else None
+    if isinstance(send_status, list):
+        failures = [item for item in send_status if isinstance(item, dict) and item.get("result") != 0]
+        if failures:
+            first = failures[0]
+            return str(first.get("msg") or f"send result={first.get('result')}")
+    return None
+
+
+async def _run_flash_action(action: str, **params: Any) -> str:
+    try:
+        data = await _api_call(action, **params)
+        error = _flash_action_error(data)
+        if error:
+            return tool_error(f"{action} failed: {error}")
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
 def _group_seq_params(args: dict) -> dict[str, Any]:
     params: dict[str, Any] = {"real_seq": int(args["real_seq"])}
     group_id = args.get("group_id") or _current_group_id()
@@ -1124,6 +1172,135 @@ async def _trans_group_file(args: dict, **_) -> str:
     if err:
         return tool_error(err)
     return await _admin_group_file(args, "trans_group_file", file_id=args["file_id"])
+
+
+# ── Flash transfer (闪传) and filesets ────────────────────────────────────
+
+
+async def _create_flash_task(args: dict, **_) -> str:
+    files = args["files"]
+    if isinstance(files, str):
+        if not files.strip():
+            return tool_error("files 不能为空")
+    elif not isinstance(files, list) or not files or any(
+        not isinstance(item, str) or not item.strip() for item in files
+    ):
+        return tool_error("files 必须是非空路径或非空路径数组")
+    try:
+        data = await _api_call(
+            "create_flash_task",
+            files=files,
+            name=args.get("name", ""),
+            thumb_path=args.get("thumb_path"),
+        )
+        error = _flash_action_error(data)
+        if error:
+            return tool_error(f"create_flash_task failed: {error}")
+        if isinstance(data, dict) and isinstance(data.get("createFlashTransferResult"), dict):
+            details = data["createFlashTransferResult"]
+            data = {
+                **data,
+                "fileset_id": details.get("fileSetId"),
+                "share_link": details.get("shareLink"),
+                "expire_time": details.get("expireTime"),
+                "expire_left_time": details.get("expireLeftTime"),
+            }
+        return tool_result(data)
+    except Exception as e:
+        logger.warning("tool call failed: %s", e)
+        return tool_error(str(e))
+
+
+async def _send_flash_msg(args: dict, **_) -> str:
+    group_id = args.get("group_id")
+    user_id = args.get("user_id")
+    if group_id is not None and user_id is not None:
+        return tool_error("group_id 与 user_id 不能同时提供")
+    if group_id is None and user_id is None:
+        return tool_error("发送闪传消息需要 group_id 或 user_id 之一")
+    target_id = group_id if group_id is not None else user_id
+    if int(target_id) <= 0:
+        return tool_error("group_id 或 user_id 必须是正整数")
+    return await _run_flash_action(
+        "send_flash_msg",
+        fileset_id=args["fileset_id"],
+        group_id=int(group_id) if group_id is not None else None,
+        user_id=int(user_id) if user_id is not None else None,
+    )
+
+
+async def _get_share_link(args: dict, **_) -> str:
+    return await _run_flash_action("get_share_link", fileset_id=args["fileset_id"])
+
+
+async def _get_fileset_id(args: dict, **_) -> str:
+    return await _run_action("get_fileset_id", share_code=args["share_code"])
+
+
+async def _get_fileset_info(args: dict, **_) -> str:
+    return await _run_flash_action("get_fileset_info", fileset_id=args["fileset_id"])
+
+
+async def _get_flash_file_list(args: dict, **_) -> str:
+    return await _run_flash_action("get_flash_file_list", fileset_id=args["fileset_id"])
+
+
+async def _get_flash_file_url(args: dict, **_) -> str:
+    file_name = args.get("file_name")
+    file_index = args.get("file_index")
+    if file_name is None and file_index is None:
+        return tool_error("file_name 与 file_index 至少提供一项")
+    if file_index is not None and int(file_index) < 0:
+        return tool_error("file_index 不能为负数")
+    return await _run_flash_action(
+        "get_flash_file_url",
+        fileset_id=args["fileset_id"],
+        file_name=file_name,
+        file_index=file_index,
+    )
+
+
+async def _download_fileset(args: dict, **_) -> str:
+    return await _run_flash_action("download_fileset", fileset_id=args["fileset_id"])
+
+
+# ── Group system messages / honor / add option ────────────────────────────
+
+
+async def _get_group_system_msg(args: dict, **_) -> str:
+    return await _run_action("get_group_system_msg", count=int(args.get("count", 50)))
+
+
+async def _get_group_honor_info(args: dict, **_) -> str:
+    honor_type = args.get("type")
+    valid_types = {"all", "talkative", "performer", "legend", "strong_newbie", "emotion"}
+    if honor_type is not None and honor_type not in valid_types:
+        return tool_error(f"无效的荣誉类型: {honor_type}")
+    return await _run_action(
+        "get_group_honor_info", group_id=int(args["group_id"]), type=honor_type,
+    )
+
+
+async def _set_group_add_option(args: dict, **_) -> str:
+    err = _check_admin()
+    if err:
+        return tool_error(err)
+    add_type = int(args["add_type"])
+    question = args.get("group_question")
+    answer = args.get("group_answer")
+    if add_type not in range(6):
+        return tool_error("add_type 必须在 0 到 5 之间")
+    if add_type in {4, 5} and not question:
+        return tool_error(f"add_type={add_type} 时必须提供 group_question")
+    if add_type == 4 and not answer:
+        return tool_error("add_type=4 时必须提供 group_answer")
+    return await _run_action(
+        "set_group_add_option",
+        group_id=int(args["group_id"]),
+        add_type=add_type,
+        group_question=question,
+        group_answer=answer,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1654,6 +1831,95 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
         "onebot_trans_group_file", "转存群文件。",
         {"group_id": _int("群号"), "file_id": _str("文件ID")}, ["group_id", "file_id"],
     )),
+    # ── Flash transfer (闪传) and filesets ──
+    ("onebot_create_flash_task", _create_flash_task, _schema(
+        "onebot_create_flash_task",
+        "创建闪传任务并把本地文件/文件夹上传为文件集，返回 fileset_id 与分享链接。"
+        "files 为绝对路径字符串或路径数组，可包含文件夹。",
+        {
+            "files": _str_or_array("本地文件或文件夹的绝对路径（可传路径数组）"),
+            "name": _str("文件集名称(可选)"),
+            "thumb_path": _str("自定义缩略图路径(可选)"),
+        },
+        ["files"],
+    )),
+    ("onebot_send_flash_msg", _send_flash_msg, _schema(
+        "onebot_send_flash_msg",
+        "把已存在的文件集(fileset_id)作为闪传消息发送到群或私聊。group_id 与 user_id 必须恰好提供其一。",
+        {
+            "fileset_id": _str("文件集ID(来自 create_flash_task 或 get_fileset_id)"),
+            "group_id": _int("目标群号(发送到群聊时填写)"),
+            "user_id": _int("目标QQ号(发送到私聊时填写)"),
+        },
+        ["fileset_id"],
+    )),
+    ("onebot_get_share_link", _get_share_link, _schema(
+        "onebot_get_share_link", "获取文件集的外部分享链接（拿到链接的人均可访问）。",
+        {"fileset_id": _str("文件集ID")},
+        ["fileset_id"],
+    )),
+    ("onebot_get_fileset_id", _get_fileset_id, _schema(
+        "onebot_get_fileset_id", "把分享码或完整分享链接解析为 fileset_id。",
+        {"share_code": _str("分享码或分享链接(支持 ?code=xxx 形式)")},
+        ["share_code"],
+    )),
+    ("onebot_get_fileset_info", _get_fileset_info, _schema(
+        "onebot_get_fileset_info", "获取文件集元数据（名称、大小、上传者、过期时间、分享信息等）。",
+        {"fileset_id": _str("文件集ID")},
+        ["fileset_id"],
+    )),
+    ("onebot_get_flash_file_list", _get_flash_file_list, _schema(
+        "onebot_get_flash_file_list",
+        "获取文件集的文件列表。注意：NapCat 只返回第一层目录，每文件夹最多 18 条，不支持分页。",
+        {"fileset_id": _str("文件集ID")},
+        ["fileset_id"],
+    )),
+    ("onebot_get_flash_file_url", _get_flash_file_url, _schema(
+        "onebot_get_flash_file_url",
+        "获取文件集内单个文件的限时直链。按 file_name 优先匹配，未提供时用 file_index（0 起，为文件夹内索引）。",
+        {
+            "fileset_id": _str("文件集ID"),
+            "file_name": _str("文件名(优先匹配)"),
+            "file_index": _int("文件索引(0 起，为文件夹内索引)", minimum=0),
+        },
+        ["fileset_id"],
+    )),
+    ("onebot_download_fileset", _download_fileset, _schema(
+        "onebot_download_fileset",
+        "把整个文件集后台下载到 NapCat 的下载目录（异步执行，无完成通知）。",
+        {"fileset_id": _str("文件集ID")},
+        ["fileset_id"],
+    )),
+    # ── Group system messages / honor / add option ──
+    ("onebot_get_group_system_msg", _get_group_system_msg, _schema(
+        "onebot_get_group_system_msg",
+        "获取群系统消息（进群申请和邀请通知列表，含 request_id、申请附言、是否已处理等）。",
+        {"count": _int("获取数量(默认50，NapCat 最多 50 条)")},
+    )),
+    ("onebot_get_group_honor_info", _get_group_honor_info, _schema(
+        "onebot_get_group_honor_info",
+        "获取群荣誉信息（当前龙王及各称号成员列表，如群聊之火、快乐源泉、冒尖小春笋等）。",
+        {
+            "group_id": _int("群号"),
+            "type": _str(
+                "荣誉类型(可选)：all/talkative/performer/legend/strong_newbie/emotion，默认 all",
+                enum=["all", "talkative", "performer", "legend", "strong_newbie", "emotion"],
+            ),
+        },
+        ["group_id"],
+    )),
+    ("onebot_set_group_add_option", _set_group_add_option, _schema(
+        "onebot_set_group_add_option",
+        "设置群加群选项（需群聊管理员权限）。add_type 范围为 0-5；4=正确回答问题后加入，"
+        "5=回答问题并由管理员审批。",
+        {
+            "group_id": _int("群号"),
+            "add_type": _int("加群方式(0-5)", minimum=0, maximum=5),
+            "group_question": _str("加群问题(add_type=4/5 时必填)"),
+            "group_answer": _str("加群答案(add_type=4 时必填)"),
+        },
+        ["group_id", "add_type"],
+    )),
 ]
 
 
@@ -1688,6 +1954,7 @@ _ADMIN_TOOL_NAMES = frozenset({
     "onebot_set_friend_remark",
     "onebot_set_avatar",
     "onebot_set_group_admin",
+    "onebot_set_group_add_option",
     "onebot_set_group_card",
     "onebot_set_group_name",
     "onebot_set_group_portrait",
@@ -1719,6 +1986,7 @@ _DEFAULT_ADMIN_TOOL_NAMES = frozenset({
     "onebot_set_group_portrait",
     "onebot_set_qq_profile",
     "onebot_set_signature",
+    "onebot_set_group_add_option",
 })
 
 _ACCOUNT_TOOL_NAMES = frozenset({
@@ -1776,9 +2044,15 @@ _PACKET_TOOL_NAMES = frozenset({
 })
 
 _TOOL_CAVEATS = {
+    "onebot_create_flash_task": "会读取并上传本机指定路径的文件到腾讯服务器",
     "onebot_delete_essence_msg": "NapCat 4.18.13 对合成精华消息 ID 的回退路径可能交换 seq/random 参数",
+    "onebot_download_fileset": "后台下载整个文件集到 NapCat 本地，无大小/磁盘限制",
+    "onebot_get_flash_file_list": "NapCat 只返回第一层目录，每文件夹最多 18 条，不支持分页",
+    "onebot_get_flash_file_url": "文件名未命中时返回错误；file_index 从 0 开始",
     "onebot_get_group_files_by_folder": "NapCat 4.18.13 只返回文件，folders 固定为空数组",
     "onebot_get_group_shut_list": "NapCat 查询失败或超时时同样返回空数组",
+    "onebot_get_share_link": "生成的外链任何人拿到即可访问",
+    "onebot_send_flash_msg": "任意有效 fileset_id 都可发送到任意群/人",
     "onebot_set_group_sign": "依赖 Packet backend，返回成功仅表示签到包已发送",
     "onebot_trans_group_file": "NapCat 4.18.13 会额外要求 Packet backend 可用",
 }
@@ -1811,6 +2085,10 @@ def tool_scope(name: str, schema: dict[str, Any]) -> str:
 def tool_category(name: str) -> str:
     if "group_file" in name or name == "onebot_upload_file":
         return "群文件"
+    if "flash" in name or "fileset" in name or name in {
+        "onebot_get_share_link", "onebot_send_flash_msg",
+    }:
+        return "闪传与文件集"
     if "album" in name:
         return "群相册"
     if "group_todo" in name:
@@ -1884,6 +2162,8 @@ def _permission_error(name: str, schema: dict[str, Any], args: dict[str, Any], p
     if message_type and message_type != "group":
         scope = "account"
     if name == "onebot_forward_single_msg" and args.get("user_id") and not args.get("group_id"):
+        scope = "account"
+    if name == "onebot_send_flash_msg" and args.get("user_id") is not None and args.get("group_id") is None:
         scope = "account"
     if scope != "group":
         return "此账号级工具仅允许全局管理员调用"

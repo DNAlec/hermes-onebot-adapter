@@ -1057,7 +1057,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `reaction_emoji_enabled` | bool | `true` | 消息送达 Hermes 后在原消息贴表情回应；群配置可单独覆盖 |
 | `reaction_emoji_id` | string | `"124"` | 贴表情回应使用的表情 ID（QQ 表情编号） |
 | `reaction_emoji_id_queued` | string | `"123"` | 消息排队时贴的表情 ID（空=不贴表情） |
-| `file_upload_timeout` | float | `600.0` | 群聊和私聊上传均按此秒数等待（范围 30–600）；仅群上传超时后短轮询群历史，无法唯一确认时返回不可自动重试的“结果未知” |
+| `file_upload_timeout` | float | `600.0` | 群聊、私聊和闪传上传均按此秒数等待（范围 30–600）；群上传超时后短轮询群历史，闪传超时无法确认结果，均返回不可自动重试的“结果未知” |
 | `send_dedup_enabled` | bool | `true` | 发送去重开关（防 Gateway send_text 超时重试导致重复发送） |
 | `send_dedup_ttl_seconds` | float | `10.0` | 发送去重 TTL（秒） |
 | `event_queue_enabled` | bool | `true` | 群聊排队总开关：Hermes 不隔离群成员时是否排队 |

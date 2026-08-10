@@ -273,7 +273,7 @@ async function revokeApiKey() {
       <label>
         文件上传超时（秒）
         <input type="number" v-model.number="cfg.file_upload_timeout" min="30" max="600" step="30" />
-        <span class="hint">群聊和私聊统一使用，默认 600 秒；群上传超时后仍会查询群历史确认结果</span>
+        <span class="hint">群聊、私聊和闪传统一使用，默认 600 秒；群上传超时后仍会查询群历史确认结果</span>
       </label>
     </div>
 

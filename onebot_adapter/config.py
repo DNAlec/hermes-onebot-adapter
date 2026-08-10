@@ -210,7 +210,7 @@ class AdapterConfig:
     reaction_emoji_enabled: bool = True
     reaction_emoji_id: str = "124"
     reaction_emoji_id_queued: str = "123"      # 消息排队时贴的表情ID,空=不贴表情
-    file_upload_timeout: float = 600.0          # 群/私聊文件上传等待 NapCat 响应的秒数
+    file_upload_timeout: float = 600.0          # 群/私聊/闪传文件上传等待 NapCat 响应的秒数
     # ── 发送去重(Gateway send_text 超时重试导致重复发送的兜底)──
     send_dedup_enabled: bool = True
     send_dedup_ttl_seconds: float = 10.0
@@ -680,7 +680,7 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "groups": "群组配置,key为群号字符串,value为群配置对象;子字段require_mention等为null时跟随全局",
         "reaction_emoji_enabled": "消息送达 Hermes 后在原消息贴表情回应;群配置可单独覆盖",
         "reaction_emoji_id": "贴表情回应使用的表情ID(默认 124),QQ 表情编号",
-        "file_upload_timeout": "群/私聊文件上传等待 NapCat 响应的超时秒数(30-600,默认600);"
+        "file_upload_timeout": "群/私聊/闪传文件上传等待 NapCat 响应的超时秒数(30-600,默认600);"
                                "群上传超时后仍会查询群历史保守确认结果",
         "event_queue_enabled": "群聊排队总开关:Hermes 不隔离群成员(group_sessions_per_user=false)时,"
                               "是否对群消息排队串行处理",
