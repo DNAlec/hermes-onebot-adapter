@@ -212,7 +212,9 @@ WebUI「OneBot 工具」页可以为每个工具设置是否注册给 Hermes，�
 | 群聊 | `group_rate_limit_(algorithm\|messages\|window_seconds)` | 每个群独立计数；GroupConfig 可 per-group 覆盖 |
 | 个人 | `user_rate_limit_(algorithm\|messages\|window_seconds)` | 每个 QQ 独立计数，跨私聊和所有群 |
 
-算法支持滑动窗口（`sliding_window`，窗口内消息数上限）和令牌桶（`token_bucket`，按速率补充令牌）。拦截提示模板 `rate_limit_reject_message` 支持 `{scope}`/`{retry_after}`/`{user_id}` 占位符。配置在 WebUI「聊天配置」页。
+算法支持滑动窗口（`sliding_window`，窗口内消息数上限）和令牌桶（`token_bucket`，按速率补充令牌）。额度持久化到 `~/.onebot_adapter/rate_limit.sqlite3`，进程重启不会重置；关闭总开关时保留状态并按经过的真实时间自然恢复。`rate_limit_storage_failure_mode` 可选数据库故障时退回内存限流（默认）或拒绝受限流消息。
+
+拦截提示模板 `rate_limit_reject_message` 支持 `{scope}`/`{retry_after}`/`{user_id}` 占位符。WebUI「聊天配置」页可查询和定向重置全局、群聊或用户额度，并查看持久化健康状态。
 
 ## 配置备份与审计
 
