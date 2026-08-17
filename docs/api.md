@@ -226,6 +226,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "user_rate_limit_messages": 0,
   "user_rate_limit_window_seconds": 0.0,
   "rate_limit_reject_message": "⛔ 消息发送过于频繁，请在 {retry_after} 秒后重试",
+  "rate_limit_storage_failure_mode": "memory_fallback",
   "bot_blacklist_enabled": true,
   "bot_blacklist_max_duration_seconds": 86400,
   "bot_blacklist_reject_message": "⛔ 你已被 bot 暂时拉黑，剩余时间：{remaining}。原因：{reason}",
@@ -1010,6 +1011,23 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 
 ---
 
+### 16. 限流额度管理
+
+**`GET /api/v1/rate_limit/quota?scope=<global|group|user>&target_id=<ID>`**
+
+查询当前生效策略、已用/剩余额度、恢复时间及持久化状态。`group` / `user` 必须传纯数字 `target_id`；`global` 不得传 `target_id`。
+
+**`POST /api/v1/rate_limit/quota/reset`**
+
+请求体：
+```json
+{"scope": "user", "target_id": "123456"}
+```
+
+仅重置指定维度，不级联清除全局或其他维度。响应中 `pending_persistence=true` 表示已在内存中重置，待数据库恢复后同步。查询和重置响应均使用 `Cache-Control: no-store`，重置操作记入审计日志。
+
+---
+
 ## 数据类型
 
 ### Config 字段
@@ -1078,6 +1096,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `user_rate_limit_messages` | int | `0` | 每个 QQ 的限流消息数；`0`=禁用该维度 |
 | `user_rate_limit_window_seconds` | float | `0.0` | 个人限流窗口秒数 |
 | `rate_limit_reject_message` | string | `"⛔..."` | 限流提示模板；支持 `{scope}`/`{retry_after}`/`{user_id}` |
+| `rate_limit_storage_failure_mode` | string | `"memory_fallback"` | 持久化故障策略：`memory_fallback` / `reject` |
 | `bot_blacklist_enabled` | bool | `true` | 允许 bot 使用动态黑名单工具并在消息触发时拦截命中用户 |
 | `bot_blacklist_max_duration_seconds` | int | `86400` | bot 单次动态拉黑允许的最大秒数（默认 24 小时）；bot 请求超限时自动截短 |
 | `bot_blacklist_reject_message` | string | `"⛔..."` | 动态拉黑提示模板；支持 `{user_id}`/`{scope}`/`{remaining}`/`{expires_at}`/`{reason}` |

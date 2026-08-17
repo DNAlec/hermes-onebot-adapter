@@ -50,6 +50,12 @@ _VALID_LOG_FILE_MESSAGE_MODES = {"none", "preview", "full"}
 RATE_LIMIT_SLIDING_WINDOW = "sliding_window"
 RATE_LIMIT_TOKEN_BUCKET = "token_bucket"
 _VALID_RATE_LIMIT_ALGORITHMS = {RATE_LIMIT_SLIDING_WINDOW, RATE_LIMIT_TOKEN_BUCKET}
+RATE_LIMIT_STORAGE_MEMORY_FALLBACK = "memory_fallback"
+RATE_LIMIT_STORAGE_REJECT = "reject"
+_VALID_RATE_LIMIT_STORAGE_FAILURE_MODES = {
+    RATE_LIMIT_STORAGE_MEMORY_FALLBACK,
+    RATE_LIMIT_STORAGE_REJECT,
+}
 
 DEFAULT_CHANNEL_PROMPT = (
     "# 平台特性\n"
@@ -234,6 +240,7 @@ class AdapterConfig:
     user_rate_limit_messages: int = 0
     user_rate_limit_window_seconds: float = 0.0
     rate_limit_reject_message: str = "⛔ 消息发送过于频繁，请在 {retry_after} 秒后重试"
+    rate_limit_storage_failure_mode: str = RATE_LIMIT_STORAGE_MEMORY_FALLBACK
 
     # ── 媒体投递 ──
     media_delivery_mode: str = MEDIA_DELIVERY_CACHE  # "passthrough"(URL 占位符) | "cache"(默认,插件侧下载落盘)
@@ -527,6 +534,11 @@ def _validate_rate_limits(cfg: AdapterConfig, errors: list[str]) -> None:
             errors.append(f"{scope}_rate_limit_window_seconds must be positive when the limit is enabled")
     if not isinstance(cfg.rate_limit_reject_message, str) or not cfg.rate_limit_reject_message:
         errors.append("rate_limit_reject_message must not be empty")
+    if cfg.rate_limit_storage_failure_mode not in _VALID_RATE_LIMIT_STORAGE_FAILURE_MODES:
+        errors.append(
+            "rate_limit_storage_failure_mode must be one of "
+            f"{sorted(_VALID_RATE_LIMIT_STORAGE_FAILURE_MODES)}"
+        )
 
 
 def _validate_security_and_delivery(cfg: AdapterConfig, errors: list[str]) -> None:
@@ -692,6 +704,7 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "user_rate_limit_messages": "每个QQ的限流消息数;0=禁用该维度",
         "user_rate_limit_window_seconds": "个人限流窗口秒数",
         "rate_limit_reject_message": "限流提示模板;支持 {scope}/{retry_after}/{user_id}",
+        "rate_limit_storage_failure_mode": "限流存储故障策略:memory_fallback(默认)|reject",
         "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
         "media_delivery_mode": "可选值: passthrough(URL 占位符直传) | cache(插件侧下载落盘到 ~/.hermes/cache/,默认)",
         "global_channel_prompt": "全局提示词;保存时物化写入 Hermes config.yaml 的"

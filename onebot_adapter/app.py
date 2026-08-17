@@ -138,6 +138,7 @@ class AdapterService:
         self._usage_stats: UsageStatsStore | None = None
         self._bot_blacklist: BotBlacklistStore | None = None
         self._rate_limiter = MessageRateLimiter()
+        self._state["rate_limiter"] = self._rate_limiter
         self._config_change_lock = asyncio.Lock()
         self._applied_config = self.store.config
         self._probe_task: asyncio.Task[None] | None = None
@@ -351,6 +352,22 @@ class AdapterService:
                 group_id=group_id,
             )
             if not decision.allowed:
+                if decision.reason == "storage_unavailable":
+                    await self._on_filtered_command(
+                        FilteredEvent(
+                            chat_id=event.chat_id,
+                            chat_type=event.chat_type,
+                            user_id=event.user_id,
+                            user_name=event.user_name,
+                            command_name="",
+                            reject_message="⛔ 限流状态暂不可用，请稍后重试",
+                            message_id=event.message_id,
+                            reply_to_message_id=event.message_id or None,
+                            timestamp=event.timestamp,
+                            filter_type="rate_limit_storage",
+                        )
+                    )
+                    return
                 scope_labels = {"global": "全局", "group": "群聊", "user": "个人"}
                 retry_after = max(1, math.ceil(decision.retry_after))
                 message = cfg.rate_limit_reject_message
@@ -565,6 +582,7 @@ class AdapterService:
             await self._usage_stats.close()
             self._usage_stats = None
             self._state.pop("usage_stats", None)
+        await self._rate_limiter.close()
         if self._bot_blacklist:
             self._bot_blacklist.close()
             self._bot_blacklist = None
@@ -616,9 +634,6 @@ class AdapterService:
         if self._seq_map and old.seq_map_size != new.seq_map_size:
             self._seq_map.update_maxlen(new.seq_map_size)
             logger.info("SeqMap size changed: %d -> %d", old.seq_map_size, new.seq_map_size)
-        if old.rate_limit_enabled and not new.rate_limit_enabled:
-            self._rate_limiter.clear()
-
         # File logging hot-reload
         self._update_file_logging(old, new)
 
@@ -747,6 +762,8 @@ class AdapterService:
             self._bot_blacklist = None
             self._state["bot_blacklist_error"] = str(exc)
             logger.exception("bot blacklist unavailable")
+
+        await self._rate_limiter.start(config_path().parent / "rate_limit.sqlite3")
 
         self._init_components()
 

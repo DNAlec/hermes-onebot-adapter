@@ -18,6 +18,7 @@ import aiohttp.web
 
 from onebot_adapter import __version__
 from onebot_adapter.config import AdapterConfig, ConfigStore, GroupConfig, save_config
+from onebot_adapter.rate_limit import RateLimitStorageUnavailable
 from onebot_adapter.webui.tool_api import TOOL_MAP, TOOL_MODELS, add_tool_routes, key_matches
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,8 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_get("/api/v1/status", _status(store, state))
     app.router.add_get("/api/v1/config", _get_config(store))
     app.router.add_patch("/api/v1/config", _put_config(store, state))
+    app.router.add_get("/api/v1/rate_limit/quota", _get_rate_limit_quota(store, state))
+    app.router.add_post("/api/v1/rate_limit/quota/reset", _reset_rate_limit_quota(store, state))
     app.router.add_post("/api/v1/automation/key", _rotate_automation_key(store))
     app.router.add_delete("/api/v1/automation/key", _revoke_automation_key(store))
     app.router.add_get("/api/v1/hermes_dir_status", _hermes_dir_status(store))
@@ -131,6 +134,7 @@ async def _security_middleware(request: aiohttp.web.Request, handler):
     response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
         "/api/v1/auth/login", "/api/v1/config", "/api/v1/automation/key",
+        "/api/v1/rate_limit/quota", "/api/v1/rate_limit/quota/reset",
     }:
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -383,6 +387,69 @@ def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
 def _get_config(store: ConfigStore):
     async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
         return aiohttp.web.json_response(_public_config(store.config))
+
+    return handler
+
+
+def _rate_limit_target(scope: Any, target_id: Any, *, target_supplied: bool) -> tuple[str, str | None]:
+    if scope not in {"global", "group", "user"}:
+        raise ValueError("scope must be global, group, or user")
+    if scope == "global":
+        if target_supplied:
+            raise ValueError("target_id must not be supplied for global scope")
+        return scope, None
+    if not isinstance(target_id, str) or not target_id.strip().isdigit():
+        raise ValueError("target_id must be a numeric string for group or user scope")
+    return scope, target_id.strip()
+
+
+def _get_rate_limit_quota(store: ConfigStore, state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        try:
+            scope, target_id = _rate_limit_target(
+                request.query.get("scope"), request.query.get("target_id"),
+                target_supplied="target_id" in request.query,
+            )
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        limiter = state.get("rate_limiter")
+        if limiter is None:
+            return aiohttp.web.json_response({"error": "rate limiter unavailable"}, status=503)
+        result = await limiter.quota(store.config, scope, target_id)
+        return aiohttp.web.json_response(result)
+
+    return handler
+
+
+def _reset_rate_limit_quota(store: ConfigStore, state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(data, dict):
+            return aiohttp.web.json_response({"error": "JSON body must be an object"}, status=400)
+        try:
+            scope, target_id = _rate_limit_target(
+                data.get("scope"), data.get("target_id"), target_supplied="target_id" in data,
+            )
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        limiter = state.get("rate_limiter")
+        if limiter is None:
+            return aiohttp.web.json_response({"error": "rate limiter unavailable"}, status=503)
+        try:
+            result = await limiter.reset(store.config, scope, target_id)
+        except RateLimitStorageUnavailable:
+            return aiohttp.web.json_response(
+                {"error": "rate-limit persistence backlog is full"}, status=503,
+            )
+        audit_logger.warning(
+            "rate-limit quota reset source=webui scope=%s target_id=%s cleared=%s pending=%s client_ip=%s",
+            scope, target_id or "", result["cleared"], result["pending_persistence"],
+            _client_ip(request, store.config),
+        )
+        return aiohttp.web.json_response(result)
 
     return handler
 

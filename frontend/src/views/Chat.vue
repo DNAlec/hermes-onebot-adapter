@@ -5,6 +5,7 @@ import {
   type GroupConfig,
   getHermesMode, putHermesMode, refreshHermesMode, type HermesMode,
   getBotBlacklist, deleteBotBlacklistEntry, type BotBlacklistEntry,
+  getRateLimitQuota, resetRateLimitQuota, type RateLimitQuota,
 } from "../api";
 import { useConfig } from "../composables/useConfig";
 
@@ -19,6 +20,11 @@ const showEditor = ref(false);
 const blacklistEntries = ref<BotBlacklistEntry[]>([]);
 const blacklistLoading = ref(false);
 const blacklistMaxHours = ref(24);
+const quotaScope = ref<"global" | "group" | "user">("global");
+const quotaTargetId = ref("");
+const quota = ref<RateLimitQuota | null>(null);
+const quotaLoading = ref(false);
+const quotaMessage = ref("");
 
 const hermesMode = ref<HermesMode | null>(null);
 const editingPerUser = ref(false);
@@ -32,6 +38,7 @@ onMounted(async () => {
     await load();
     groups.value = await getGroups();
     blacklistMaxHours.value = (cfg.value?.bot_blacklist_max_duration_seconds || 86400) / 3600;
+    await fetchQuota();
     await fetchBotBlacklist();
     fetchHermesMode();
   } catch (e: any) {
@@ -157,6 +164,7 @@ async function saveGlobal() {
       user_rate_limit_messages: c.user_rate_limit_messages,
       user_rate_limit_window_seconds: c.user_rate_limit_window_seconds,
       rate_limit_reject_message: c.rate_limit_reject_message,
+      rate_limit_storage_failure_mode: c.rate_limit_storage_failure_mode,
       media_delivery_mode: c.media_delivery_mode,
       global_channel_prompt: c.global_channel_prompt,
       notify_poke_enabled: c.notify_poke_enabled,
@@ -269,6 +277,54 @@ function toggleGroupRateLimitOverride(enabled: boolean) {
   editingGroup.value.group_rate_limit_algorithm = cfg.value?.group_rate_limit_algorithm || "sliding_window";
   editingGroup.value.group_rate_limit_messages = cfg.value?.group_rate_limit_messages || 0;
   editingGroup.value.group_rate_limit_window_seconds = cfg.value?.group_rate_limit_window_seconds || 0;
+}
+
+async function fetchQuota() {
+  const target = quotaScope.value === "global" ? undefined : quotaTargetId.value.trim();
+  if (quotaScope.value !== "global" && !/^\d+$/.test(target || "")) {
+    quotaMessage.value = "请输入有效的数字 ID";
+    return;
+  }
+  quotaLoading.value = true;
+  quotaMessage.value = "";
+  try {
+    quota.value = await getRateLimitQuota(quotaScope.value, target);
+  } catch (e: any) {
+    quotaMessage.value = e.response?.data?.error || e.message;
+  } finally {
+    quotaLoading.value = false;
+  }
+}
+
+async function resetQuota() {
+  if (!quota.value) return;
+  const scope = quota.value.scope;
+  const target = quota.value.target_id || undefined;
+  const label = scope === "global" ? "全局额度（将影响所有用户）" :
+    `${scope === "group" ? "群聊" : "用户"} ${target}`;
+  if (!confirm(`确认重置${label}？其他维度的额度不会被清除。`)) return;
+  quotaLoading.value = true;
+  quotaMessage.value = "";
+  try {
+    quota.value = await resetRateLimitQuota(scope, target);
+    quotaMessage.value = quota.value.pending_persistence
+      ? "已在内存中重置，数据库恢复后将同步"
+      : "额度已重置";
+  } catch (e: any) {
+    quotaMessage.value = e.response?.data?.error || e.message;
+  } finally {
+    quotaLoading.value = false;
+  }
+}
+
+function formatQuotaNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function formatDuration(value: number) {
+  if (value <= 0) return "现在";
+  if (value < 60) return `${Math.ceil(value)} 秒`;
+  return `${Math.ceil(value / 60)} 分钟`;
 }
 
 const cmdPermsError = ref("");
@@ -427,6 +483,14 @@ function resetHint() {
         <input type="checkbox" v-model="cfg.rate_limit_enabled" />
         <span>启用消息限流</span>
       </label>
+      <label>
+        额度存储故障策略
+        <select v-model="cfg.rate_limit_storage_failure_mode">
+          <option value="memory_fallback">退回内存限流（默认）</option>
+          <option value="reject">拒绝受限流的消息</option>
+        </select>
+        <span class="hint">正常时额度在消息转发前持久化；内存降级期间若进程再次崩溃，待同步操作可能丢失。</span>
+      </label>
       <div class="grid2 rate-limit-grid">
         <fieldset>
           <legend>全局总量</legend>
@@ -467,6 +531,47 @@ function resetHint() {
         <input v-model="cfg.rate_limit_reject_message" />
         <span class="hint">支持 {scope}、{retry_after}、{user_id}；等待时间向上取整为秒。</span>
       </label>
+
+      <div class="quota-panel">
+        <h4>额度查询与重置</h4>
+        <p class="hint">管理员消息不消耗额度。重置只影响当前维度，目标仍可能被全局或其他维度拦截。</p>
+        <div class="quota-query">
+          <label>
+            查询维度
+            <select v-model="quotaScope" @change="quota = null; quotaMessage = ''">
+              <option value="user">用户</option>
+              <option value="group">群聊</option>
+              <option value="global">全局</option>
+            </select>
+          </label>
+          <label v-if="quotaScope !== 'global'">
+            {{ quotaScope === "group" ? "群号" : "QQ 号" }}
+            <input v-model="quotaTargetId" inputmode="numeric" @input="quota = null" @keyup.enter="fetchQuota" />
+          </label>
+          <button class="sync-btn" :disabled="quotaLoading" @click="fetchQuota">
+            {{ quotaLoading ? "查询中..." : quota ? "刷新" : "查询" }}
+          </button>
+        </div>
+        <p v-if="quotaMessage" class="quota-message">{{ quotaMessage }}</p>
+        <div v-if="quota" class="quota-result">
+          <div><span>算法</span><strong>{{ quota.algorithm === "sliding_window" ? "滑动窗口" : "令牌桶" }}</strong></div>
+          <div><span>限额 / 窗口</span><strong>{{ quota.limit }} / {{ quota.window_seconds }} 秒</strong></div>
+          <div><span>已用 / 剩余</span><strong>{{ formatQuotaNumber(quota.used) }} / {{ formatQuotaNumber(quota.remaining) }}</strong></div>
+          <div><span>下一额度 / 完全恢复</span><strong>{{ formatDuration(quota.next_available_in_seconds) }} / {{ formatDuration(quota.full_recovery_in_seconds) }}</strong></div>
+          <div class="quota-storage">
+            <span>持久化</span>
+            <strong :class="`storage-${quota.persistence.status}`">{{ quota.persistence.status }}</strong>
+            <small>待同步 {{ quota.persistence.pending_operations }} / {{ quota.persistence.pending_limit }} 条</small>
+          </div>
+          <p v-if="quota.persistence.status !== 'healthy'" class="storage-warning">
+            持久化当前处于 {{ quota.persistence.status }} 状态。请检查服务日志和数据目录。
+          </p>
+          <p v-if="quota.persistence.fallback_exhausted" class="storage-warning">
+            待同步队列已满，为避免内存持续增长，新消息将被拒绝，直到数据库恢复。
+          </p>
+          <button class="row-btn danger" :disabled="quotaLoading" @click="resetQuota">重置当前额度</button>
+        </div>
+      </div>
     </div>
 
     <!-- Bot 动态用户黑名单 -->
@@ -940,6 +1045,21 @@ function resetHint() {
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
 .rate-limit-grid fieldset { border: 1px solid var(--border); border-radius: 6px; padding: 0.9rem; display: grid; gap: 0.75rem; }
 .rate-limit-grid legend { color: var(--primary); font-weight: 600; padding: 0 0.35rem; }
+.quota-panel { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+.quota-query { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(180px, 2fr) auto; gap: 0.75rem; align-items: end; }
+.quota-query label { margin: 0; }
+.quota-query button { margin-bottom: 1px; height: 2.25rem; }
+.quota-message { color: var(--primary); font-size: 0.85rem; }
+.quota-result { margin-top: 0.9rem; padding: 0.9rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; display: grid; gap: 0.55rem; }
+.quota-result > div { display: flex; gap: 0.75rem; justify-content: space-between; font-size: 0.88rem; }
+.quota-result span { color: var(--text-muted); }
+.quota-storage { justify-content: flex-start !important; align-items: center; }
+.quota-storage small { color: var(--text-muted); margin-left: auto; }
+.storage-healthy { color: var(--success); }
+.storage-degraded, .storage-recovering { color: var(--warning); }
+.storage-not_started { color: var(--text-muted); }
+.storage-warning { color: #856404; background: #fff9e6; padding: 0.6rem; border-radius: 4px; font-size: 0.82rem; }
+@media (max-width: 700px) { .quota-query { grid-template-columns: 1fr; } }
 label { display: block; margin-bottom: 0.75rem; font-weight: 500; font-size: 0.9rem; }
 label.full { width: 100%; }
 .grid2 > label.full { grid-column: 1 / -1; }
