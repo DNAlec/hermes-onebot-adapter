@@ -37,6 +37,16 @@ hermes-onebot-adapter                 # 启动服务
 hermes-onebot-adapter --init-config   # 生成默认配置后退出
 ```
 
+已有安装升级时，适配器和复制到 Hermes 目录中的插件需要一起更新：
+
+```bash
+pipx upgrade hermes-onebot-adapter
+hermes-onebot-adapter install --hermes-dir ~/.hermes
+hermes gateway restart
+```
+
+升级不会覆盖现有适配器配置。安装器会更新 `<hermes>/plugins/onebot/` 中的插件文件；重启后可在 WebUI 仪表盘确认适配器与插件版本一致。
+
 ## 配置流程
 
 1. **启动适配器服务** — `hermes-onebot-adapter`
@@ -284,6 +294,8 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 | `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
 | `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
 | 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
+
+所有 `/` 指令都不占用适配器的 busy 槽，也不会注册用于释放 busy 槽的 idle 回调；它们不会扰动正在处理的普通群消息及其排队顺序。
 
 ### Hermes 会话隔离配置
 
