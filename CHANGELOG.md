@@ -2,8 +2,26 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-18
+
 ### 新增
 - 全局、群聊和用户限流额度持久化到 `rate_limit.sqlite3`，支持跨重启恢复、数据库故障降级/拒绝策略，以及 WebUI/API 查询和定向重置额度
+
+### 变更
+- OneBot 正向/反向 WebSocket 的普通事件改用单 worker、有界 1024 帧 FIFO 顺序处理；API 响应仍在接收循环中即时关联，避免事件处理等待同一连接上的 API 响应时死锁，并防止突发流量创建无界任务
+- Hermes 插件连接的并发帧处理增加 64 帧上限和背压，避免慢请求期间无限积累后台任务
+- 使用统计的 SQLite 操作移至工作线程，降低数据库读写阻塞 asyncio 事件循环的风险
+- Ruff 增加复杂度、分支数和语句数检查，约束后续解析器与分发器继续膨胀
+
+### 修复
+- shared 群聊中，绕过适配器队列的 `/` 指令不再注册 idle 回调，避免指令处理结束后误清除其他普通消息持有的 busy 状态并提前派发下一条消息
+
+### 升级说明
+- 无需手动迁移配置；首次启动会在配置文件旁自动创建 `rate_limit.sqlite3`
+- 升级适配器后需重新安装随包提供的 Hermes 插件并重启 Hermes 网关，确保服务与插件版本一致
+
+### 文档
+- 补充 README 的持久化限流、额度管理和升级流程，完善 REST API 的额度查询/重置响应及错误语义
 
 ## [1.4.0] - 2026-08-10
 
@@ -172,7 +190,8 @@
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
 
-[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.1.0b...v1.2.0

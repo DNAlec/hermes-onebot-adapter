@@ -1017,6 +1017,34 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 
 查询当前生效策略、已用/剩余额度、恢复时间及持久化状态。`group` / `user` 必须传纯数字 `target_id`；`global` 不得传 `target_id`。
 
+响应 `200`：
+```json
+{
+  "scope": "user",
+  "target_id": "123456",
+  "rate_limit_enabled": true,
+  "scope_enabled": true,
+  "algorithm": "sliding_window",
+  "limit": 10,
+  "window_seconds": 60.0,
+  "tracked": true,
+  "used": 3.0,
+  "remaining": 7.0,
+  "next_available_in_seconds": 0.0,
+  "full_recovery_in_seconds": 42.5,
+  "persistence": {
+    "status": "healthy",
+    "last_success_at": 1787040000.0,
+    "pending_operations": 0,
+    "pending_limit": 50000,
+    "fallback_exhausted": false,
+    "failure_mode": "memory_fallback"
+  }
+}
+```
+
+`tracked=false` 表示该作用域当前没有桶；`status` 为 `not_started` / `healthy` / `degraded` / `recovering`。`next_available_in_seconds` 是下一条消息可通过的等待时间，`full_recovery_in_seconds` 是额度完全恢复的预计时间。
+
 **`POST /api/v1/rate_limit/quota/reset`**
 
 请求体：
@@ -1025,6 +1053,20 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 ```
 
 仅重置指定维度，不级联清除全局或其他维度。响应中 `pending_persistence=true` 表示已在内存中重置，待数据库恢复后同步。查询和重置响应均使用 `Cache-Control: no-store`，重置操作记入审计日志。
+
+响应 `200` 与查询响应字段相同，并增加：
+```json
+{
+  "cleared": true,
+  "pending_persistence": false
+}
+```
+
+常见错误：
+
+- `400` — `scope` 非 `global` / `group` / `user`，目标缺失、非纯数字，或为 `global` 额外传入了 `target_id`
+- `401` — WebUI session 无效或缺失
+- `503` — 限流器不可用，或持久化故障期间待同步操作已达到上限
 
 ---
 
