@@ -50,6 +50,12 @@ _VALID_LOG_FILE_MESSAGE_MODES = {"none", "preview", "full"}
 RATE_LIMIT_SLIDING_WINDOW = "sliding_window"
 RATE_LIMIT_TOKEN_BUCKET = "token_bucket"
 _VALID_RATE_LIMIT_ALGORITHMS = {RATE_LIMIT_SLIDING_WINDOW, RATE_LIMIT_TOKEN_BUCKET}
+RATE_LIMIT_STORAGE_MEMORY_FALLBACK = "memory_fallback"
+RATE_LIMIT_STORAGE_REJECT = "reject"
+_VALID_RATE_LIMIT_STORAGE_FAILURE_MODES = {
+    RATE_LIMIT_STORAGE_MEMORY_FALLBACK,
+    RATE_LIMIT_STORAGE_REJECT,
+}
 
 DEFAULT_CHANNEL_PROMPT = (
     "# 平台特性\n"
@@ -234,6 +240,7 @@ class AdapterConfig:
     user_rate_limit_messages: int = 0
     user_rate_limit_window_seconds: float = 0.0
     rate_limit_reject_message: str = "⛔ 消息发送过于频繁，请在 {retry_after} 秒后重试"
+    rate_limit_storage_failure_mode: str = RATE_LIMIT_STORAGE_MEMORY_FALLBACK
 
     # ── 媒体投递 ──
     media_delivery_mode: str = MEDIA_DELIVERY_CACHE  # "passthrough"(URL 占位符) | "cache"(默认,插件侧下载落盘)
@@ -257,164 +264,10 @@ class AdapterConfig:
 
     def validate(self) -> list[str]:
         errors: list[str] = []
-        if self.onebot_mode not in _VALID_MODES:
-            errors.append(f"onebot_mode must be one of {sorted(_VALID_MODES)}")
-        if self.onebot_mode == NAPCAT_MODE_FORWARD and not self.onebot_forward_ws_url:
-            errors.append("onebot_forward_ws_url required when onebot_mode=forward")
-        if self.log_message_preview < 0:
-            errors.append("log_message_preview must be non-negative")
-        if self.log_retention_days < 1:
-            errors.append("log_retention_days must be at least 1")
-        if self.log_file_message_mode not in _VALID_LOG_FILE_MESSAGE_MODES:
-            errors.append(
-                f"log_file_message_mode must be one of {sorted(_VALID_LOG_FILE_MESSAGE_MODES)}"
-            )
-        if not isinstance(self.log_file_max_bytes, int) or isinstance(self.log_file_max_bytes, bool) \
-                or self.log_file_max_bytes < 1024:
-            errors.append("log_file_max_bytes must be an integer of at least 1024")
-        if self.usage_stats_retention_days < 1:
-            errors.append("usage_stats_retention_days must be at least 1")
-        for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port"):
-            port_val = getattr(self, port_field)
-            if not isinstance(port_val, int) or port_val < 1 or port_val > 65535:
-                errors.append(f"{port_field} must be an integer in [1, 65535]")
-        if not self.onebot_ws_token:
-            errors.append("onebot_ws_token must not be empty")
-        if not self.hermes_ws_token:
-            errors.append("hermes_ws_token must not be empty")
-        if self.seq_map_size <= 0:
-            errors.append("seq_map_size must be positive")
-        if (
-            not isinstance(self.file_upload_timeout, (int, float))
-            or isinstance(self.file_upload_timeout, bool)
-            or not 30 <= self.file_upload_timeout <= 600
-        ):
-            errors.append("file_upload_timeout must be a number in [30, 600]")
-        if self.send_dedup_ttl_seconds <= 0:
-            errors.append("send_dedup_ttl_seconds must be positive")
-        if self.event_queue_max_per_chat < 1:
-            errors.append("event_queue_max_per_chat must be at least 1")
-        if self.event_queue_idle_timeout <= 0:
-            errors.append("event_queue_idle_timeout must be positive")
-        for field_name in ("event_queue_clear_on_session_reset", "event_queue_clean_command_enabled"):
-            if not isinstance(getattr(self, field_name), bool):
-                errors.append(f"{field_name} must be bool")
-        if not isinstance(self.rate_limit_enabled, bool):
-            errors.append("rate_limit_enabled must be bool")
-        for scope in ("global", "group", "user"):
-            algorithm = getattr(self, f"{scope}_rate_limit_algorithm")
-            messages = getattr(self, f"{scope}_rate_limit_messages")
-            window = getattr(self, f"{scope}_rate_limit_window_seconds")
-            if algorithm not in _VALID_RATE_LIMIT_ALGORITHMS:
-                errors.append(
-                    f"{scope}_rate_limit_algorithm must be one of {sorted(_VALID_RATE_LIMIT_ALGORITHMS)}"
-                )
-            if not isinstance(messages, int) or isinstance(messages, bool) or messages < 0:
-                errors.append(f"{scope}_rate_limit_messages must be a non-negative integer")
-            if not isinstance(window, (int, float)) or isinstance(window, bool) or window < 0:
-                errors.append(f"{scope}_rate_limit_window_seconds must be non-negative")
-            elif isinstance(messages, int) and not isinstance(messages, bool) and messages > 0 and window <= 0:
-                errors.append(f"{scope}_rate_limit_window_seconds must be positive when the limit is enabled")
-        if not isinstance(self.rate_limit_reject_message, str) or not self.rate_limit_reject_message:
-            errors.append("rate_limit_reject_message must not be empty")
-        if not isinstance(self.bot_blacklist_enabled, bool):
-            errors.append("bot_blacklist_enabled must be bool")
-        if not isinstance(self.bot_blacklist_max_duration_seconds, int) \
-                or isinstance(self.bot_blacklist_max_duration_seconds, bool) \
-                or self.bot_blacklist_max_duration_seconds <= 0:
-            errors.append("bot_blacklist_max_duration_seconds must be a positive integer")
-        if not isinstance(self.bot_blacklist_reject_message, str) or not self.bot_blacklist_reject_message:
-            errors.append("bot_blacklist_reject_message must not be empty")
-        if self.media_delivery_mode not in _VALID_MEDIA_DELIVERY_MODES:
-            errors.append(f"media_delivery_mode must be one of {sorted(_VALID_MEDIA_DELIVERY_MODES)}")
-        if self.webui_token_lifetime_hours < 1:
-            errors.append("webui_token_lifetime_hours must be at least 1")
-        if not isinstance(self.automation_upload_allowed_roots, list) or not all(
-            isinstance(root, str) and root.strip() for root in self.automation_upload_allowed_roots
-        ):
-            errors.append("automation_upload_allowed_roots must be a list of non-empty paths")
-        if not self.reaction_emoji_id:
-            errors.append("reaction_emoji_id must not be empty")
-        if self.dm_user_filter_mode not in _VALID_USER_FILTER_MODES:
-            errors.append(f"dm_user_filter_mode must be one of {sorted(_VALID_USER_FILTER_MODES)}")
-        if self.log_level.upper() not in _VALID_LOG_LEVELS:
-            errors.append(f"log_level must be one of {sorted(_VALID_LOG_LEVELS)}")
-        for cmd, perm in self.command_permissions.items():
-            if perm not in _VALID_COMMAND_PERM_LEVELS:
-                errors.append(f"command_permissions[{cmd!r}] must be one of {sorted(_VALID_COMMAND_PERM_LEVELS)}")
-        for gid, raw in self.groups.items():
-            gc = GroupConfig.from_dict(raw)
-            if gc.group_user_filter_mode not in _VALID_USER_FILTER_MODES:
-                errors.append(f"group {gid} group_user_filter_mode must be one of {sorted(_VALID_USER_FILTER_MODES)}")
-            # Type-check bool/int fields to catch WebUI sending strings
-            if not isinstance(gc.enabled, bool):
-                errors.append(f"group {gid} enabled must be bool")
-            if gc.require_mention is not None and not isinstance(gc.require_mention, bool):
-                errors.append(f"group {gid} require_mention must be bool or null")
-            if gc.mention_first_only is not None and not isinstance(gc.mention_first_only, bool):
-                errors.append(f"group {gid} mention_first_only must be bool or null")
-            if gc.keyword_first_only is not None and not isinstance(gc.keyword_first_only, bool):
-                errors.append(f"group {gid} keyword_first_only must be bool or null")
-            if gc.strip_first_mention is not None and not isinstance(gc.strip_first_mention, bool):
-                errors.append(f"group {gid} strip_first_mention must be bool or null")
-            if gc.reaction_emoji_enabled is not None and not isinstance(gc.reaction_emoji_enabled, bool):
-                errors.append(f"group {gid} reaction_emoji_enabled must be bool or null")
-            if gc.command_filter_enabled is not None and not isinstance(gc.command_filter_enabled, bool):
-                errors.append(f"group {gid} command_filter_enabled must be bool or null")
-            if gc.command_filter_unknown is not None and not isinstance(gc.command_filter_unknown, bool):
-                errors.append(f"group {gid} command_filter_unknown must be bool or null")
-            if gc.message_show_group_id is not None and not isinstance(gc.message_show_group_id, bool):
-                errors.append(f"group {gid} message_show_group_id must be bool or null")
-            if gc.notify_poke_enabled is not None and not isinstance(gc.notify_poke_enabled, bool):
-                errors.append(f"group {gid} notify_poke_enabled must be bool or null")
-            if gc.notify_member_change_enabled is not None and not isinstance(gc.notify_member_change_enabled, bool):
-                errors.append(f"group {gid} notify_member_change_enabled must be bool or null")
-            if (
-                gc.group_rate_limit_algorithm is not None
-                and gc.group_rate_limit_algorithm not in _VALID_RATE_LIMIT_ALGORITHMS
-            ):
-                errors.append(
-                    f"group {gid} group_rate_limit_algorithm must be one of "
-                    f"{sorted(_VALID_RATE_LIMIT_ALGORITHMS)} or null"
-                )
-            if (
-                gc.group_rate_limit_messages is not None
-                and (
-                    not isinstance(gc.group_rate_limit_messages, int)
-                    or isinstance(gc.group_rate_limit_messages, bool)
-                    or gc.group_rate_limit_messages < 0
-                )
-            ):
-                errors.append(f"group {gid} group_rate_limit_messages must be a non-negative integer or null")
-            if (
-                gc.group_rate_limit_window_seconds is not None
-                and (
-                    not isinstance(gc.group_rate_limit_window_seconds, (int, float))
-                    or isinstance(gc.group_rate_limit_window_seconds, bool)
-                    or gc.group_rate_limit_window_seconds < 0
-                )
-            ):
-                errors.append(f"group {gid} group_rate_limit_window_seconds must be non-negative or null")
-            resolved_messages = self.resolve_group_rate_limit_messages(gid)
-            resolved_window = self.resolve_group_rate_limit_window_seconds(gid)
-            if (
-                isinstance(resolved_messages, int)
-                and not isinstance(resolved_messages, bool)
-                and isinstance(resolved_window, (int, float))
-                and not isinstance(resolved_window, bool)
-                and resolved_messages > 0
-                and resolved_window <= 0
-            ):
-                errors.append(
-                    f"group {gid} group_rate_limit_window_seconds must be positive when the limit is enabled"
-                )
-            if gc.command_permissions is not None:
-                for cmd, perm in gc.command_permissions.items():
-                    if perm not in _VALID_COMMAND_PERM_LEVELS:
-                        errors.append(
-                            f"group {gid} command_permissions[{cmd!r}] must be one of "
-                            f"{sorted(_VALID_COMMAND_PERM_LEVELS)}"
-                        )
+        _validate_connection_and_storage(self, errors)
+        _validate_rate_limits(self, errors)
+        _validate_security_and_delivery(self, errors)
+        _validate_groups(self, errors)
         return errors
 
     def get_group_config(self, group_id: str) -> GroupConfig:
@@ -620,6 +473,158 @@ class AdapterConfig:
         return replace(self, **changes)
 
 
+def _validate_connection_and_storage(cfg: AdapterConfig, errors: list[str]) -> None:
+    if cfg.onebot_mode not in _VALID_MODES:
+        errors.append(f"onebot_mode must be one of {sorted(_VALID_MODES)}")
+    if cfg.onebot_mode == NAPCAT_MODE_FORWARD and not cfg.onebot_forward_ws_url:
+        errors.append("onebot_forward_ws_url required when onebot_mode=forward")
+    for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port"):
+        port_val = getattr(cfg, port_field)
+        if not isinstance(port_val, int) or isinstance(port_val, bool) or not 1 <= port_val <= 65535:
+            errors.append(f"{port_field} must be an integer in [1, 65535]")
+    for token_field in ("onebot_ws_token", "hermes_ws_token"):
+        if not getattr(cfg, token_field):
+            errors.append(f"{token_field} must not be empty")
+    _validate_logging_and_runtime(cfg, errors)
+
+
+def _validate_logging_and_runtime(cfg: AdapterConfig, errors: list[str]) -> None:
+    minimum_rules = (
+        ("log_message_preview", cfg.log_message_preview, 0, "must be non-negative"),
+        ("log_retention_days", cfg.log_retention_days, 1, "must be at least 1"),
+        ("usage_stats_retention_days", cfg.usage_stats_retention_days, 1, "must be at least 1"),
+        ("seq_map_size", cfg.seq_map_size, 1, "must be positive"),
+        ("send_dedup_ttl_seconds", cfg.send_dedup_ttl_seconds, 0, "must be positive"),
+        ("event_queue_max_per_chat", cfg.event_queue_max_per_chat, 1, "must be at least 1"),
+        ("event_queue_idle_timeout", cfg.event_queue_idle_timeout, 0, "must be positive"),
+    )
+    for name, value, minimum, message in minimum_rules:
+        invalid = value < minimum if minimum else value <= minimum
+        if invalid:
+            errors.append(f"{name} {message}")
+    if cfg.log_file_message_mode not in _VALID_LOG_FILE_MESSAGE_MODES:
+        errors.append(f"log_file_message_mode must be one of {sorted(_VALID_LOG_FILE_MESSAGE_MODES)}")
+    if not isinstance(cfg.log_file_max_bytes, int) or isinstance(cfg.log_file_max_bytes, bool) \
+            or cfg.log_file_max_bytes < 1024:
+        errors.append("log_file_max_bytes must be an integer of at least 1024")
+    if not isinstance(cfg.file_upload_timeout, (int, float)) or isinstance(cfg.file_upload_timeout, bool) \
+            or not 30 <= cfg.file_upload_timeout <= 600:
+        errors.append("file_upload_timeout must be a number in [30, 600]")
+    for field_name in ("event_queue_clear_on_session_reset", "event_queue_clean_command_enabled"):
+        if not isinstance(getattr(cfg, field_name), bool):
+            errors.append(f"{field_name} must be bool")
+
+
+def _validate_rate_limits(cfg: AdapterConfig, errors: list[str]) -> None:
+    if not isinstance(cfg.rate_limit_enabled, bool):
+        errors.append("rate_limit_enabled must be bool")
+    for scope in ("global", "group", "user"):
+        algorithm = getattr(cfg, f"{scope}_rate_limit_algorithm")
+        messages = getattr(cfg, f"{scope}_rate_limit_messages")
+        window = getattr(cfg, f"{scope}_rate_limit_window_seconds")
+        if algorithm not in _VALID_RATE_LIMIT_ALGORITHMS:
+            errors.append(f"{scope}_rate_limit_algorithm must be one of {sorted(_VALID_RATE_LIMIT_ALGORITHMS)}")
+        valid_messages = isinstance(messages, int) and not isinstance(messages, bool) and messages >= 0
+        if not valid_messages:
+            errors.append(f"{scope}_rate_limit_messages must be a non-negative integer")
+        valid_window = isinstance(window, (int, float)) and not isinstance(window, bool) and window >= 0
+        if not valid_window:
+            errors.append(f"{scope}_rate_limit_window_seconds must be non-negative")
+        elif valid_messages and messages > 0 and window <= 0:
+            errors.append(f"{scope}_rate_limit_window_seconds must be positive when the limit is enabled")
+    if not isinstance(cfg.rate_limit_reject_message, str) or not cfg.rate_limit_reject_message:
+        errors.append("rate_limit_reject_message must not be empty")
+    if cfg.rate_limit_storage_failure_mode not in _VALID_RATE_LIMIT_STORAGE_FAILURE_MODES:
+        errors.append(
+            "rate_limit_storage_failure_mode must be one of "
+            f"{sorted(_VALID_RATE_LIMIT_STORAGE_FAILURE_MODES)}"
+        )
+
+
+def _validate_security_and_delivery(cfg: AdapterConfig, errors: list[str]) -> None:
+    if not isinstance(cfg.bot_blacklist_enabled, bool):
+        errors.append("bot_blacklist_enabled must be bool")
+    if not isinstance(cfg.bot_blacklist_max_duration_seconds, int) \
+            or isinstance(cfg.bot_blacklist_max_duration_seconds, bool) \
+            or cfg.bot_blacklist_max_duration_seconds <= 0:
+        errors.append("bot_blacklist_max_duration_seconds must be a positive integer")
+    if not isinstance(cfg.bot_blacklist_reject_message, str) or not cfg.bot_blacklist_reject_message:
+        errors.append("bot_blacklist_reject_message must not be empty")
+    if cfg.media_delivery_mode not in _VALID_MEDIA_DELIVERY_MODES:
+        errors.append(f"media_delivery_mode must be one of {sorted(_VALID_MEDIA_DELIVERY_MODES)}")
+    if cfg.webui_token_lifetime_hours < 1:
+        errors.append("webui_token_lifetime_hours must be at least 1")
+    if not isinstance(cfg.automation_upload_allowed_roots, list) or not all(
+        isinstance(root, str) and root.strip() for root in cfg.automation_upload_allowed_roots
+    ):
+        errors.append("automation_upload_allowed_roots must be a list of non-empty paths")
+    if not cfg.reaction_emoji_id:
+        errors.append("reaction_emoji_id must not be empty")
+    if cfg.dm_user_filter_mode not in _VALID_USER_FILTER_MODES:
+        errors.append(f"dm_user_filter_mode must be one of {sorted(_VALID_USER_FILTER_MODES)}")
+    if cfg.log_level.upper() not in _VALID_LOG_LEVELS:
+        errors.append(f"log_level must be one of {sorted(_VALID_LOG_LEVELS)}")
+    _validate_command_permissions(cfg.command_permissions, "command_permissions", errors)
+
+
+def _validate_command_permissions(permissions: dict[str, str], label: str, errors: list[str]) -> None:
+    for cmd, perm in permissions.items():
+        if perm not in _VALID_COMMAND_PERM_LEVELS:
+            errors.append(f"{label}[{cmd!r}] must be one of {sorted(_VALID_COMMAND_PERM_LEVELS)}")
+
+
+def _validate_groups(cfg: AdapterConfig, errors: list[str]) -> None:
+    for gid, raw in cfg.groups.items():
+        _validate_group(cfg, str(gid), GroupConfig.from_dict(raw), errors)
+
+
+def _validate_group(cfg: AdapterConfig, gid: str, gc: GroupConfig, errors: list[str]) -> None:
+    if gc.group_user_filter_mode not in _VALID_USER_FILTER_MODES:
+        errors.append(f"group {gid} group_user_filter_mode must be one of {sorted(_VALID_USER_FILTER_MODES)}")
+    if not isinstance(gc.enabled, bool):
+        errors.append(f"group {gid} enabled must be bool")
+    nullable_bool_fields = (
+        "require_mention",
+        "mention_first_only",
+        "keyword_first_only",
+        "strip_first_mention",
+        "reaction_emoji_enabled",
+        "command_filter_enabled",
+        "command_filter_unknown",
+        "message_show_group_id",
+        "notify_poke_enabled",
+        "notify_member_change_enabled",
+    )
+    for field_name in nullable_bool_fields:
+        value = getattr(gc, field_name)
+        if value is not None and not isinstance(value, bool):
+            errors.append(f"group {gid} {field_name} must be bool or null")
+    if gc.group_rate_limit_algorithm is not None \
+            and gc.group_rate_limit_algorithm not in _VALID_RATE_LIMIT_ALGORITHMS:
+        errors.append(
+            f"group {gid} group_rate_limit_algorithm must be one of "
+            f"{sorted(_VALID_RATE_LIMIT_ALGORITHMS)} or null"
+        )
+    messages = gc.group_rate_limit_messages
+    if messages is not None and (
+        not isinstance(messages, int) or isinstance(messages, bool) or messages < 0
+    ):
+        errors.append(f"group {gid} group_rate_limit_messages must be a non-negative integer or null")
+    window = gc.group_rate_limit_window_seconds
+    if window is not None and (
+        not isinstance(window, (int, float)) or isinstance(window, bool) or window < 0
+    ):
+        errors.append(f"group {gid} group_rate_limit_window_seconds must be non-negative or null")
+    resolved_messages = cfg.resolve_group_rate_limit_messages(gid)
+    resolved_window = cfg.resolve_group_rate_limit_window_seconds(gid)
+    if isinstance(resolved_messages, int) and not isinstance(resolved_messages, bool) \
+            and isinstance(resolved_window, (int, float)) and not isinstance(resolved_window, bool) \
+            and resolved_messages > 0 and resolved_window <= 0:
+        errors.append(f"group {gid} group_rate_limit_window_seconds must be positive when the limit is enabled")
+    if gc.command_permissions is not None:
+        _validate_command_permissions(gc.command_permissions, f"group {gid} command_permissions", errors)
+
+
 def config_path() -> Path:
     explicit = os.getenv(CONFIG_ENV)
     if explicit:
@@ -699,6 +704,7 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "user_rate_limit_messages": "每个QQ的限流消息数;0=禁用该维度",
         "user_rate_limit_window_seconds": "个人限流窗口秒数",
         "rate_limit_reject_message": "限流提示模板;支持 {scope}/{retry_after}/{user_id}",
+        "rate_limit_storage_failure_mode": "限流存储故障策略:memory_fallback(默认)|reject",
         "reaction_emoji_id_queued": "消息排队时贴表情回应使用的表情ID(默认 123),空=不贴表情",
         "media_delivery_mode": "可选值: passthrough(URL 占位符直传) | cache(插件侧下载落盘到 ~/.hermes/cache/,默认)",
         "global_channel_prompt": "全局提示词;保存时物化写入 Hermes config.yaml 的"

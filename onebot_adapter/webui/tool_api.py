@@ -22,7 +22,7 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     @model_validator(mode="after")
-    def _validate_dependent_fields(self):
+    def _validate_dependent_fields(self):  # noqa: C901 -- validates a generated cross-field schema
         fields = type(self).model_fields
         if "message_type" in fields and {"group_id", "user_id"} <= fields.keys():
             message_type = self.message_type

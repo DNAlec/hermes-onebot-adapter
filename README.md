@@ -37,6 +37,16 @@ hermes-onebot-adapter                 # 启动服务
 hermes-onebot-adapter --init-config   # 生成默认配置后退出
 ```
 
+已有安装升级时，适配器和复制到 Hermes 目录中的插件需要一起更新：
+
+```bash
+pipx upgrade hermes-onebot-adapter
+hermes-onebot-adapter install --hermes-dir ~/.hermes
+hermes gateway restart
+```
+
+升级不会覆盖现有适配器配置。安装器会更新 `<hermes>/plugins/onebot/` 中的插件文件；重启后可在 WebUI 仪表盘确认适配器与插件版本一致。
+
 ## 配置流程
 
 1. **启动适配器服务** — `hermes-onebot-adapter`
@@ -212,7 +222,9 @@ WebUI「OneBot 工具」页可以为每个工具设置是否注册给 Hermes，�
 | 群聊 | `group_rate_limit_(algorithm\|messages\|window_seconds)` | 每个群独立计数；GroupConfig 可 per-group 覆盖 |
 | 个人 | `user_rate_limit_(algorithm\|messages\|window_seconds)` | 每个 QQ 独立计数，跨私聊和所有群 |
 
-算法支持滑动窗口（`sliding_window`，窗口内消息数上限）和令牌桶（`token_bucket`，按速率补充令牌）。拦截提示模板 `rate_limit_reject_message` 支持 `{scope}`/`{retry_after}`/`{user_id}` 占位符。配置在 WebUI「聊天配置」页。
+算法支持滑动窗口（`sliding_window`，窗口内消息数上限）和令牌桶（`token_bucket`，按速率补充令牌）。额度持久化到 `~/.onebot_adapter/rate_limit.sqlite3`，进程重启不会重置；关闭总开关时保留状态并按经过的真实时间自然恢复。`rate_limit_storage_failure_mode` 可选数据库故障时退回内存限流（默认）或拒绝受限流消息。
+
+拦截提示模板 `rate_limit_reject_message` 支持 `{scope}`/`{retry_after}`/`{user_id}` 占位符。WebUI「聊天配置」页可查询和定向重置全局、群聊或用户额度，并查看持久化健康状态。
 
 ## 配置备份与审计
 
@@ -282,6 +294,8 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 | `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
 | `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
 | 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
+
+所有 `/` 指令都不占用适配器的 busy 槽，也不会注册用于释放 busy 槽的 idle 回调；它们不会扰动正在处理的普通群消息及其排队顺序。
 
 ### Hermes 会话隔离配置
 

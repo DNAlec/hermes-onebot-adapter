@@ -1,6 +1,7 @@
 """WebUI backend HTTP API + static SPA hosting."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import aiohttp.web
 
 from onebot_adapter import __version__
 from onebot_adapter.config import AdapterConfig, ConfigStore, GroupConfig, save_config
+from onebot_adapter.rate_limit import RateLimitStorageUnavailable
 from onebot_adapter.webui.tool_api import TOOL_MAP, TOOL_MODELS, add_tool_routes, key_matches
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,8 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_get("/api/v1/status", _status(store, state))
     app.router.add_get("/api/v1/config", _get_config(store))
     app.router.add_patch("/api/v1/config", _put_config(store, state))
+    app.router.add_get("/api/v1/rate_limit/quota", _get_rate_limit_quota(store, state))
+    app.router.add_post("/api/v1/rate_limit/quota/reset", _reset_rate_limit_quota(store, state))
     app.router.add_post("/api/v1/automation/key", _rotate_automation_key(store))
     app.router.add_delete("/api/v1/automation/key", _revoke_automation_key(store))
     app.router.add_get("/api/v1/hermes_dir_status", _hermes_dir_status(store))
@@ -130,6 +134,7 @@ async def _security_middleware(request: aiohttp.web.Request, handler):
     response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
         "/api/v1/auth/login", "/api/v1/config", "/api/v1/automation/key",
+        "/api/v1/rate_limit/quota", "/api/v1/rate_limit/quota/reset",
     }:
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -382,6 +387,69 @@ def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
 def _get_config(store: ConfigStore):
     async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
         return aiohttp.web.json_response(_public_config(store.config))
+
+    return handler
+
+
+def _rate_limit_target(scope: Any, target_id: Any, *, target_supplied: bool) -> tuple[str, str | None]:
+    if scope not in {"global", "group", "user"}:
+        raise ValueError("scope must be global, group, or user")
+    if scope == "global":
+        if target_supplied:
+            raise ValueError("target_id must not be supplied for global scope")
+        return scope, None
+    if not isinstance(target_id, str) or not target_id.strip().isdigit():
+        raise ValueError("target_id must be a numeric string for group or user scope")
+    return scope, target_id.strip()
+
+
+def _get_rate_limit_quota(store: ConfigStore, state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        try:
+            scope, target_id = _rate_limit_target(
+                request.query.get("scope"), request.query.get("target_id"),
+                target_supplied="target_id" in request.query,
+            )
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        limiter = state.get("rate_limiter")
+        if limiter is None:
+            return aiohttp.web.json_response({"error": "rate limiter unavailable"}, status=503)
+        result = await limiter.quota(store.config, scope, target_id)
+        return aiohttp.web.json_response(result)
+
+    return handler
+
+
+def _reset_rate_limit_quota(store: ConfigStore, state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(data, dict):
+            return aiohttp.web.json_response({"error": "JSON body must be an object"}, status=400)
+        try:
+            scope, target_id = _rate_limit_target(
+                data.get("scope"), data.get("target_id"), target_supplied="target_id" in data,
+            )
+        except ValueError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        limiter = state.get("rate_limiter")
+        if limiter is None:
+            return aiohttp.web.json_response({"error": "rate limiter unavailable"}, status=503)
+        try:
+            result = await limiter.reset(store.config, scope, target_id)
+        except RateLimitStorageUnavailable:
+            return aiohttp.web.json_response(
+                {"error": "rate-limit persistence backlog is full"}, status=503,
+            )
+        audit_logger.warning(
+            "rate-limit quota reset source=webui scope=%s target_id=%s cleared=%s pending=%s client_ip=%s",
+            scope, target_id or "", result["cleared"], result["pending_persistence"],
+            _client_ip(request, store.config),
+        )
+        return aiohttp.web.json_response(result)
 
     return handler
 
@@ -644,7 +712,8 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
         from onebot_adapter import installer
 
         try:
-            result = installer.install(
+            result = await asyncio.to_thread(
+                installer.install,
                 str(target),
                 adapter_url=adapter_url,
                 adapter_token=adapter_token,
@@ -682,7 +751,7 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
         from onebot_adapter import installer
 
         try:
-            result = installer.uninstall(str(target))
+            result = await asyncio.to_thread(installer.uninstall, str(target))
             # Persist the resolved install dir so the config reflects where
             # the plugin was managed, matching _install_plugin's behavior.
             if install_dir and str(target) != store.config.hermes_install_dir:
@@ -895,11 +964,11 @@ def _get_hermes_tools(store: ConfigStore):
                 {"error": "hermes_install_dir 未配置或目录不存在,请先在插件管理页配置"},
                 status=400,
             )
-        available = list_available_toolsets(cfg.hermes_install_dir or None)
+        available = await asyncio.to_thread(list_available_toolsets, cfg.hermes_install_dir or None)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
         try:
-            current = read_current_enabled(cfg.hermes_install_dir or None)
+            current = await asyncio.to_thread(read_current_enabled, cfg.hermes_install_dir or None)
         except Exception as exc:
             logger.warning("read_current_enabled failed: %s", exc)
             current = []
@@ -947,7 +1016,7 @@ def _put_hermes_tools(store: ConfigStore):
             )
 
         # 校验:每个 key 必须在 configurable ∪ plugin_keys ∪ mcp_names 中
-        available = list_available_toolsets(cfg.hermes_install_dir or None)
+        available = await asyncio.to_thread(list_available_toolsets, cfg.hermes_install_dir or None)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
         valid_keys: set[str] = set()
@@ -970,7 +1039,7 @@ def _put_hermes_tools(store: ConfigStore):
             final = sorted(set(final) | {NO_MCP_SENTINEL})
 
         try:
-            write_platform_toolsets(cfg.hermes_install_dir or None, final)
+            await asyncio.to_thread(write_platform_toolsets, cfg.hermes_install_dir or None, final)
         except FileNotFoundError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
@@ -997,7 +1066,7 @@ def _reset_hermes_tools(store: ConfigStore):
                 status=400,
             )
         try:
-            reset_platform_toolsets(cfg.hermes_install_dir or None)
+            await asyncio.to_thread(reset_platform_toolsets, cfg.hermes_install_dir or None)
         except Exception as exc:
             logger.exception("reset platform_toolsets failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1092,7 +1161,10 @@ def _get_onebot_tool_policies(store: ConfigStore):
             return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
         try:
             return aiohttp.web.json_response(
-                _tool_policy_response(_onebot_tool_catalog(), read_onebot_tool_policies(install_dir))
+                _tool_policy_response(
+                    _onebot_tool_catalog(),
+                    await asyncio.to_thread(read_onebot_tool_policies, install_dir),
+                )
             )
         except Exception as exc:
             logger.exception("read OneBot tool policies failed")
@@ -1159,7 +1231,7 @@ def _put_onebot_tool_policies(store: ConfigStore):
                 sparse[name] = {"registered": registered, "permission": permission}
 
         try:
-            write_onebot_tool_policies(install_dir, sparse)
+            await asyncio.to_thread(write_onebot_tool_policies, install_dir, sparse)
         except Exception as exc:
             logger.exception("write OneBot tool policies failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1181,7 +1253,7 @@ def _reset_onebot_tool_policies(store: ConfigStore):
             return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
         try:
             catalog = _onebot_tool_catalog()
-            reset_onebot_tool_policies(install_dir)
+            await asyncio.to_thread(reset_onebot_tool_policies, install_dir)
         except Exception as exc:
             logger.exception("reset OneBot tool policies failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1213,7 +1285,9 @@ def _get_hermes_mode(store: ConfigStore, state: dict[str, Any]):
         from onebot_adapter.hermes_config import read_group_sessions_per_user
 
         try:
-            file_value = read_group_sessions_per_user(cfg.hermes_install_dir or None)
+            file_value = await asyncio.to_thread(
+                read_group_sessions_per_user, cfg.hermes_install_dir or None
+            )
         except Exception as exc:
             return aiohttp.web.json_response(
                 {"error": f"读取 Hermes config.yaml 失败: {exc}"}, status=500,
@@ -1243,7 +1317,9 @@ def _put_hermes_mode(store: ConfigStore):
         from onebot_adapter.hermes_config import write_group_sessions_per_user
 
         try:
-            write_group_sessions_per_user(cfg.hermes_install_dir or None, value)
+            await asyncio.to_thread(
+                write_group_sessions_per_user, cfg.hermes_install_dir or None, value
+            )
         except FileNotFoundError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:

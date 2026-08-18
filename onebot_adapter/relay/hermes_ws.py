@@ -75,6 +75,41 @@ def _send_fingerprint(action: str, data: dict[str, Any]) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _append_reply_segment(segs: list[dict], reply_to: Any) -> None:
+    if not reply_to:
+        return
+    try:
+        segs.append(ob.reply_segment(int(reply_to)))
+    except (ValueError, TypeError):
+        pass
+
+
+def _build_send_segments(action: str, data: dict[str, Any]) -> list[dict]:
+    """Build OneBot segments for ordinary message send actions."""
+    segs: list[dict] = []
+    _append_reply_segment(segs, data.get("reply_to"))
+    if action == "send_text":
+        segs.append(ob.text_segment(data.get("content", "")))
+        return segs
+
+    media_fields: dict[str, tuple[str, Callable[[str], dict]]] = {
+        "send_image": ("image_url", ob.image_segment),
+        "send_voice": ("audio_path", ob.record_segment),
+        "send_video": ("video_path", ob.video_segment),
+    }
+    media_spec = media_fields.get(action)
+    if media_spec is None:
+        raise ValueError(f"unknown action {action!r}")
+    field_name, segment_factory = media_spec
+    file_ref = str(data.get(field_name, ""))
+    if not file_ref:
+        raise ValueError(f"no {field_name} provided")
+    segs.append(segment_factory(file_ref))
+    if data.get("caption"):
+        segs.append(ob.text_segment(data["caption"]))
+    return segs
+
+
 class HermesRelayServer:
     _RING_BUFFER_SIZE = 50
     _RING_BUFFER_MAX_AGE = 30.0  # seconds; skip older events on replay
@@ -93,6 +128,7 @@ class HermesRelayServer:
     # _RESULT_TIMEOUT, triggering Gateway retries and a death spiral.
     # Aligned with the plugin-side _MAX_INFLIGHT_SENDS=2.
     _MAX_CONCURRENT_SENDS = 2
+    _MAX_INFLIGHT_PLUGIN_FRAMES = 64
     # Send-dedup cache hard cap.  The cache is also TTL-evicted lazily on
     # lookup, but sends that are never retried (the common case) would
     # otherwise accumulate forever.  Opportunistic eviction on insert keeps
@@ -439,6 +475,8 @@ class HermesRelayServer:
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
+                    if len(my_tasks) >= self._MAX_INFLIGHT_PLUGIN_FRAMES:
+                        await asyncio.wait(my_tasks, return_when=asyncio.FIRST_COMPLETED)
                     task = asyncio.create_task(self._handle_text(ws, msg.data))
                     self._text_tasks.add(task)
                     my_tasks.add(task)
@@ -1044,140 +1082,24 @@ class HermesRelayServer:
         chat_id = data.get("chat_id", "")
         try:
             is_group, num_id = parse_chat_id(chat_id)
-            segs: list[dict] = []
             # ── 去重:Gateway send 超时重试时,插件带新 req_id 重发同样内容 ──
             # 命中且未过期则直接回缓存结果,跳过实际发送/SeqMap/log。
-            dedup_key: tuple[str, str, str, str] | None = None
-            if self._config.send_dedup_enabled and action in _DEDUP_ACTIONS:
-                dedup_key = (
-                    chat_id, action,
-                    _send_fingerprint(action, data),
-                    str(data.get("reply_to", "")),
-                )
-                cached = self._send_cache.get(dedup_key)
-                if cached is not None:
-                    cached_ts, cached_msg_id = cached
-                    age = time.monotonic() - cached_ts
-                    if age <= self._config.send_dedup_ttl_seconds:
-                        logger.info(
-                            "relay dedup hit: action=%s chat_id=%s cached_msg_id=%s age=%.1fs",
-                            action, chat_id, cached_msg_id, age,
-                        )
-                        await ws.send_json(
-                            result_message(req_id, True, message_id=cached_msg_id or None)
-                        )
-                        return
-                    self._send_cache.pop(dedup_key, None)  # expired, fall through
+            dedup_hit, dedup_key = await self._check_send_dedup(
+                ws, req_id, chat_id, str(action), data,
+            )
+            if dedup_hit:
+                return
 
-            if action == "send_text":
-                if data.get("reply_to"):
-                    try:
-                        segs.append(ob.reply_segment(int(data["reply_to"])))
-                    except (ValueError, TypeError):
-                        pass
-                content = data.get("content", "")
-                segs.append(ob.text_segment(content))
-
-            elif action == "send_image":
-                file_ref = str(data.get("image_url", ""))
-                if not file_ref:
-                    raise ValueError("no image_url provided")
-                if data.get("reply_to"):
-                    try:
-                        segs.append(ob.reply_segment(int(data["reply_to"])))
-                    except (ValueError, TypeError):
-                        pass
-                segs.append(ob.image_segment(file_ref))
-                if data.get("caption"):
-                    segs.append(ob.text_segment(data["caption"]))
-
-            elif action == "send_voice":
-                file_ref = str(data.get("audio_path", ""))
-                if not file_ref:
-                    raise ValueError("no audio_path provided")
-                if data.get("reply_to"):
-                    try:
-                        segs.append(ob.reply_segment(int(data["reply_to"])))
-                    except (ValueError, TypeError):
-                        pass
-                segs.append(ob.record_segment(file_ref))
-                if data.get("caption"):
-                    segs.append(ob.text_segment(data["caption"]))
-
-            elif action == "send_video":
-                file_ref = str(data.get("video_path", ""))
-                if not file_ref:
-                    raise ValueError("no video_path provided")
-                if data.get("reply_to"):
-                    try:
-                        segs.append(ob.reply_segment(int(data["reply_to"])))
-                    except (ValueError, TypeError):
-                        pass
-                segs.append(ob.video_segment(file_ref))
-                if data.get("caption"):
-                    segs.append(ob.text_segment(data["caption"]))
-
-            elif action == "send_document":
-                file_ref = str(data.get("file_path", ""))
-                if not file_ref:
-                    raise ValueError("no file_path provided")
-                filename = data.get("filename") or file_ref.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-                group_name = ""
-                if is_group and self._name_resolver:
-                    try:
-                        group_name = await self._name_resolver.resolve_group_name(str(num_id))
-                    except Exception:
-                        pass
-                await log_send_line(
-                    chat_id=chat_id,
-                    segs=[{"type": "file", "data": {"name": filename}}],
-                    is_group=is_group, group_name=group_name,
-                    reply_to=data.get("reply_to"),
-                    preview=self._config.log_message_preview,
-                    name_resolver=self._name_resolver,
-                    file_message_mode=self._config.log_file_message_mode,
-                    req_id=req_id,
-                )
-                if is_group:
-                    async with self._send_api_semaphore:
-                        await self._api.upload_group_file(num_id, file_ref, filename)
-                else:
-                    async with self._send_api_semaphore:
-                        await self._api.upload_private_file(num_id, file_ref, filename)
-                # Send caption as a follow-up text message (with reply if provided).
-                caption = data.get("caption")
-                reply_to_doc = data.get("reply_to")
-                if caption or reply_to_doc:
-                    caption_segs: list[dict] = []
-                    if reply_to_doc:
-                        try:
-                            caption_segs.append(ob.reply_segment(int(reply_to_doc)))
-                        except (ValueError, TypeError):
-                            pass
-                    if caption:
-                        caption_segs.append(ob.text_segment(caption))
-                    if caption_segs:
-                        if is_group:
-                            async with self._send_api_semaphore:
-                                await self._api.send_group_msg(num_id, caption_segs)
-                        else:
-                            async with self._send_api_semaphore:
-                                await self._api.send_private_msg(num_id, caption_segs)
-                # 写入去重缓存(send_document 无 message_id,缓存空串;命中时回 None)。
+            if action == "send_document":
+                await self._send_document(data, req_id, chat_id, is_group, num_id)
                 if dedup_key is not None:
                     self._send_cache[dedup_key] = (time.monotonic(), "")
                     self._maybe_evict_send_cache()
-                if is_group:
-                    raw_gid = chat_id[len("group:"):] if chat_id.startswith("group:") else ""
-                    if raw_gid and raw_gid in self._busy_groups:
-                        busy_user, _ = self._busy_groups[raw_gid]
-                        self._busy_groups[raw_gid] = (busy_user, time.monotonic())
+                self._touch_busy_group(chat_id, is_group)
                 await ws.send_json(result_message(req_id, True))
                 return
 
-            else:
-                await ws.send_json(result_message(req_id, False, error=f"unknown action {action!r}"))
-                return
+            segs = _build_send_segments(str(action), data)
 
             if is_group:
                 async with self._send_api_semaphore:
@@ -1194,12 +1116,7 @@ class HermesRelayServer:
                 "relay send response: action=%s chat_id=%s msg_id=%s resp=%s",
                 action, chat_id, msg_id, safe_json(resp, 1000),
             )
-            group_name = ""
-            if is_group and self._name_resolver:
-                try:
-                    group_name = await self._name_resolver.resolve_group_name(str(num_id))
-                except Exception:
-                    pass
+            group_name = await self._resolve_group_name(is_group, num_id)
             await log_send_line(
                 chat_id=chat_id, segs=segs, is_group=is_group,
                 group_name=group_name, reply_to=data.get("reply_to"),
@@ -1218,11 +1135,7 @@ class HermesRelayServer:
             # Hermes 发出的任意消息(send_text / 长任务心跳等)都说明 agent 仍在活跃,
             # 顺便刷新该群 busy 槽的时间戳,防止看门狗误判超时。busy 槽用原始群号
             # 字符串作 key(保留前导零),与 _group_id_of / _handle_idle 保持一致。
-            if is_group:
-                raw_gid = chat_id[len("group:"):] if chat_id.startswith("group:") else ""
-                if raw_gid and raw_gid in self._busy_groups:
-                    busy_user, _ = self._busy_groups[raw_gid]
-                    self._busy_groups[raw_gid] = (busy_user, time.monotonic())
+            self._touch_busy_group(chat_id, is_group)
             if self._seq_map is not None and is_group and msg_id:
                 task = asyncio.create_task(
                     self._populate_seq_map(str(num_id), msg_id),
@@ -1237,6 +1150,95 @@ class HermesRelayServer:
         except Exception as exc:
             logger.exception("send failed")
             await ws.send_json(result_message(req_id, False, error=str(exc)))
+
+    async def _check_send_dedup(
+        self,
+        ws: aiohttp.web.WebSocketResponse,
+        req_id: str,
+        chat_id: str,
+        action: str,
+        data: dict[str, Any],
+    ) -> tuple[bool, tuple[str, str, str, str] | None]:
+        if not self._config.send_dedup_enabled or action not in _DEDUP_ACTIONS:
+            return False, None
+        key = (
+            chat_id,
+            action,
+            _send_fingerprint(action, data),
+            str(data.get("reply_to", "")),
+        )
+        cached = self._send_cache.get(key)
+        if cached is None:
+            return False, key
+        cached_ts, cached_msg_id = cached
+        age = time.monotonic() - cached_ts
+        if age > self._config.send_dedup_ttl_seconds:
+            self._send_cache.pop(key, None)
+            return False, key
+        logger.info(
+            "relay dedup hit: action=%s chat_id=%s cached_msg_id=%s age=%.1fs",
+            action, chat_id, cached_msg_id, age,
+        )
+        await ws.send_json(result_message(req_id, True, message_id=cached_msg_id or None))
+        return True, key
+
+    async def _send_document(
+        self,
+        data: dict[str, Any],
+        req_id: str,
+        chat_id: str,
+        is_group: bool,
+        num_id: int,
+    ) -> None:
+        file_ref = str(data.get("file_path", ""))
+        if not file_ref:
+            raise ValueError("no file_path provided")
+        filename = data.get("filename") or file_ref.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        group_name = await self._resolve_group_name(is_group, num_id)
+        await log_send_line(
+            chat_id=chat_id,
+            segs=[{"type": "file", "data": {"name": filename}}],
+            is_group=is_group,
+            group_name=group_name,
+            reply_to=data.get("reply_to"),
+            preview=self._config.log_message_preview,
+            name_resolver=self._name_resolver,
+            file_message_mode=self._config.log_file_message_mode,
+            req_id=req_id,
+        )
+        async with self._send_api_semaphore:
+            if is_group:
+                await self._api.upload_group_file(num_id, file_ref, filename)
+            else:
+                await self._api.upload_private_file(num_id, file_ref, filename)
+
+        caption_segs: list[dict] = []
+        _append_reply_segment(caption_segs, data.get("reply_to"))
+        if data.get("caption"):
+            caption_segs.append(ob.text_segment(data["caption"]))
+        if not caption_segs:
+            return
+        async with self._send_api_semaphore:
+            if is_group:
+                await self._api.send_group_msg(num_id, caption_segs)
+            else:
+                await self._api.send_private_msg(num_id, caption_segs)
+
+    async def _resolve_group_name(self, is_group: bool, num_id: int) -> str:
+        if not is_group or self._name_resolver is None:
+            return ""
+        try:
+            return await self._name_resolver.resolve_group_name(str(num_id))
+        except Exception:
+            return ""
+
+    def _touch_busy_group(self, chat_id: str, is_group: bool) -> None:
+        if not is_group or not chat_id.startswith("group:"):
+            return
+        raw_gid = chat_id[len("group:"):]
+        if raw_gid in self._busy_groups:
+            busy_user, _ = self._busy_groups[raw_gid]
+            self._busy_groups[raw_gid] = (busy_user, time.monotonic())
 
     async def _populate_seq_map(self, group_id: str, msg_id: str) -> None:
         """Fire-and-forget: fetch real_seq for a bot-sent group message and

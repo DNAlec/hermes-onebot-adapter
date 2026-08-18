@@ -61,4 +61,13 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B"]
+select = ["E", "F", "W", "I", "UP", "B", "C901", "PLR0912", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+# Start with a pragmatic ceiling that blocks monolithic parser/dispatcher
+# functions without forcing unrelated legacy hotspots into the same change.
+max-complexity = 20
+
+[tool.ruff.lint.pylint]
+max-branches = 40
+max-statements = 100
