@@ -888,6 +888,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         Conditions (all must hold):
         - chat_id is a group chat (``group:<gid>``).  DMs don't queue.
+        - The event is not a slash command.  Slash commands bypass the adapter
+          queue and therefore do not own its busy slot.
         - Hermes ``group_sessions_per_user`` is False — read from
           ``self.config.extra`` exactly like ``BasePlatformAdapter.handle_message``
           does at base.py:4606, so the plugin's notion of "shared" matches
@@ -902,6 +904,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         chat_id = data.get("chat_id", "")
         if not chat_id.startswith("group:"):
             return  # DM — no queueing.
+        if str(data.get("text", "")).startswith("/"):
+            return  # Slash commands bypass the adapter queue and own no busy slot.
         try:
             group_sessions_per_user = self.config.extra.get("group_sessions_per_user", True)
         except Exception:

@@ -186,6 +186,44 @@ async def test_config_put_requires_auth(client):
     assert resp.status == 401
 
 
+async def test_rate_limit_quota_api_query_reset_and_no_store(client, caplog):
+    query = await client.get(
+        "/api/v1/rate_limit/quota?scope=user&target_id=123", headers=_auth(),
+    )
+    assert query.status == 200
+    assert query.headers["Cache-Control"] == "no-store"
+    data = await query.json()
+    assert data["scope"] == "user"
+    assert data["target_id"] == "123"
+    assert data["used"] == 0
+    assert data["persistence"]["failure_mode"] == "memory_fallback"
+
+    reset = await client.post(
+        "/api/v1/rate_limit/quota/reset",
+        json={"scope": "global"},
+        headers=_auth(),
+    )
+    assert reset.status == 200
+    assert reset.headers["Cache-Control"] == "no-store"
+    assert (await reset.json())["cleared"] is False
+    assert "rate-limit quota reset" in caplog.text
+
+
+async def test_rate_limit_quota_api_validates_scope_and_target(client):
+    missing = await client.get("/api/v1/rate_limit/quota?scope=user", headers=_auth())
+    assert missing.status == 400
+    non_numeric = await client.get(
+        "/api/v1/rate_limit/quota?scope=group&target_id=abc", headers=_auth(),
+    )
+    assert non_numeric.status == 400
+    global_target = await client.get(
+        "/api/v1/rate_limit/quota?scope=global&target_id=1", headers=_auth(),
+    )
+    assert global_target.status == 400
+    unauthorized = await client.get("/api/v1/rate_limit/quota?scope=global")
+    assert unauthorized.status == 401
+
+
 async def test_config_rejects_invalid(client):
     resp = await client.patch("/api/v1/config", json={"onebot_mode": "bogus"}, headers=_auth())
     assert resp.status == 400

@@ -168,6 +168,7 @@ export interface Config {
   user_rate_limit_messages: number;
   user_rate_limit_window_seconds: number;
   rate_limit_reject_message: string;
+  rate_limit_storage_failure_mode: "memory_fallback" | "reject";
   // ── 媒体投递 ──
   media_delivery_mode: string;
   // ── /指令过滤 ──
@@ -187,6 +188,42 @@ export interface Config {
 export const getStatus = () => api.get<Status>("/status").then((r) => r.data);
 export const getConfig = () => api.get<Config>("/config").then((r) => r.data);
 export const putConfig = (cfg: Partial<Config>) => api.patch<Config>("/config", cfg).then((r) => r.data);
+
+export interface RateLimitPersistenceStatus {
+  status: "not_started" | "healthy" | "degraded" | "recovering";
+  failure_mode: "memory_fallback" | "reject";
+  last_success_at: number | null;
+  pending_operations: number;
+  pending_limit: number;
+  fallback_exhausted: boolean;
+}
+
+export interface RateLimitQuota {
+  scope: "global" | "group" | "user";
+  target_id: string | null;
+  rate_limit_enabled: boolean;
+  scope_enabled: boolean;
+  algorithm: "sliding_window" | "token_bucket";
+  limit: number;
+  window_seconds: number;
+  tracked: boolean;
+  used: number;
+  remaining: number;
+  next_available_in_seconds: number;
+  full_recovery_in_seconds: number;
+  persistence: RateLimitPersistenceStatus;
+  cleared?: boolean;
+  pending_persistence?: boolean;
+}
+
+export const getRateLimitQuota = (scope: string, targetId?: string) =>
+  api.get<RateLimitQuota>("/rate_limit/quota", {
+    params: targetId === undefined ? { scope } : { scope, target_id: targetId },
+  }).then((r) => r.data);
+export const resetRateLimitQuota = (scope: string, targetId?: string) =>
+  api.post<RateLimitQuota>("/rate_limit/quota/reset",
+    targetId === undefined ? { scope } : { scope, target_id: targetId },
+  ).then((r) => r.data);
 export interface HermesDirStatus {
   hermes_dir: string;
   exists: boolean;

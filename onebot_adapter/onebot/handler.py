@@ -8,8 +8,10 @@ transport-specific modules so it stays in sync.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from onebot_adapter.config import AdapterConfig
@@ -22,6 +24,9 @@ from onebot_adapter.onebot.ws_api import WsApiTransport
 from onebot_adapter.relay.protocol import FilteredEvent
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_EVENT_QUEUE_SIZE = 1024
+_DROP_LOG_INTERVAL = 5.0
 
 
 class OneBotHandler:
@@ -69,6 +74,19 @@ class OneBotHandler:
         # 由 WsApiTransport resolve 对应 future 并结束，不进 parser 流程。
         if self._ws_api_transport is not None and self._ws_api_transport.on_text(raw):
             return
+        await self.handle_event_text(raw)
+
+    def intercept_api_response(self, raw: str) -> bool:
+        """Resolve a WS API response without scheduling event parsing.
+
+        Transports call this directly from their receive loop.  Keeping this
+        fast path outside the ordered event worker is essential: event parsing
+        may itself await an API response carried by the same WebSocket.
+        """
+        return self._ws_api_transport is not None and self._ws_api_transport.on_text(raw)
+
+    async def handle_event_text(self, raw: str) -> None:
+        """Parse and dispatch a frame already known not to be an API response."""
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -121,3 +139,93 @@ class OneBotHandler:
                 await self._on_event(event)
             except Exception:
                 logger.exception("OneBot %s: on_event callback failed", self.label)
+
+
+class OneBotEventDispatcher:
+    """Bounded, ordered processor for non-response OneBot frames.
+
+    The receive loop always handles correlated API responses immediately,
+    then submits ordinary event frames here.  A single worker preserves the
+    order observed on the WebSocket.  Overflow is explicit and bounded rather
+    than allowing an unbounded number of parsing tasks to accumulate.
+    """
+
+    def __init__(
+        self,
+        handler: OneBotHandler,
+        *,
+        label: str,
+        max_queue_size: int = _DEFAULT_EVENT_QUEUE_SIZE,
+    ) -> None:
+        self._handler = handler
+        self._label = label
+        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=max_queue_size)
+        self._worker: asyncio.Task[None] | None = None
+        self._dropped = 0
+        self._last_drop_log = 0.0
+
+    @property
+    def queued(self) -> int:
+        return self._queue.qsize()
+
+    @property
+    def dropped(self) -> int:
+        return self._dropped
+
+    def dispatch(self, raw: str) -> bool:
+        """Handle a response immediately or enqueue an event.
+
+        Returns ``False`` only when the bounded event queue is full and the
+        event has to be dropped.  The receive loop must remain non-blocking so
+        it can continue resolving API responses needed by the active worker.
+        """
+        if self._handler.intercept_api_response(raw):
+            return True
+        self._ensure_worker()
+        try:
+            self._queue.put_nowait(raw)
+            return True
+        except asyncio.QueueFull:
+            self._dropped += 1
+            now = time.monotonic()
+            if now - self._last_drop_log >= _DROP_LOG_INTERVAL:
+                logger.error(
+                    "OneBot %s event queue full; dropped=%d queued=%d",
+                    self._label,
+                    self._dropped,
+                    self._queue.qsize(),
+                )
+                self._last_drop_log = now
+            return False
+
+    def _ensure_worker(self) -> None:
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(
+                self._run(), name=f"onebot-{self._label}-event-worker"
+            )
+
+    async def _run(self) -> None:
+        while True:
+            raw = await self._queue.get()
+            try:
+                await self._handler.handle_event_text(raw)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("OneBot %s event worker failed; continuing", self._label)
+            finally:
+                self._queue.task_done()
+
+    async def stop(self) -> None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None and not worker.done():
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._queue.task_done()

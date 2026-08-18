@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import time
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -80,6 +82,36 @@ async def test_usage_store_prune_and_clear(tmp_path, monkeypatch):
         assert await store.clear() == 1
         assert await store.dimensions(0, 2_000_000) == {"groups": [], "users": []}
     finally:
+        await store.close()
+
+
+async def test_usage_store_sqlite_work_does_not_block_event_loop(tmp_path, monkeypatch):
+    store = UsageStatsStore(tmp_path / "usage.sqlite3")
+    await store.start()
+    started = threading.Event()
+    release = threading.Event()
+    original = store._record
+
+    def slow_record(event, occurred_at):
+        started.set()
+        release.wait(timeout=2)
+        original(event, occurred_at)
+
+    monkeypatch.setattr(store, "_record", slow_record)
+    task = asyncio.create_task(store.record(_event()))
+    try:
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert started.is_set()
+        assert not task.done()
+        # Reaching this point while the worker is blocked proves the event
+        # loop remains responsive.
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await task
         await store.close()
 
 
