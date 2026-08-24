@@ -9,6 +9,7 @@ venv/
 .env
 .env.*
 !.env.example
+.playwright-mcp
 
 frontend/node_modules/
 frontend/dist/
@@ -25,6 +26,7 @@ onebot_adapter/_version_scm.py
 htmlcov/
 
 *.log
+*.png
 
 # IDE / editor
 .vscode/

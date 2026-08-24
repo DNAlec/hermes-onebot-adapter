@@ -235,6 +235,8 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "command_filter_unknown": false,
   "command_permissions": {},
   "command_reject_message": "⛔ 你没有权限使用此指令 /{cmd}",
+  "outbound_filter_enabled": false,
+  "outbound_filter_patterns": [],
   "notify_poke_enabled": false,
   "notify_member_change_enabled": false
 }
@@ -454,6 +456,8 @@ Content-Type: application/json
       "command_filter_enabled": null,
       "command_filter_unknown": null,
       "command_permissions": null,
+      "outbound_filter_enabled": null,
+      "outbound_filter_patterns": null,
       "notify_poke_enabled": null,
       "notify_member_change_enabled": null,
       "group_rate_limit_algorithm": null,
@@ -1147,6 +1151,8 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `command_filter_unknown` | bool | `false` | 未知指令是否过滤 |
 | `command_permissions` | object | `{}` | 全局指令权限：`{指令名: "everyone"/"admin"/"disabled"}` |
 | `command_reject_message` | string | `"⛔..."` | 指令拒绝回复模板（`{cmd}` 替换为指令名） |
+| `outbound_filter_enabled` | bool | `false` | 出站正则过滤总开关；命中则丢弃 Hermes 发往 OneBot 的文本 |
+| `outbound_filter_patterns` | string[] | `[]` | 出站过滤正则（Python `re.search`）；空=不过滤；最多 50 条、每条最多 256 字符 |
 | `notify_poke_enabled` | bool | `false` | 戳一戳（bot 被戳）推送开关；开启后合成系统事件转发给 agent |
 | `notify_member_change_enabled` | bool | `false` | 群成员进退群推送开关；开启后合成系统事件转发给 agent |
 
@@ -1171,6 +1177,8 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `command_filter_enabled` | bool\|null | `null` | 指令过滤开关 |
 | `command_filter_unknown` | bool\|null | `null` | 未知指令过滤 |
 | `command_permissions` | object\|null | `null` | 群级指令权限覆盖 |
+| `outbound_filter_enabled` | bool\|null | `null` | 出站正则过滤开关（null=跟随全局） |
+| `outbound_filter_patterns` | string[]\|null | `null` | 出站过滤正则（null=跟随全局，`[]`=此群无规则，不与全局合并） |
 | `notify_poke_enabled` | bool\|null | `null` | 戳一戳推送开关（null=跟随全局） |
 | `notify_member_change_enabled` | bool\|null | `null` | 群成员进退群推送开关（null=跟随全局） |
 | `group_rate_limit_algorithm` | string\|null | `null` | 群聊限流算法覆盖（`sliding_window`/`token_bucket`，null=跟随全局） |

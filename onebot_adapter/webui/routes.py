@@ -834,7 +834,7 @@ def _coerce_group_fields(data: dict[str, Any]) -> dict[str, Any]:
     crash ``is_admin()`` at lookup time. This function coerces list fields
     to lists of strings and ``command_permissions`` to a str→str dict.
     """
-    for list_field in ("admins", "trigger_keywords", "group_user_list"):
+    for list_field in ("admins", "trigger_keywords", "group_user_list", "outbound_filter_patterns"):
         val = data.get(list_field)
         if val is not None and not isinstance(val, list):
             data[list_field] = [str(val)]

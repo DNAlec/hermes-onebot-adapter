@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 新增
+- 出站消息正则过滤：可在 WebUI「聊天配置」添加 Python 正则，Hermes 发往 OneBot 的文本（`send_text`、媒体/文件说明、`onebot_send_message` 的 text 段）命中后直接丢弃；群配置可覆盖开关和规则列表
+
 ## [1.5.0] - 2026-08-18
 
 ### 新增
