@@ -224,9 +224,9 @@ def log_drop_line(
     message_id: str = "",
     command_name: str = "",
 ) -> None:
-    """Log an INFO drop/reject without the message body."""
+    """Log a DEBUG drop/reject without the message body."""
     extra = f" cmd={command_name}" if command_name else ""
-    logger.info(
+    logger.debug(
         "丢弃 -- reason=%s chat_id=%s user=%s(%s) message_id=%s%s",
         reason,
         chat_id or "-",

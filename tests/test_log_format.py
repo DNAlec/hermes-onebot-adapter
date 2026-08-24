@@ -265,7 +265,7 @@ def test_describe_outbound_send_upload_uses_filename_not_path():
 
 
 def test_log_dropped_event_has_reason_not_body(caplog):
-    with caplog.at_level(logging.INFO, logger="onebot_adapter.onebot.log_format"):
+    with caplog.at_level(logging.DEBUG, logger="onebot_adapter.onebot.log_format"):
         log_dropped_event(DroppedEvent(
             reason="mention", chat_id="group:42", user_id="100",
             user_name="Tester", message_id="9",
@@ -275,6 +275,8 @@ def test_log_dropped_event_has_reason_not_body(caplog):
             command_name="help", reject_message="nope secret body",
             message_id="10", filter_type="bot_blacklist",
         ))
+    records = [r for r in caplog.records if r.name == "onebot_adapter.onebot.log_format"]
+    assert all(r.levelno == logging.DEBUG for r in records)
     text = caplog.text
     assert "reason=mention" in text
     assert "reason=blacklist" in text
