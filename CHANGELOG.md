@@ -4,7 +4,7 @@
 
 ### 新增
 - 出站消息正则过滤：可在 WebUI「聊天配置」添加 Python 正则，Hermes 发往 OneBot 的文本（`send_text`、媒体/文件说明、`onebot_send_message` 的 text 段）命中后直接丢弃；群配置可覆盖开关和规则列表
-- 入站未进 Hermes 的候选消息在 INFO 记 `丢弃 -- reason=`（`user_filter` / `mention` / `command` / `blacklist` / `rate_limit` / `empty`），不含正文
+- 入站未进 Hermes 的候选消息在 DEBUG 记 `丢弃 -- reason=`（`user_filter` / `mention` / `command` / `blacklist` / `rate_limit` / `empty`），不含正文
 - WebUI 日志页可查看 `adapter.log` 尾部并下载当前文件；内存视图标明仅保留最近 500 条
 
 ### 变更
