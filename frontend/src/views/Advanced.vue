@@ -202,7 +202,7 @@ async function revokeApiKey() {
       <label>
         允许读取的本地目录（每行一个）
         <textarea
-          :value="cfg.automation_upload_allowed_roots.join('\n')"
+          :value="(cfg.automation_upload_allowed_roots || []).join('\n')"
           @input="cfg.automation_upload_allowed_roots = ($event.target as HTMLTextAreaElement).value.split('\n').map(v => v.trim()).filter(Boolean)"
           rows="3"
         />

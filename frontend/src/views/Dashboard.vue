@@ -5,6 +5,7 @@ import * as echarts from "echarts/core";
 import type { EChartsType } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { RouterLink } from "vue-router";
 import {
   getConfig,
   getStatus,
@@ -196,7 +197,7 @@ onUnmounted(() => {
       <div v-if="status.version_mismatch && status.hermes_plugin_connected" class="card card-warn wide">
         <h3>⚠️ 版本不匹配</h3>
         <p>适配器版本 <strong>v{{ status.adapter_version }}</strong> 与插件版本
-          <strong>v{{ status.plugin_version || '未知' }}</strong> 不一致。请<a href="/connections">重新安装插件</a>。</p>
+          <strong>v{{ status.plugin_version || '未知' }}</strong> 不一致。请<RouterLink to="/connections">重新安装插件</RouterLink>。</p>
       </div>
       <div
         v-if="status.latest_plugin_status?.level === 'error'"

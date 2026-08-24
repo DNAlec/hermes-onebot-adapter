@@ -65,8 +65,8 @@ const filteredCommands = computed(() => {
     list = list.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
-        c.description.toLowerCase().includes(q) ||
-        c.aliases.some((a) => a.toLowerCase().includes(q))
+        (c.description || "").toLowerCase().includes(q) ||
+        (c.aliases || []).some((a) => a.toLowerCase().includes(q))
     );
   }
   return list;
@@ -74,14 +74,14 @@ const filteredCommands = computed(() => {
 
 const stats = computed(() => {
   const total = commands.value.length;
-  const disabled = cfg.value?.command_permissions
-    ? Object.values(cfg.value.command_permissions).filter((v) => v === "disabled").length
-    : 0;
-  const adminOnly = cfg.value?.command_permissions
-    ? Object.values(cfg.value.command_permissions).filter((v) => v === "admin").length
-    : 0;
-  const everyone = total - adminOnly - disabled;
-  return { total, everyone, disabled, adminOnly };
+  let disabled = 0;
+  let adminOnly = 0;
+  for (const cmd of commands.value) {
+    const perm = cfg.value?.command_permissions?.[cmd.name];
+    if (perm === "disabled") disabled += 1;
+    else if (perm === "admin") adminOnly += 1;
+  }
+  return { total, everyone: total - adminOnly - disabled, disabled, adminOnly };
 });
 
 async function save() {
