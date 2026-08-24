@@ -242,7 +242,8 @@ function clearAllVisible() {
           <button @click="clearAllVisible" class="bulk-btn clear-btn">重置为所有人</button>
         </div>
 
-        <table v-if="filteredCommands.length" class="cmd-table">
+        <div v-if="filteredCommands.length" class="table-wrap">
+        <table class="cmd-table">
           <thead>
             <tr>
               <th>指令</th>
@@ -280,15 +281,18 @@ function clearAllVisible() {
             </tr>
           </tbody>
         </table>
+        </div>
         <p v-else-if="!commands.length" class="empty">
           暂无指令。请确保 Hermes 插件已连接，然后点击「从 Hermes 刷新」。
         </p>
         <p v-else class="empty">没有匹配的指令</p>
       </div>
 
+      <div class="save-bar">
       <button @click="save" :disabled="saving" class="save-btn">
         {{ saving ? "保存中..." : "保存配置" }}
       </button>
+      </div>
     </div>
   </div>
 </template>

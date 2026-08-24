@@ -148,7 +148,7 @@ function renderCharts() {
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
     grid: { left: 20, right: 35, top: 15, bottom: 20, containLabel: true },
     xAxis: { type: "value", minInterval: 1 },
-    yAxis: { type: "category", inverse: true, data: items.map(dimensionLabel), axisLabel: { width: 160, overflow: "truncate" } },
+    yAxis: { type: "category", inverse: true, data: items.map(dimensionLabel), axisLabel: { width: window.innerWidth < 760 ? 96 : 160, overflow: "truncate" } },
     series: [{ type: "bar", data: items.map((item) => item.count), itemStyle: { borderRadius: [0, 4, 4, 0] } }],
   });
   groupChart.setOption(barOption(stats.value.top_groups), true);

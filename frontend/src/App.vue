@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
-import { RouterView, RouterLink, useRouter, type RouteLocationNormalized } from "vue-router";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { RouterView, RouterLink, useRouter, useRoute, type RouteLocationNormalized } from "vue-router";
 import { getStatus, getUpdateCheck, getToken, type Status, type UpdateInfo, clearToken } from "./api";
 
 const status = ref<Status | null>(null);
 const updateInfo = ref<UpdateInfo | null>(null);
+const navOpen = ref(false);
 let timer: number | undefined;
 const router = useRouter();
+const route = useRoute();
+const isLogin = computed(() => isPublicRoute(route));
 
 function isPublicRoute(route: RouteLocationNormalized): boolean {
   return route.name === "login";
@@ -67,6 +70,7 @@ onUnmounted(() => {
 watch(
   () => router.currentRoute.value.name,
   () => {
+    navOpen.value = false;
     const onLogin = isPublicRoute(router.currentRoute.value);
     if (onLogin || !getToken()) {
       stopPolling();
@@ -83,7 +87,10 @@ watch(
   <div class="app">
     <header class="topbar">
       <div class="topbar-left">
-        <h1>Hermes OneBot Adapter</h1>
+        <h1>
+          <span class="title-full">Hermes OneBot Adapter</span>
+          <span class="title-short">OneBot Adapter</span>
+        </h1>
         <span v-if="status" class="version-tag">v{{ status.adapter_version }}</span>
         <a
           v-if="updateInfo?.has_update"
@@ -96,17 +103,28 @@ watch(
           v{{ updateInfo.latest_version }} →
         </a>
       </div>
-      <nav>
-        <RouterLink to="/">仪表盘</RouterLink>
-        <RouterLink to="/connections">连接管理</RouterLink>
-        <RouterLink to="/chat">聊天配置</RouterLink>
-        <RouterLink to="/commands">指令过滤</RouterLink>
-        <RouterLink to="/tools">工具管理</RouterLink>
-        <RouterLink to="/onebot-tools">OneBot 工具</RouterLink>
-        <RouterLink to="/advanced">高级设置</RouterLink>
-        <RouterLink to="/logs">日志</RouterLink>
+      <button
+        v-if="!isLogin"
+        class="nav-toggle"
+        type="button"
+        :aria-expanded="navOpen"
+        aria-controls="app-nav"
+        :aria-label="navOpen ? '关闭菜单' : '打开菜单'"
+        @click="navOpen = !navOpen"
+      >
+        <span class="nav-toggle-bars" :class="{ open: navOpen }" />
+      </button>
+      <nav v-if="!isLogin" id="app-nav" :class="{ open: navOpen }">
+        <RouterLink to="/" @click="navOpen = false">仪表盘</RouterLink>
+        <RouterLink to="/connections" @click="navOpen = false">连接管理</RouterLink>
+        <RouterLink to="/chat" @click="navOpen = false">聊天配置</RouterLink>
+        <RouterLink to="/commands" @click="navOpen = false">指令过滤</RouterLink>
+        <RouterLink to="/tools" @click="navOpen = false">工具管理</RouterLink>
+        <RouterLink to="/onebot-tools" @click="navOpen = false">OneBot 工具</RouterLink>
+        <RouterLink to="/advanced" @click="navOpen = false">高级设置</RouterLink>
+        <RouterLink to="/logs" @click="navOpen = false">日志</RouterLink>
       </nav>
-      <div class="status-badges">
+      <div v-if="!isLogin" class="status-badges">
         <span
           v-if="status"
           :class="['badge', status.onebot_connected ? 'badge-ok' : 'badge-err']"
@@ -158,9 +176,11 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: var(
   box-shadow: 0 1px 4px rgba(0,0,0,0.04);
   flex-wrap: wrap;
 }
-.topbar-left { display: flex; align-items: center; gap: 0.5rem; }
+.topbar-left { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex: 1 1 auto; }
 .logo { font-size: 1.3rem; }
-.topbar h1 { font-size: 1.1rem; margin: 0; white-space: nowrap; }
+.topbar h1 { font-size: 1.1rem; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.title-short { display: none; }
+.nav-toggle { display: none; }
 .topbar nav { display: flex; gap: 0.5rem; flex: 1; flex-wrap: wrap; }
 .topbar nav a {
   color: var(--text-muted);
@@ -240,10 +260,55 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: var(
 
 @media (max-width: 768px) {
   .topbar { gap: 0.5rem; padding: 0.5rem 1rem; }
-  .topbar h1 { font-size: 0.95rem; }
-  .topbar nav { gap: 0.15rem; }
-  .topbar nav a { padding: 0.2rem 0.4rem; font-size: 0.85rem; }
-  .status-badges { flex-wrap: wrap; }
+  .topbar h1 { font-size: 0.95rem; max-width: 100%; }
+  .title-full { display: none; }
+  .title-short { display: inline; }
+  .topbar-left { flex-wrap: wrap; }
+  .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .nav-toggle-bars,
+  .nav-toggle-bars::before,
+  .nav-toggle-bars::after {
+    display: block;
+    width: 1.1rem;
+    height: 2px;
+    background: var(--text);
+    border-radius: 1px;
+    position: relative;
+  }
+  .nav-toggle-bars::before,
+  .nav-toggle-bars::after {
+    content: "";
+    position: absolute;
+    left: 0;
+  }
+  .nav-toggle-bars::before { top: -6px; }
+  .nav-toggle-bars::after { top: 6px; }
+  .topbar nav {
+    display: none;
+    flex: 1 1 100%;
+    flex-direction: column;
+    gap: 0.15rem;
+    order: 4;
+  }
+  .topbar nav.open { display: flex; }
+  .topbar nav a { padding: 0.65rem 0.75rem; font-size: 0.95rem; }
+  .status-badges { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .version-tag, .update-badge {
+    max-width: 8.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .content { padding: 1rem; }
 }
 </style>
