@@ -96,6 +96,8 @@ export interface GroupConfig {
   command_filter_enabled: boolean | null;
   command_filter_unknown: boolean | null;
   command_permissions: Record<string, string> | null;
+  outbound_filter_enabled: boolean | null;
+  outbound_filter_patterns: string[] | null;
   notify_poke_enabled: boolean | null;
   notify_member_change_enabled: boolean | null;
   group_rate_limit_algorithm: string | null;
@@ -176,6 +178,9 @@ export interface Config {
   command_filter_unknown: boolean;
   command_permissions: Record<string, string>;
   command_reject_message: string;
+  // ── 出站消息正则过滤 ──
+  outbound_filter_enabled: boolean;
+  outbound_filter_patterns: string[];
   // ── Bot 动态用户黑名单 ──
   bot_blacklist_enabled: boolean;
   bot_blacklist_max_duration_seconds: number;

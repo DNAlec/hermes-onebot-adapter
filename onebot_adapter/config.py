@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from onebot_adapter._async_utils import log_task_exception
+from onebot_adapter.outbound_filter import validate_outbound_filter_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,9 @@ class GroupConfig:
     command_filter_enabled: bool | None = None
     command_filter_unknown: bool | None = None
     command_permissions: dict[str, str] | None = None  # None=跟随全局，{} = 强制清空，非空=覆盖
+    # ── 出站消息正则过滤（None=跟随全局）──
+    outbound_filter_enabled: bool | None = None
+    outbound_filter_patterns: list[str] | None = None  # None=跟随全局，[] = 强制无规则
     # ── notice 事件推送（None=跟随全局）──
     notify_poke_enabled: bool | None = None            # 戳一戳(bot 被戳)推送,None=跟随全局
     notify_member_change_enabled: bool | None = None   # 群成员进退群推送,None=跟随全局
@@ -250,6 +254,10 @@ class AdapterConfig:
     command_filter_unknown: bool = False                # 未知指令(不在 hermes 列表)是否过滤，默认放行
     command_permissions: dict[str, str] = field(default_factory=dict)  # {指令名: everyone|admin|disabled}
     command_reject_message: str = "⛔ 你没有权限使用此指令 /{cmd}"
+
+    # ── 出站消息正则过滤（拦截 Hermes 发往 OneBot 的文本）──
+    outbound_filter_enabled: bool = False
+    outbound_filter_patterns: list[str] = field(default_factory=list)
 
     # ── Bot 动态用户黑名单（独立于准入黑白名单）──
     bot_blacklist_enabled: bool = True
@@ -460,6 +468,22 @@ class AdapterConfig:
         # everyone 或 None(未配置) → 放行
         return True, None
 
+    def resolve_outbound_filter_enabled(self, group_id: str | None = None) -> bool:
+        """出站正则过滤总开关。群配置非 None 时覆盖全局。私聊 (group_id=None) 用全局。"""
+        if group_id is not None:
+            gc = self.get_group_config(group_id)
+            if gc.outbound_filter_enabled is not None:
+                return gc.outbound_filter_enabled
+        return self.outbound_filter_enabled
+
+    def resolve_outbound_filter_patterns(self, group_id: str | None = None) -> list[str]:
+        """出站过滤正则列表。群配置非 None 时整表覆盖全局（不合并）；[] 表示此群无规则。"""
+        if group_id is not None:
+            gc = self.get_group_config(group_id)
+            if gc.outbound_filter_patterns is not None:
+                return list(gc.outbound_filter_patterns)
+        return list(self.outbound_filter_patterns)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -565,6 +589,9 @@ def _validate_security_and_delivery(cfg: AdapterConfig, errors: list[str]) -> No
     if cfg.log_level.upper() not in _VALID_LOG_LEVELS:
         errors.append(f"log_level must be one of {sorted(_VALID_LOG_LEVELS)}")
     _validate_command_permissions(cfg.command_permissions, "command_permissions", errors)
+    if not isinstance(cfg.outbound_filter_enabled, bool):
+        errors.append("outbound_filter_enabled must be bool")
+    validate_outbound_filter_patterns(cfg.outbound_filter_patterns, "outbound_filter_patterns", errors)
 
 
 def _validate_command_permissions(permissions: dict[str, str], label: str, errors: list[str]) -> None:
@@ -594,6 +621,7 @@ def _validate_group(cfg: AdapterConfig, gid: str, gc: GroupConfig, errors: list[
         "message_show_group_id",
         "notify_poke_enabled",
         "notify_member_change_enabled",
+        "outbound_filter_enabled",
     )
     for field_name in nullable_bool_fields:
         value = getattr(gc, field_name)
@@ -623,6 +651,10 @@ def _validate_group(cfg: AdapterConfig, gid: str, gc: GroupConfig, errors: list[
         errors.append(f"group {gid} group_rate_limit_window_seconds must be positive when the limit is enabled")
     if gc.command_permissions is not None:
         _validate_command_permissions(gc.command_permissions, f"group {gid} command_permissions", errors)
+    if gc.outbound_filter_patterns is not None:
+        validate_outbound_filter_patterns(
+            gc.outbound_filter_patterns, f"group {gid} outbound_filter_patterns", errors,
+        )
 
 
 def config_path() -> Path:
@@ -714,6 +746,8 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "bot_blacklist_enabled": "允许 bot 使用独立动态黑名单工具并在消息触发时拦截命中用户",
         "bot_blacklist_max_duration_seconds": "bot 单次动态拉黑允许的最大秒数,默认86400(24小时)",
         "bot_blacklist_reject_message": "动态拉黑提示模板;支持 {user_id}/{scope}/{remaining}/{expires_at}/{reason}",
+        "outbound_filter_enabled": "出站消息正则过滤总开关;命中则丢弃 Hermes 发往 OneBot 的文本,不实际发送",
+        "outbound_filter_patterns": "出站过滤正则列表(Python re.search);空=不过滤;群配置非null时整表覆盖",
     }
     result: dict[str, Any] = {}
     for key, value in d.items():

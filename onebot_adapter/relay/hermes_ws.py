@@ -33,6 +33,12 @@ from onebot_adapter.onebot import api as ob
 from onebot_adapter.onebot.log_format import log_send_line
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
+from onebot_adapter.outbound_filter import (
+    API_SEND_ACTIONS,
+    extract_api_message_text,
+    extract_send_frame_text,
+    matching_pattern,
+)
 from onebot_adapter.relay.protocol import (
     NormalizedEvent,
     error_message,
@@ -1090,6 +1096,14 @@ class HermesRelayServer:
             if dedup_hit:
                 return
 
+            if self._drop_filtered_send(action, data, is_group, num_id):
+                if dedup_key is not None:
+                    self._send_cache[dedup_key] = (time.monotonic(), "")
+                    self._maybe_evict_send_cache()
+                self._touch_busy_group(chat_id, is_group)
+                await ws.send_json(result_message(req_id, True, data={"filtered": True}))
+                return
+
             if action == "send_document":
                 await self._send_document(data, req_id, chat_id, is_group, num_id)
                 if dedup_key is not None:
@@ -1278,6 +1292,9 @@ class HermesRelayServer:
             return
         # 拦截 real_seq → message_id 转换(适配器侧 SeqMap 查询)
         params = self._resolve_seq_params(action, params)
+        if action in API_SEND_ACTIONS and self._drop_filtered_api_call(params):
+            await ws.send_json(result_message(req_id, True, data={"filtered": True}))
+            return
         try:
             result = await self._api.call(action, params)
             logger.debug(
@@ -1291,6 +1308,39 @@ class HermesRelayServer:
         except Exception as exc:
             logger.warning("api_call %s failed: %s", action, exc)
             await ws.send_json(result_message(req_id, False, error=str(exc)))
+
+    def _drop_filtered_send(
+        self, action: str, data: dict[str, Any], is_group: bool, num_id: int,
+    ) -> bool:
+        """True when a Hermes ``send`` frame should be silently dropped."""
+        group_id = str(num_id) if is_group else None
+        if not self._config.resolve_outbound_filter_enabled(group_id):
+            return False
+        text = extract_send_frame_text(str(action), data)
+        pattern = matching_pattern(text, self._config.resolve_outbound_filter_patterns(group_id))
+        if pattern is None:
+            return False
+        logger.info(
+            "relay outbound filter hit: action=%s group_id=%s pattern=%s preview=%s",
+            action, group_id, pattern, text[: self._config.log_message_preview],
+        )
+        return True
+
+    def _drop_filtered_api_call(self, params: dict[str, Any]) -> bool:
+        """True when a Hermes ``send_msg``-family API call should be dropped."""
+        raw_gid = params.get("group_id")
+        group_id = str(raw_gid) if raw_gid not in (None, "") else None
+        if not self._config.resolve_outbound_filter_enabled(group_id):
+            return False
+        text = extract_api_message_text(params)
+        pattern = matching_pattern(text, self._config.resolve_outbound_filter_patterns(group_id))
+        if pattern is None:
+            return False
+        logger.info(
+            "relay outbound filter hit: api_call group_id=%s pattern=%s preview=%s",
+            group_id, pattern, text[: self._config.log_message_preview],
+        )
+        return True
 
     def _resolve_seq_params(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         """拦截需要 real_seq→message_id 转换的 action。

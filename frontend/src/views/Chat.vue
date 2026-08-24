@@ -33,9 +33,20 @@ const refreshingMode = ref(false);
 const modeMsg = ref("");
 const modeMsgType = ref<"success" | "error" | "warning">("success");
 
+function ensureOutboundFilterFields() {
+  if (!cfg.value) return;
+  if (!Array.isArray(cfg.value.outbound_filter_patterns)) {
+    cfg.value.outbound_filter_patterns = [];
+  }
+  if (typeof cfg.value.outbound_filter_enabled !== "boolean") {
+    cfg.value.outbound_filter_enabled = false;
+  }
+}
+
 onMounted(async () => {
   try {
     await load();
+    ensureOutboundFilterFields();
     groups.value = await getGroups();
     blacklistMaxHours.value = (cfg.value?.bot_blacklist_max_duration_seconds || 86400) / 3600;
     await fetchQuota();
@@ -169,6 +180,8 @@ async function saveGlobal() {
       global_channel_prompt: c.global_channel_prompt,
       notify_poke_enabled: c.notify_poke_enabled,
       notify_member_change_enabled: c.notify_member_change_enabled,
+      outbound_filter_enabled: c.outbound_filter_enabled,
+      outbound_filter_patterns: c.outbound_filter_patterns,
       bot_blacklist_enabled: c.bot_blacklist_enabled,
       bot_blacklist_max_duration_seconds: Math.max(1, Math.round(blacklistMaxHours.value * 3600)),
       bot_blacklist_reject_message: c.bot_blacklist_reject_message,
@@ -190,6 +203,7 @@ async function syncFromOneBot() {
     msg.value = "同步完成: 新增 " + result.added.length + " 个群, 总计 " + result.total + " 个";
     msgType.value = "success";
     await load(true);
+    ensureOutboundFilterFields();
     groups.value = await getGroups();
   } catch (e: any) {
     msg.value = "同步失败: " + (e.response?.data?.error || e.message);
@@ -206,6 +220,7 @@ function addGroup() {
     message_show_group_id: null,
     reaction_emoji_enabled: null,
     command_filter_enabled: null, command_filter_unknown: null, command_permissions: null,
+    outbound_filter_enabled: null, outbound_filter_patterns: null,
     notify_poke_enabled: null, notify_member_change_enabled: null,
     group_rate_limit_algorithm: null,
     group_rate_limit_messages: null,
@@ -215,7 +230,11 @@ function addGroup() {
 }
 
 function editGroup(g: GroupConfig) {
-  editingGroup.value = { ...g };
+  editingGroup.value = {
+    ...g,
+    outbound_filter_enabled: g.outbound_filter_enabled ?? null,
+    outbound_filter_patterns: g.outbound_filter_patterns ?? null,
+  };
   showEditor.value = true;
 }
 
@@ -258,12 +277,24 @@ const groupAdminInput = ref("");
 const groupUserInput = ref("");
 const triggerKeywordsInput = ref("");
 const groupKeywordsInput = ref("");
-function addTag(list: string[], value: string) {
+const outboundFilterInput = ref("");
+const groupOutboundFilterInput = ref("");
+function addTag(list: string[] | null | undefined, value: string) {
+  if (!list) return;
   const v = value.trim();
   if (v && !list.includes(v)) list.push(v);
 }
 function removeTag(list: string[], idx: number) {
   list.splice(idx, 1);
+}
+
+function toggleGroupOutboundFilterPatterns(enabled: boolean) {
+  if (!editingGroup.value) return;
+  if (!enabled) {
+    editingGroup.value.outbound_filter_patterns = null;
+    return;
+  }
+  editingGroup.value.outbound_filter_patterns = [...(cfg.value?.outbound_filter_patterns || [])];
 }
 
 function toggleGroupRateLimitOverride(enabled: boolean) {
@@ -470,6 +501,35 @@ function resetHint() {
           <span class="hint">消息进入排队队列时贴的表情，空=不贴（默认 123）</span>
         </label>
       </div>
+    </div>
+
+    <!-- 出站消息过滤 -->
+    <div v-if="cfg" class="section">
+      <h3>出站消息过滤</h3>
+      <p class="hint">
+        拦截 Hermes 发往 QQ 的文本（send_text、媒体/文件说明、onebot_send_message 的 text 段）。
+        使用 Python 正则，<code>re.search</code> 命中任意一条即丢弃该次发送，并向插件返回成功以免重试。
+        适配器自己发出的拒绝提示、HTTP 自动化 API 不受此过滤。空文本（无说明的纯媒体/文件）不会被匹配。
+        可在模式中使用 <code>(?i)</code> 忽略大小写、<code>(?s)</code> 让 <code>.</code> 匹配换行。
+      </p>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.outbound_filter_enabled" />
+        <span>启用出站正则过滤</span>
+      </label>
+      <label class="full">
+        过滤正则（回车添加，命中即丢弃）
+        <div class="tag-input-container">
+          <span v-for="(pat, i) in cfg.outbound_filter_patterns" :key="i" class="tag">
+            {{ pat }}<button @click="removeTag(cfg.outbound_filter_patterns, i)">×</button>
+          </span>
+          <input
+            v-model="outboundFilterInput"
+            placeholder="输入正则后回车，如 (?i)https?://"
+            @keydown.enter.prevent="addTag(cfg.outbound_filter_patterns, outboundFilterInput); outboundFilterInput=''"
+          />
+        </div>
+        <span class="hint">保存时校验能否编译；最多 50 条，每条最多 256 字符。群配置可单独覆盖开关和正则列表。</span>
+      </label>
     </div>
 
     <!-- 入站消息限流 -->
@@ -921,6 +981,39 @@ function resetHint() {
             </span>
             <input v-model="groupUserInput" placeholder="回车添加QQ号" @keydown.enter.prevent="addTag(editingGroup.group_user_list, groupUserInput); groupUserInput=''" />
           </div>
+        </label>
+
+        <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);" />
+        <h4 style="margin: 0 0 0.75rem; font-size: 0.95rem;">出站消息过滤</h4>
+        <label>
+          出站正则过滤
+          <select v-model="editingGroup.outbound_filter_enabled">
+            <option :value="null">跟随全局</option>
+            <option :value="true">启用</option>
+            <option :value="false">禁用</option>
+          </select>
+        </label>
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            :checked="editingGroup.outbound_filter_patterns != null"
+            @change="toggleGroupOutboundFilterPatterns(($event.target as HTMLInputElement).checked)"
+          />
+          <span>覆盖全局正则列表</span>
+        </label>
+        <label v-if="editingGroup.outbound_filter_patterns != null">
+          过滤正则（回车添加）
+          <div class="tag-input-container">
+            <span v-for="(pat, i) in editingGroup.outbound_filter_patterns" :key="i" class="tag">
+              {{ pat }}<button @click="removeTag(editingGroup.outbound_filter_patterns, i)">×</button>
+            </span>
+            <input
+              v-model="groupOutboundFilterInput"
+              placeholder="输入正则后回车"
+              @keydown.enter.prevent="addTag(editingGroup.outbound_filter_patterns || [], groupOutboundFilterInput); groupOutboundFilterInput=''"
+            />
+          </div>
+          <span class="hint">留空列表 = 此群不匹配任何规则（即使开关启用也不过滤）。不与全局列表合并。</span>
         </label>
 
         <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);" />

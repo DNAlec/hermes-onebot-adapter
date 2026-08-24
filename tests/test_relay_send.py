@@ -8,7 +8,7 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from onebot_adapter.config import AdapterConfig
+from onebot_adapter.config import AdapterConfig, GroupConfig
 from onebot_adapter.onebot.api import UploadOutcomeUnknownError
 from onebot_adapter.relay.hermes_ws import HermesRelayServer
 from onebot_adapter.relay.protocol import (
@@ -591,3 +591,137 @@ async def test_send_api_semaphore_releases_on_success():
             assert mock_api.send_group_msg.await_count == 3
     finally:
         await server.close()
+
+
+# ── Outbound regex filter ─────────────────────────────────────────────────
+
+
+async def test_outbound_filter_drops_matching_send_text():
+    cfg = AdapterConfig(
+        hermes_ws_token="testtoken",
+        hermes_ws_path="/hermes",
+        outbound_filter_enabled=True,
+        outbound_filter_patterns=[r"(?i)secret"],
+    )
+    app, mock_api, _ = _make_relay_app(cfg)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(send_message("send_text", "rf1", "group:42", content="Top SECRET"))
+                result = await ws.receive_json(timeout=2)
+                assert result["success"] is True
+                assert result["data"] == {"filtered": True}
+                await ws.send_json(send_message("send_text", "rf2", "group:42", content="hello"))
+                ok = await ws.receive_json(timeout=2)
+                assert ok["success"] is True
+                assert ok.get("data") != {"filtered": True}
+            mock_api.send_group_msg.assert_awaited_once()
+            assert mock_api.send_group_msg.await_args.args[1][0]["data"]["text"] == "hello"
+    finally:
+        await server.close()
+
+
+async def test_outbound_filter_drops_caption_but_not_media_only():
+    cfg = AdapterConfig(
+        hermes_ws_token="testtoken",
+        hermes_ws_path="/hermes",
+        outbound_filter_enabled=True,
+        outbound_filter_patterns=[r"bad"],
+    )
+    app, mock_api, _ = _make_relay_app(cfg)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(send_message(
+                    "send_image", "rc1", "group:42", image_url="http://x/1.jpg", caption="bad pic",
+                ))
+                dropped = await ws.receive_json(timeout=2)
+                assert dropped["data"] == {"filtered": True}
+                await ws.send_json(send_message(
+                    "send_image", "rc2", "group:42", image_url="http://x/2.jpg",
+                ))
+                ok = await ws.receive_json(timeout=2)
+                assert ok["success"] is True
+            assert mock_api.send_group_msg.await_count == 1
+    finally:
+        await server.close()
+
+
+async def test_outbound_filter_group_override_and_dm_uses_global():
+    cfg = AdapterConfig(
+        hermes_ws_token="testtoken",
+        hermes_ws_path="/hermes",
+        outbound_filter_enabled=True,
+        outbound_filter_patterns=[r"drop-me"],
+        groups={"42": GroupConfig(
+            group_id="42", outbound_filter_enabled=False,
+        ).to_dict()},
+    )
+    app, mock_api, _ = _make_relay_app(cfg)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(send_message("send_text", "g1", "group:42", content="drop-me"))
+                group_ok = await ws.receive_json(timeout=2)
+                assert group_ok["success"] is True
+                assert group_ok.get("data") != {"filtered": True}
+                await ws.send_json(send_message("send_text", "d1", "100", content="drop-me"))
+                dm_dropped = await ws.receive_json(timeout=2)
+                assert dm_dropped["data"] == {"filtered": True}
+            mock_api.send_group_msg.assert_awaited_once()
+            mock_api.send_private_msg.assert_not_called()
+    finally:
+        await server.close()
+
+
+async def test_outbound_filter_drops_send_msg_api_call():
+    cfg = AdapterConfig(
+        hermes_ws_token="testtoken",
+        hermes_ws_path="/hermes",
+        outbound_filter_enabled=True,
+        outbound_filter_patterns=[r"blocked"],
+    )
+    app, mock_api, _ = _make_relay_app(cfg)
+    mock_api.call = AsyncMock(return_value={"data": {"message_id": 1}})
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/hermes?token=testtoken") as ws:
+                await ws.receive_json(timeout=2)
+                await ws.send_json(api_call_message("send_msg", "a1", {
+                    "group_id": 42,
+                    "message": [{"type": "text", "data": {"text": "this is blocked"}}],
+                }))
+                dropped = await ws.receive_json(timeout=2)
+                assert dropped["success"] is True
+                assert dropped["data"] == {"filtered": True}
+                await ws.send_json(api_call_message("get_group_info", "a2", {"group_id": 42}))
+                ok = await ws.receive_json(timeout=2)
+                assert ok["success"] is True
+            mock_api.call.assert_awaited_once()
+            assert mock_api.call.await_args.args[0] == "get_group_info"
+    finally:
+        await server.close()
+
+
+async def test_outbound_filter_does_not_apply_to_direct_messages():
+    cfg = AdapterConfig(
+        hermes_ws_token="testtoken",
+        hermes_ws_path="/hermes",
+        outbound_filter_enabled=True,
+        outbound_filter_patterns=[r"reject"],
+    )
+    app, mock_api, relay = _make_relay_app(cfg)
+    ok = await relay.send_direct_message("group:42", "reject this")
+    assert ok is True
+    mock_api.send_group_msg.assert_awaited_once()

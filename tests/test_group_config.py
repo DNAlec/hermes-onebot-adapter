@@ -39,6 +39,8 @@ def test_group_config_defaults():
     assert gc.require_mention is None
     assert gc.custom_prompt == ""
     assert gc.admins == []
+    assert gc.outbound_filter_enabled is None
+    assert gc.outbound_filter_patterns is None
 
 
 def test_group_config_to_dict_roundtrip():

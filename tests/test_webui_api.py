@@ -230,6 +230,16 @@ async def test_config_rejects_invalid(client):
     assert "onebot_mode" in (await resp.json())["error"]
 
 
+async def test_config_rejects_invalid_outbound_filter_regex(client):
+    resp = await client.patch(
+        "/api/v1/config",
+        json={"outbound_filter_enabled": True, "outbound_filter_patterns": ["("]},
+        headers=_auth(),
+    )
+    assert resp.status == 400
+    assert "outbound_filter_patterns" in (await resp.json())["error"]
+
+
 async def test_index_placeholder_no_auth_needed(client):
     resp = await client.get("/")
     assert resp.status == 200

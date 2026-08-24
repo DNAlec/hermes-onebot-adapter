@@ -278,6 +278,24 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 被过滤的指令会通过当前 OneBot WebSocket 上的 API 调用向原聊天发送拒绝消息，不会送入 Hermes 处理。指令过滤在媒体下载之前执行，避免浪费带宽。
 
+## 出站消息过滤
+
+拦截 **Hermes 发往 QQ** 的文本。在 WebUI「聊天配置」启用后，按配置的 Python 正则（`re.search`）匹配发送正文：命中任意一条则不调用 OneBot 发送接口，并向插件返回成功（避免 Gateway 超时重试把同一条内容再发一遍）。
+
+匹配范围：
+
+- `send` 帧：`send_text` 的 `content`，以及 `send_image` / `send_voice` / `send_video` / `send_document` 的 `caption`
+- 插件 `api_call`：`send_msg` / `send_group_msg` / `send_private_msg` 中的纯文本段（字符串 `message` 或 text 消息段拼接）
+
+不匹配：无说明的纯媒体/文件、适配器本地发出的拒绝提示（`send_direct_message`）、HTTP 自动化 API。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `outbound_filter_enabled` | `false` | 出站过滤总开关 |
+| `outbound_filter_patterns` | `[]` | 正则列表；空=不过滤。支持内联标志如 `(?i)`、`(?s)` |
+
+**每群覆盖**：`outbound_filter_enabled` / `outbound_filter_patterns` 为 `None` 时跟随全局；群级 `patterns` 整表覆盖（不与全局合并），`[]` 表示此群无规则。
+
 ## 群聊消息排队
 
 适配器内置 shared 群聊消息排队机制，防止群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes 配置 `group_sessions_per_user: false`（全群共享 session）且适配器 `event_queue_enabled: true` 时生效**；per_user 模式每人独立 session，无需排队。

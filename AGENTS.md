@@ -101,6 +101,10 @@ Key modules:
 
 Implemented across `config.py` (permission model), `parser.py` (`_check_command_filter` + `_extract_command_name`), `relay/protocol.py` (`FilteredEvent`), `hermes_plugin/adapter.py` (`_collect_commands` → `commands_snapshot`), `relay/hermes_ws.py` (`_store_commands`, `send_reject_message`). Permission levels: `everyone` / `admin` / `disabled` / unconfigured (passthrough). Filtering runs **before** media download. Denied commands return `FilteredEvent`; the service sends the reject message over the active OneBot WS API channel and does not forward to Hermes.
 
+## 出站消息正则过滤
+
+Hermes → OneBot 发送路径上的文本过滤，实现于 `outbound_filter.py` + `config.resolve_outbound_filter_*` + `HermesRelayServer._drop_filtered_send` / `_drop_filtered_api_call`。命中 `re.search` 后不调用 OneBot，向插件回 `result` 成功（`data.filtered=true`）以免 Gateway 重试。覆盖 `send` 帧正文/caption 以及 `send_msg`/`send_group_msg`/`send_private_msg` 的 text 段。空文本、`send_direct_message`、HTTP 自动化 API 不过滤。群配置 `None`=跟随全局，patterns 整表覆盖。
+
 ## 群聊消息排队（shared 会话串行化）
 
 防止 shared 群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes `group_sessions_per_user=false`（全群共享 session）且适配器 `event_queue_enabled=true` 时生效**；per_user 模式每人独立 session，无需排队。
