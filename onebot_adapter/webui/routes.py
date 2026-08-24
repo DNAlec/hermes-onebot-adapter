@@ -88,6 +88,8 @@ def add_routes(app: aiohttp.web.Application, store: ConfigStore, state: dict[str
     app.router.add_post("/api/v1/install_plugin", _install_plugin(store, state))
     app.router.add_post("/api/v1/uninstall_plugin", _uninstall_plugin(store, state))
     app.router.add_get("/api/v1/logs", _logs(state))
+    app.router.add_get("/api/v1/logs/file", _logs_file(state))
+    app.router.add_get("/api/v1/logs/file/download", _logs_file_download(state))
     # Group management
     app.router.add_get("/api/v1/groups", _get_groups(store))
     app.router.add_put("/api/v1/groups/{group_id}", _put_group(store))
@@ -772,10 +774,102 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
     return handler
 
 
+_MEMORY_LOG_LIMIT = 500
+_LOG_FILE_TAIL_DEFAULT = 1000
+_LOG_FILE_TAIL_MAX = 5000
+_LOG_FILE_TAIL_MAX_BYTES = 1 * 1024 * 1024
+
+
+def _log_file_status(state: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(state.get("log_file_enabled"))
+    path = state.get("log_file_path")
+    available = bool(enabled and isinstance(path, str) and path and Path(path).is_file())
+    size = Path(path).stat().st_size if available else None
+    return {
+        "file_enabled": enabled,
+        "file_available": available,
+        "file_path": path if enabled else None,
+        "file_size": size,
+    }
+
+
+def _tail_log_file(path: str, max_lines: int) -> tuple[list[str], bool]:
+    """Return the last *max_lines* of *path* and whether the read was truncated."""
+    file_path = Path(path)
+    size = file_path.stat().st_size
+    truncated = size > _LOG_FILE_TAIL_MAX_BYTES
+    with file_path.open("rb") as handle:
+        if truncated:
+            handle.seek(size - _LOG_FILE_TAIL_MAX_BYTES)
+        data = handle.read().decode("utf-8", errors="replace")
+    lines = data.splitlines()
+    if truncated and lines:
+        lines = lines[1:]
+    if len(lines) > max_lines:
+        return lines[-max_lines:], True
+    return lines, truncated
+
+
 def _logs(state: dict[str, Any]):
     async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
         records = list(state.get("log_buffer", []))
-        return aiohttp.web.json_response({"logs": records})
+        payload = {
+            "logs": records,
+            "source": "memory",
+            "memory_limit": _MEMORY_LOG_LIMIT,
+            **_log_file_status(state),
+        }
+        return aiohttp.web.json_response(payload)
+
+    return handler
+
+
+def _logs_file(state: dict[str, Any]):
+    async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        status = _log_file_status(state)
+        raw_lines = request.query.get("lines", str(_LOG_FILE_TAIL_DEFAULT))
+        try:
+            max_lines = int(raw_lines)
+        except (TypeError, ValueError):
+            max_lines = _LOG_FILE_TAIL_DEFAULT
+        max_lines = max(1, min(max_lines, _LOG_FILE_TAIL_MAX))
+        if not status["file_available"]:
+            return aiohttp.web.json_response({
+                "logs": [],
+                "source": "file",
+                "truncated": False,
+                "lines": max_lines,
+                **status,
+            })
+        try:
+            records, truncated = _tail_log_file(str(status["file_path"]), max_lines)
+        except OSError as exc:
+            logger.warning("failed to read log file %s: %s", status["file_path"], exc)
+            return aiohttp.web.json_response(
+                {"error": "failed to read log file"}, status=500,
+            )
+        return aiohttp.web.json_response({
+            "logs": records,
+            "source": "file",
+            "truncated": truncated,
+            "lines": max_lines,
+            **status,
+        })
+
+    return handler
+
+
+def _logs_file_download(state: dict[str, Any]):
+    async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
+        status = _log_file_status(state)
+        if not status["file_available"]:
+            return aiohttp.web.json_response(
+                {"error": "file logging disabled or log file missing"}, status=404,
+            )
+        return aiohttp.web.FileResponse(
+            path=str(status["file_path"]),
+            headers={"Content-Disposition": 'attachment; filename="adapter.log"'},
+        )
 
     return handler
 

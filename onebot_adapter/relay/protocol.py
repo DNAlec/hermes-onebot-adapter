@@ -164,6 +164,26 @@ class FilteredEvent:
     filter_type: str = "command"
 
 
+@dataclass
+class DroppedEvent:
+    """A candidate message that will not be forwarded to Hermes.
+
+    Unlike :class:`FilteredEvent`, this is a silent drop: the adapter does
+    not send a reject reply.  ``reason`` is one of ``user_filter``,
+    ``mention``, ``empty`` (and notice-path user filters use the same codes).
+    Heartbeats and disabled/unhandled notice types still return ``None``.
+    """
+
+    reason: str
+    chat_id: str = ""
+    chat_type: ChatType | str = ""
+    user_id: str = ""
+    user_name: str = ""
+    message_id: str = ""
+    chat_name: str = ""
+    command_name: str = ""
+
+
 def ready_message(
     onebot_connected: bool,
     adapter_version: str,

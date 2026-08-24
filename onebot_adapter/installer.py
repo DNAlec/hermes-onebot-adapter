@@ -176,6 +176,15 @@ def install(
             shutil.copy2(src_file, out_path)
         result["copied"].append(fname)
 
+    sanitize_src = Path(__file__).parent / "logging_utils.py"
+    sanitize_dest = dest / "log_sanitize.py"
+    if sanitize_src.exists():
+        if sanitize_dest.is_symlink():
+            result["error"] = f"output path is a symlink, refusing to overwrite: {sanitize_dest}"
+            return result
+        shutil.copy2(sanitize_src, sanitize_dest)
+        result["copied"].append("log_sanitize.py")
+
     # Clean stale .pyc
     pycache = dest / "__pycache__"
     if pycache.exists():

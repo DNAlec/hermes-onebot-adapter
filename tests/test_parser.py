@@ -5,6 +5,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from onebot_adapter.onebot import parser
+from onebot_adapter.relay.protocol import DroppedEvent
+
+
+def assert_dropped(result: object, reason: str) -> DroppedEvent:
+    assert isinstance(result, DroppedEvent), result
+    assert result.reason == reason
+    return result
 
 
 def _msg_event(
@@ -70,7 +77,7 @@ async def test_parse_group_without_mention_filtered():
         self_id="999",
         group_require_mention=True,
     )
-    assert result is None
+    assert_dropped(result, "mention")
 
 
 async def test_parse_group_mention_not_required():
@@ -98,7 +105,7 @@ async def test_parse_empty_message_filtered():
         self_id="999",
         group_require_mention=True,
     )
-    assert result is None
+    assert_dropped(result, "empty")
 
 
 async def test_parse_group_slash_command_no_prefix():
@@ -189,7 +196,7 @@ async def test_parse_group_reply_without_mention_dropped_first_only():
         mention_first_only=True,
         api=mock_api,
     )
-    assert result is None  # dropped: reply skipped, first non-reply is text, not @bot
+    assert_dropped(result, "mention")  # dropped: reply skipped, first non-reply is text, not @bot
 
 
 async def test_parse_forward_expansion():
@@ -469,7 +476,7 @@ async def test_first_mention_only_triggers_when_at_first():
 
 
 async def test_first_mention_only_filtered_when_not_first():
-    """mention_first_only=True: @bot in middle → filtered (returns None)."""
+    """mention_first_only=True: @bot in middle → filtered (DroppedEvent)."""
     segs = [
         {"type": "text", "data": {"text": "hi "}},
         {"type": "at", "data": {"qq": "999"}},
@@ -481,7 +488,7 @@ async def test_first_mention_only_filtered_when_not_first():
         group_require_mention=True,
         mention_first_only=True,
     )
-    assert result is None
+    assert_dropped(result, "mention")
 
 
 async def test_keyword_trigger_any_position():
@@ -507,7 +514,7 @@ async def test_keyword_trigger_filtered_when_no_keyword():
         trigger_keywords=["#bot"],
         keyword_first_only=False,
     )
-    assert result is None
+    assert_dropped(result, "mention")
 
 
 async def test_keyword_first_only_triggers_at_start():
@@ -533,7 +540,7 @@ async def test_keyword_first_only_filtered_when_mid():
         trigger_keywords=["#bot"],
         keyword_first_only=True,
     )
-    assert result is None
+    assert_dropped(result, "mention")
 
 
 async def test_mention_or_keyword_both_pass():
@@ -562,7 +569,7 @@ async def test_mention_or_keyword_neither_filtered():
         trigger_keywords=["#bot"],
         keyword_first_only=False,
     )
-    assert result is None
+    assert_dropped(result, "mention")
 
 
 async def test_no_trigger_requirements_passes_all():
@@ -669,7 +676,7 @@ async def test_per_group_mention_first_only_override():
         group_require_mention=True,
         config=cfg,
     )
-    assert result is None
+    assert_dropped(result, "mention")
 
 
 # ── message_show_group_id + chat_name ───────────────────────────────────
@@ -1086,7 +1093,7 @@ async def test_notice_poke_blacklisted_user():
         group_require_mention=True,
         config=cfg,
     )
-    assert result is None
+    assert_dropped(result, "user_filter")
 
 
 async def test_notice_poke_dm_blacklisted():
@@ -1105,7 +1112,7 @@ async def test_notice_poke_dm_blacklisted():
         group_require_mention=True,
         config=cfg,
     )
-    assert result is None
+    assert_dropped(result, "user_filter")
 
 
 async def test_notice_poke_per_group_override():

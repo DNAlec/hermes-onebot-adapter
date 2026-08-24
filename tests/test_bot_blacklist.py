@@ -10,7 +10,7 @@ from onebot_adapter.bot_blacklist import BotBlacklistStore, format_duration
 from onebot_adapter.config import AdapterConfig, ConfigStore, GroupConfig
 from onebot_adapter.onebot.handler import OneBotHandler
 from onebot_adapter.onebot.parser import parse_event
-from onebot_adapter.relay.protocol import FilteredEvent, NormalizedEvent
+from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent, NormalizedEvent
 
 
 def _store(tmp_path):
@@ -112,7 +112,8 @@ async def test_parser_blacklist_after_group_trigger_and_before_delivery(tmp_path
         _group_event("ordinary", mention=False), self_id="999", group_require_mention=True,
         config=cfg, bot_blacklist_match_fn=match,
     )
-    assert ignored is None
+    assert isinstance(ignored, DroppedEvent)
+    assert ignored.reason == "mention"
     blocked = await parse_event(
         _group_event("hello"), self_id="999", group_require_mention=True,
         config=cfg, bot_blacklist_match_fn=match,

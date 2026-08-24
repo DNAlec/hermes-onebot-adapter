@@ -27,8 +27,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from onebot_adapter.config import MEDIA_DELIVERY_CACHE, AdapterConfig
+from onebot_adapter.logging_utils import text_summary
 from onebot_adapter.onebot import segments as seg
-from onebot_adapter.relay.protocol import FilteredEvent, MediaItem, NormalizedEvent
+from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent, MediaItem, NormalizedEvent
 
 if TYPE_CHECKING:
     from onebot_adapter.onebot.name_resolver import NameResolver
@@ -344,16 +345,18 @@ async def parse_event(
     canonical_command_name_fn: Callable[[str], str] | None = None,
     media_delivery_mode: str = "passthrough",
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
-) -> NormalizedEvent | FilteredEvent | None:
+) -> NormalizedEvent | FilteredEvent | DroppedEvent | None:
     """Parse a OneBot 11 message event.
 
     Returns:
         * :class:`NormalizedEvent` for normal messages.
-        * :class:`FilteredEvent` when the message is a /command that was
-          denied by the command filter (the caller should send the reject
-          message and skip forwarding to Hermes).
-        * ``None`` for non-message events, filtered messages, or empty
-          messages (no text).
+        * :class:`FilteredEvent` when the message is a /command or blacklist
+          hit that should get a reject reply (not forwarded to Hermes).
+        * :class:`DroppedEvent` when a candidate message is silently dropped
+          (``user_filter`` / ``mention`` / ``empty``) — logged at INFO without
+          the body, not forwarded to Hermes.
+        * ``None`` for heartbeats, unhandled/disabled notices, and other
+          non-candidate events.
 
     Media delivery is controlled by *media_delivery_mode* (defaults to
     ``"cache"``, overridable via *config.media_delivery_mode* when
@@ -415,6 +418,8 @@ async def parse_event(
         bot_blacklist_match_fn=bot_blacklist_match_fn,
     )
     state = await _prepare_message_state(event, options)
+    if isinstance(state, DroppedEvent):
+        return state
     if state is None:
         return None
     filtered = _filter_message(event, state, options)
@@ -422,7 +427,10 @@ async def parse_event(
         return filtered
     text, reply_to_id, reply_to_text, media_items = await _render_message(event, state, options)
     if not text:
-        return None
+        return _drop_event(
+            "empty", event, is_group=state.is_group, sender_id=state.sender_id,
+            sender_name=state.sender_name, group_id=state.group_id,
+        )
 
     norm = NormalizedEvent(
         message_id=str(event.get("message_id", "")),
@@ -441,13 +449,37 @@ async def parse_event(
         media_items=media_items,
     )
     logger.debug(
-        "parse_event: normalized chat_id=%s text_preview=%r",
-        norm.chat_id, (norm.text or "")[:120],
+        "parse_event: normalized chat_id=%s text=%s",
+        norm.chat_id, text_summary(norm.text),
     )
     return norm
 
 
-async def _prepare_message_state(event: dict[str, Any], options: _ParseOptions) -> _MessageState | None:
+def _drop_event(
+    reason: str,
+    event: dict[str, Any],
+    *,
+    is_group: bool,
+    sender_id: str,
+    sender_name: str,
+    group_id: str,
+    command_name: str = "",
+) -> DroppedEvent:
+    return DroppedEvent(
+        reason=reason,
+        chat_id=f"group:{group_id}" if is_group else sender_id,
+        chat_type="group" if is_group else "dm",
+        user_id=sender_id,
+        user_name=sender_name,
+        message_id=str(event.get("message_id", "")),
+        chat_name=group_id if is_group else sender_name,
+        command_name=command_name,
+    )
+
+
+async def _prepare_message_state(
+    event: dict[str, Any], options: _ParseOptions,
+) -> _MessageState | DroppedEvent | None:
     is_group = event.get("message_type") == "group"
     sender = event.get("sender", {}) or {}
     sender_id = str(event.get("user_id", ""))
@@ -462,7 +494,10 @@ async def _prepare_message_state(event: dict[str, Any], options: _ParseOptions) 
     )
     settings = _resolved_message_settings(options, is_group, group_id, sender_id)
     if settings is None:
-        return None
+        return _drop_event(
+            "user_filter", event, is_group=is_group, sender_id=sender_id,
+            sender_name=sender_name, group_id=group_id,
+        )
     require_mention, mention_first, keywords, keyword_first, strip_mention, is_admin, is_global_admin, mode = settings
     raw_segments: list[dict] = event.get("message", []) or []
     if is_group and not _passes_group_trigger(
@@ -473,7 +508,10 @@ async def _prepare_message_state(event: dict[str, Any], options: _ParseOptions) 
         keywords,
         keyword_first,
     ):
-        return None
+        return _drop_event(
+            "mention", event, is_group=is_group, sender_id=sender_id,
+            sender_name=sender_name, group_id=group_id,
+        )
     if is_group and options.self_id and strip_mention:
         raw_segments = seg.strip_first_bot_mention(raw_segments, options.self_id)
 
@@ -890,7 +928,7 @@ async def _parse_notice_event(
     config: AdapterConfig | None = None,
     name_resolver: NameResolver | None = None,
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
-) -> NormalizedEvent | FilteredEvent | None:
+) -> NormalizedEvent | FilteredEvent | DroppedEvent | None:
     """Parse a OneBot 11 notice event into a synthetic NormalizedEvent.
 
     Handles three notice types (when enabled via config):
@@ -928,11 +966,11 @@ async def _parse_notice_event(
         return None
 
     if kind == "poke":
-        allowed, filtered = _filter_poke_notice(
-            config, group_id, is_group, user_id, timestamp, bot_blacklist_match_fn,
+        blocked = _filter_poke_notice(
+            event, config, group_id, is_group, user_id, timestamp, bot_blacklist_match_fn,
         )
-        if not allowed:
-            return filtered
+        if blocked is not None:
+            return blocked
 
     # ── Resolve user name ──
     user_name = ""
@@ -997,23 +1035,27 @@ def _notice_kind(
 
 
 def _filter_poke_notice(
+    event: dict[str, Any],
     config: AdapterConfig,
     group_id: str,
     is_group: bool,
     user_id: str,
     timestamp: float,
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None,
-) -> tuple[bool, FilteredEvent | None]:
+) -> DroppedEvent | FilteredEvent | None:
     admitted = config.is_group_user_allowed(group_id, user_id) if is_group else config.is_dm_allowed(user_id)
     if not admitted:
-        return False, None
+        return _drop_event(
+            "user_filter", event, is_group=is_group, sender_id=user_id,
+            sender_name="", group_id=group_id,
+        )
     is_admin = config.is_admin(user_id, group_id if is_group else None)
     if not config.bot_blacklist_enabled or is_admin or bot_blacklist_match_fn is None:
-        return True, None
+        return None
     entry = bot_blacklist_match_fn(user_id, group_id if is_group else None)
     if entry is None:
-        return True, None
-    return False, FilteredEvent(
+        return None
+    return FilteredEvent(
         chat_id=f"group:{group_id}" if is_group else user_id,
         chat_type="group" if is_group else "dm",
         user_id=user_id,

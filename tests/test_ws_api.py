@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot import api as api_module
 from onebot_adapter.onebot.api import OneBotApi, UploadOutcomeUnknownError
+from onebot_adapter.onebot.log_format import PREVIEW_LOGGER_NAME
 from onebot_adapter.onebot.ws_api import WsApiTransport
 
 
@@ -650,3 +653,21 @@ async def test_api_send_group_msg_helper():
     t.on_text(json.dumps({"retcode": 0, "data": {"message_id": 99}, "echo": frame["echo"]}))
     data = await asyncio.wait_for(task, timeout=2)
     assert data["message_id"] == 99
+
+
+async def test_api_send_logs_outbound_line(caplog):
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    api = OneBotApi(ws_transport=t)
+    api.configure_send_logging(config=AdapterConfig(log_message_preview=40, log_file_message_mode="none"))
+
+    with caplog.at_level(logging.INFO, logger=PREVIEW_LOGGER_NAME):
+        task = asyncio.create_task(api.send_group_msg(42, [{"type": "text", "data": {"text": "hello-outbound"}}]))
+        await asyncio.sleep(0.01)
+        frame = ws.send_json.await_args.args[0]
+        t.on_text(json.dumps({"retcode": 0, "data": {"message_id": 77}, "echo": frame["echo"]}))
+        await asyncio.wait_for(task, timeout=2)
+    assert "发送 ->" in caplog.text
+    assert "hello-outbound" in caplog.text
+    assert "message_id=77" in caplog.text

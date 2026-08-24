@@ -240,7 +240,32 @@ export const installPlugin = (hermes_install_dir: string) =>
   api.post("/install_plugin", { hermes_install_dir }).then((r) => r.data);
 export const uninstallPlugin = (hermes_install_dir: string) =>
   api.post("/uninstall_plugin", { hermes_install_dir }).then((r) => r.data);
-export const getLogs = () => api.get<{ logs: string[] }>("/logs").then((r) => r.data.logs);
+export interface LogsResponse {
+  logs: string[];
+  source: "memory" | "file";
+  memory_limit?: number;
+  file_enabled: boolean;
+  file_available: boolean;
+  file_path: string | null;
+  file_size: number | null;
+  truncated?: boolean;
+  lines?: number;
+}
+
+export const getLogs = () => api.get<LogsResponse>("/logs").then((r) => r.data);
+export const getFileLogs = (lines = 1000) =>
+  api.get<LogsResponse>("/logs/file", { params: { lines } }).then((r) => r.data);
+export async function downloadLogFile(): Promise<void> {
+  const resp = await api.get("/logs/file/download", { responseType: "blob" });
+  const url = URL.createObjectURL(resp.data);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "adapter.log";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 export const getGroups = () => api.get<{ groups: GroupConfig[] }>("/groups").then((r) => r.data.groups);
 export const putGroup = (groupId: string, cfg: Partial<GroupConfig>) =>
   api.put(`/groups/${groupId}`, cfg).then((r) => r.data);

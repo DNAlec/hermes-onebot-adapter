@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from onebot_adapter.config import AdapterConfig, GroupConfig
 from onebot_adapter.onebot.parser import parse_event
+from onebot_adapter.relay.protocol import DroppedEvent
 
 
 def _msg_event(
@@ -246,7 +247,8 @@ async def test_parser_group_user_blacklist_filter():
         self_id="999", group_require_mention=False,
         config=cfg,
     )
-    assert result is None
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
 
 
 async def test_parser_group_user_whitelist_allows_listed():
@@ -270,7 +272,8 @@ async def test_parser_group_user_whitelist_empty_rejects_all():
         self_id="999", group_require_mention=False,
         config=cfg,
     )
-    assert result is None
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
 
 
 async def test_parser_group_disabled():
@@ -280,7 +283,8 @@ async def test_parser_group_disabled():
         self_id="999", group_require_mention=False,
         config=cfg,
     )
-    assert result is None
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
 
 
 async def test_parser_group_chat_id():
@@ -362,7 +366,8 @@ async def test_parser_dm_whitelist_default_rejects():
         self_id="999", group_require_mention=False,
         config=cfg,
     )
-    assert result is None
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
 
 
 async def test_parser_dm_whitelist_allows_listed():
@@ -392,7 +397,8 @@ async def test_parser_dm_blacklist_blocks_listed():
         self_id="999", group_require_mention=False,
         config=cfg,
     )
-    assert result is None
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
 
 
 async def test_parser_group_require_mention_override():

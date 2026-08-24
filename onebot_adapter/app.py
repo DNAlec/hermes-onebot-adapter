@@ -32,7 +32,13 @@ from onebot_adapter.config import (
     load_config,
     save_config,
 )
+from onebot_adapter.logging_utils import text_summary
 from onebot_adapter.onebot.api import OneBotApi
+from onebot_adapter.onebot.log_format import (
+    detach_preview_logger_handlers,
+    log_dropped_event,
+    sync_preview_logger_handlers,
+)
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.onebot.ws_api import WsApiTransport
@@ -46,18 +52,6 @@ from onebot_adapter.webui import routes as webui_routes
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("onebot_adapter.audit")
-
-
-class _ExcludeLogFormatPreview(logging.Filter):
-    """Filter that rejects log records emitted by the ``log_format`` module
-        logger (truncated recv/send preview lines).  Persistent message copies
-        are emitted by the dedicated non-propagating ``onebot_adapter.file``
-        logger, which has the file handler attached directly.  Without this
-        filter the file would contain both message-flow records.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return not record.name.endswith(".onebot.log_format")
 
 
 class _DailySizeRotatingFileHandler(BaseRotatingHandler):
@@ -121,6 +115,8 @@ class AdapterService:
             "onebot_connected": False,
             "hermes_plugin_connected": False,
             "log_buffer": deque(maxlen=500),
+            "log_file_enabled": False,
+            "log_file_path": None,
         }
         self._api: OneBotApi | None = None
         self._session: aiohttp.ClientSession | None = None
@@ -154,6 +150,7 @@ class AdapterService:
         self._state["api"] = self._api
         self._state["local_api_call"] = self._handle_local_api_call
         self._name_resolver = NameResolver(self._api)
+        self._api.configure_send_logging(config=cfg, name_resolver=self._name_resolver)
         self._seq_map = SeqMap(maxlen=cfg.seq_map_size)
         self._relay = HermesRelayServer(
             cfg,
@@ -209,12 +206,10 @@ class AdapterService:
 
         The handler is attached to the ``onebot_adapter`` parent logger so
         that ALL modules under the package (relay, onebot.*, webui, etc.)
-        propagate their log records into ``adapter.log``.  A filter excludes
-        the truncated preview lines emitted by ``onebot_adapter.onebot.log_format``'s
-        module logger — persistent message copies are written through the
-        dedicated ``onebot_adapter.file`` logger according to
-        ``log_file_message_mode``, so accepting the preview copies here would
-        duplicate recv/send lines.
+        propagate their log records into ``adapter.log``.  Receive/send
+        *preview* copies use the non-propagating ``message_preview`` logger
+        (console/WebUI only). Persistent message copies go through
+        ``onebot_adapter.file`` according to ``log_file_message_mode``.
         """
         if self._file_handler is not None:
             logging.getLogger("onebot_adapter").removeHandler(self._file_handler)
@@ -226,6 +221,9 @@ class AdapterService:
         # Full/persistent message records must never reach root (console/WebUI).
         file_logger.propagate = False
         if not cfg.log_file_enabled:
+            self._state["log_file_enabled"] = False
+            self._state["log_file_path"] = None
+            sync_preview_logger_handlers()
             return
 
         log_dir = cfg.log_file_dir or os.path.expanduser("~/.onebot_adapter/logs")
@@ -241,12 +239,12 @@ class AdapterService:
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s: %(message)s"
         ))
-        # Skip the console/WebUI preview records from log_format; the dedicated
-        # file logger emits the configured persistent message copy directly.
-        handler.addFilter(_ExcludeLogFormatPreview())
         logging.getLogger("onebot_adapter").addHandler(handler)
         file_logger.addHandler(handler)
         self._file_handler = handler
+        self._state["log_file_enabled"] = True
+        self._state["log_file_path"] = log_path
+        sync_preview_logger_handlers(file_handler=handler)
 
     def _update_file_logging(self, old: AdapterConfig, new: AdapterConfig) -> None:
         """Hot-reload file logging settings."""
@@ -268,6 +266,7 @@ class AdapterService:
             self._webui_log_handler.setLevel(level)
         if self._file_handler is not None:
             self._file_handler.setLevel(level)
+        sync_preview_logger_handlers(file_handler=self._file_handler)
         logger.info("log level set to %s", level_str.upper())
 
     def build_onebot_app(self) -> aiohttp.web.Application:
@@ -353,20 +352,20 @@ class AdapterService:
             )
             if not decision.allowed:
                 if decision.reason == "storage_unavailable":
-                    await self._on_filtered_command(
-                        FilteredEvent(
-                            chat_id=event.chat_id,
-                            chat_type=event.chat_type,
-                            user_id=event.user_id,
-                            user_name=event.user_name,
-                            command_name="",
-                            reject_message="⛔ 限流状态暂不可用，请稍后重试",
-                            message_id=event.message_id,
-                            reply_to_message_id=event.message_id or None,
-                            timestamp=event.timestamp,
-                            filter_type="rate_limit_storage",
-                        )
+                    filtered = FilteredEvent(
+                        chat_id=event.chat_id,
+                        chat_type=event.chat_type,
+                        user_id=event.user_id,
+                        user_name=event.user_name,
+                        command_name="",
+                        reject_message="⛔ 限流状态暂不可用，请稍后重试",
+                        message_id=event.message_id,
+                        reply_to_message_id=event.message_id or None,
+                        timestamp=event.timestamp,
+                        filter_type="rate_limit_storage",
                     )
+                    log_dropped_event(filtered)
+                    await self._on_filtered_command(filtered)
                     return
                 scope_labels = {"global": "全局", "group": "群聊", "user": "个人"}
                 retry_after = max(1, math.ceil(decision.retry_after))
@@ -378,20 +377,20 @@ class AdapterService:
                 }
                 for placeholder, value in replacements.items():
                     message = message.replace(placeholder, value)
-                await self._on_filtered_command(
-                    FilteredEvent(
-                        chat_id=event.chat_id,
-                        chat_type=event.chat_type,
-                        user_id=event.user_id,
-                        user_name=event.user_name,
-                        command_name="",
-                        reject_message=message,
-                        message_id=event.message_id,
-                        reply_to_message_id=event.message_id or None,
-                        timestamp=event.timestamp,
-                        filter_type="rate_limit",
-                    )
+                filtered = FilteredEvent(
+                    chat_id=event.chat_id,
+                    chat_type=event.chat_type,
+                    user_id=event.user_id,
+                    user_name=event.user_name,
+                    command_name="",
+                    reject_message=message,
+                    message_id=event.message_id,
+                    reply_to_message_id=event.message_id or None,
+                    timestamp=event.timestamp,
+                    filter_type="rate_limit",
                 )
+                log_dropped_event(filtered)
+                await self._on_filtered_command(filtered)
                 return
         if self.store.config.usage_stats_enabled and self._usage_stats is not None:
             try:
@@ -399,8 +398,8 @@ class AdapterService:
             except Exception:
                 logger.exception("failed to record usage statistics")
         logger.debug(
-            "app _on_onebot_event: relaying to Hermes chat_id=%s text_preview=%r",
-            event.chat_id, (event.text or "")[:500],
+            "app _on_onebot_event: relaying to Hermes chat_id=%s text=%s",
+            event.chat_id, text_summary(event.text),
         )
         if self._relay:
             outcome = await self._relay.push_event(event)
@@ -594,6 +593,7 @@ class AdapterService:
         logger.info("OneBot adapter stopped")
         # Detach + close log handlers so the file handle is released and a
         # subsequent serve() in the same process doesn't double-attach them.
+        detach_preview_logger_handlers()
         if self._webui_log_handler is not None:
             logging.getLogger().removeHandler(self._webui_log_handler)
             self._webui_log_handler.close()
@@ -603,6 +603,8 @@ class AdapterService:
             logging.getLogger("onebot_adapter.file").removeHandler(self._file_handler)
             self._file_handler.close()
             self._file_handler = None
+        self._state["log_file_path"] = None
+        self._state["log_file_enabled"] = False
 
     async def _on_config_change(self, old: AdapterConfig, new: AdapterConfig) -> None:
         async with self._config_change_lock:
@@ -631,6 +633,7 @@ class AdapterService:
             self._onebot_forward.update_config(new)
         if self._api:
             self._api.update_file_upload_timeout(new.file_upload_timeout)
+            self._api.configure_send_logging(config=new, name_resolver=self._name_resolver)
         if self._seq_map and old.seq_map_size != new.seq_map_size:
             self._seq_map.update_maxlen(new.seq_map_size)
             logger.info("SeqMap size changed: %d -> %d", old.seq_map_size, new.seq_map_size)
@@ -745,6 +748,7 @@ class AdapterService:
         if not no_webui:
             from onebot_adapter.webui.log_handler import attach_log_handler
             self._webui_log_handler = attach_log_handler(self._state, level=cfg.log_level)
+        sync_preview_logger_handlers()
         logging.getLogger().setLevel(getattr(logging, cfg.log_level.upper(), logging.INFO))
         for noisy in ("aiohttp.access", "aiohttp.web", "aiohttp.server", "aiohttp.websocket", "asyncio"):
             logging.getLogger(noisy).setLevel(logging.WARNING)

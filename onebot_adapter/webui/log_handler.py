@@ -29,4 +29,6 @@ def attach_log_handler(state: dict[str, Any], level: str = "INFO") -> WebUILogHa
     buffer: deque = state.setdefault("log_buffer", deque(maxlen=500))
     handler = WebUILogHandler(buffer, level=getattr(logging, level.upper(), logging.INFO))
     logging.getLogger().addHandler(handler)
+    from onebot_adapter.onebot.log_format import sync_preview_logger_handlers
+    sync_preview_logger_handlers()
     return handler

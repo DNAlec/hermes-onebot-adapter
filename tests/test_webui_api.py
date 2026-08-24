@@ -255,7 +255,24 @@ async def test_logs_endpoint_requires_auth(client):
 async def test_logs_endpoint_with_token(client):
     resp = await client.get("/api/v1/logs", headers=_auth())
     assert resp.status == 200
-    assert "logs" in await resp.json()
+    body = await resp.json()
+    assert "logs" in body
+    assert body["source"] == "memory"
+    assert body["memory_limit"] == 500
+    assert "file_enabled" in body
+
+    resp = await client.get("/api/v1/logs/file")
+    assert resp.status == 401
+    resp = await client.get("/api/v1/logs/file", headers=_auth())
+    assert resp.status == 200
+    file_body = await resp.json()
+    assert file_body["source"] == "file"
+    assert file_body["logs"] == []
+
+    resp = await client.get("/api/v1/logs/file/download")
+    assert resp.status == 401
+    resp = await client.get("/api/v1/logs/file/download", headers=_auth())
+    assert resp.status == 404
 
 
 async def test_install_plugin_requires_auth(client):
