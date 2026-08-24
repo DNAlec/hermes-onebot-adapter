@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, computed } from "vue";
-import { getLogs } from "../api";
+import { ref, onMounted, onUnmounted, nextTick, computed, watch } from "vue";
+import { downloadLogFile, getFileLogs, getLogs } from "../api";
 
 const logs = ref<string[]>([]);
 const autoScroll = ref(true);
 const filter = ref("");
-const levelFilter = ref<"all" | "info" | "warning" | "error">("all");
+const levelFilter = ref<"all" | "debug" | "info" | "warning" | "error">("all");
+const source = ref<"memory" | "file">("memory");
+const memoryLimit = ref(500);
+const fileEnabled = ref(false);
+const fileAvailable = ref(false);
+const fileTruncated = ref(false);
+const downloadBusy = ref(false);
 let timer: number | undefined;
 const logContainer = ref<HTMLElement | null>(null);
 
@@ -26,12 +32,33 @@ const filteredLogs = computed(() => {
   });
 });
 
+const sourceHint = computed(() => {
+  if (source.value === "memory") {
+    return `内存环形缓冲仅保留最近 ${memoryLimit.value} 条；完整记录请切换到文件日志或下载 adapter.log`;
+  }
+  if (!fileEnabled.value) {
+    return "文件日志未启用。可在「高级设置」打开文件日志。";
+  }
+  if (!fileAvailable.value) {
+    return "文件日志已启用，但当前还没有 adapter.log。";
+  }
+  if (fileTruncated.value) {
+    return "以下为 adapter.log 尾部（可能已按大小截断）。下载可获取当前完整文件。";
+  }
+  return "以下为 adapter.log 尾部。下载可获取当前完整文件。";
+});
+
 async function poll() {
   try {
     const el = logContainer.value;
     const prevScrollTop = el?.scrollTop ?? 0;
 
-    logs.value = await getLogs();
+    const data = source.value === "file" ? await getFileLogs(1000) : await getLogs();
+    logs.value = data.logs;
+    memoryLimit.value = data.memory_limit ?? memoryLimit.value;
+    fileEnabled.value = data.file_enabled;
+    fileAvailable.value = data.file_available;
+    fileTruncated.value = Boolean(data.truncated);
 
     if (autoScroll.value) {
       await nextTick();
@@ -44,6 +71,21 @@ async function poll() {
     console.error("Failed to fetch logs:", e);
   }
 }
+
+async function downloadFile() {
+  downloadBusy.value = true;
+  try {
+    await downloadLogFile();
+  } catch (e) {
+    console.error("Failed to download log file:", e);
+  } finally {
+    downloadBusy.value = false;
+  }
+}
+
+watch(source, () => {
+  void poll();
+});
 
 function scrollToBottom() {
   if (logContainer.value) {
@@ -73,8 +115,19 @@ onUnmounted(() => {
 <template>
   <div>
     <h2>日志</h2>
+    <p class="source-hint">{{ sourceHint }}</p>
     
     <div class="controls">
+      <div class="filter-group">
+        <label>
+          <span>来源:</span>
+          <select v-model="source" class="level-select">
+            <option value="memory">内存（最近 {{ memoryLimit }} 条）</option>
+            <option value="file">文件 adapter.log</option>
+          </select>
+        </label>
+      </div>
+
       <div class="filter-group">
         <label>
           <span>文本过滤:</span>
@@ -95,6 +148,7 @@ onUnmounted(() => {
             <option value="error">ERROR</option>
             <option value="warning">WARNING</option>
             <option value="info">INFO</option>
+            <option value="debug">DEBUG</option>
           </select>
         </label>
       </div>
@@ -109,6 +163,16 @@ onUnmounted(() => {
       <div class="filter-group">
         <button @click="scrollToBottom" class="scroll-btn">
           ↓ 滚动到底部
+        </button>
+      </div>
+
+      <div class="filter-group">
+        <button
+          class="scroll-btn"
+          :disabled="!fileAvailable || downloadBusy"
+          @click="downloadFile"
+        >
+          下载 adapter.log
         </button>
       </div>
     </div>
@@ -136,12 +200,23 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.source-hint {
+  color: #666;
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+
 .controls {
   display: flex;
   gap: 1rem;
   margin-bottom: 1rem;
   flex-wrap: wrap;
   align-items: flex-end;
+}
+
+.scroll-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .filter-group {

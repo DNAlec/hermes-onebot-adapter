@@ -9,7 +9,7 @@ def test_install_copies_files(tmp_path):
     assert "error" not in result
     dest = Path(result["plugin_dest"])
     assert dest.exists()
-    for fname in ("__init__.py", "adapter.py", "markdown.py", "onebot_tools.py", "plugin.yaml"):
+    for fname in ("__init__.py", "adapter.py", "markdown.py", "onebot_tools.py", "plugin.yaml", "log_sanitize.py"):
         assert (dest / fname).exists(), f"{fname} not copied"
     assert "__init__.py" in result["copied"]
     assert "plugin.yaml" in result["copied"]

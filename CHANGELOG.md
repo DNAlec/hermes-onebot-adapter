@@ -4,9 +4,13 @@
 
 ### 新增
 - 出站消息正则过滤：可在 WebUI「聊天配置」添加 Python 正则，Hermes 发往 OneBot 的文本（`send_text`、媒体/文件说明、`onebot_send_message` 的 text 段）命中后直接丢弃；群配置可覆盖开关和规则列表
+- 入站未进 Hermes 的候选消息在 INFO 记 `丢弃 -- reason=`（`user_filter` / `mention` / `command` / `blacklist` / `rate_limit` / `empty`），不含正文
+- WebUI 日志页可查看 `adapter.log` 尾部并下载当前文件；内存视图标明仅保留最近 500 条
 
 ### 变更
 - WebUI 窄屏布局：顶栏改为汉堡菜单、禁止横向撑开页面；两列表单在约 700px 以下收成单列；宽表在容器内横向滚动；聊天/指令/连接/高级页保存按钮吸底；群编辑弹窗在手机上贴底全宽
+- 收发预览改走独立 `onebot_adapter.onebot.message_preview` logger（不进文件）；真实 OneBot 发送（含 `api_call` 发送类、拒绝回复、文件上传成功后、自动化工具）统一打 `发送 ->`
+- 插件 DEBUG 诊断复用 `logging_utils` 脱敏，不再输出完整消息正文
 
 ### 修复
 - 添加群时若输入已有群号，群号输入框会被误禁用且无法改回

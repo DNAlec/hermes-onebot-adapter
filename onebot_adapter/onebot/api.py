@@ -16,7 +16,13 @@ import time
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from onebot_adapter.config import AdapterConfig
 from onebot_adapter.logging_utils import safe_json
+from onebot_adapter.onebot.log_format import (
+    describe_outbound_send,
+    log_send_line,
+    outbound_log_req_id,
+)
 from onebot_adapter.onebot.ws_api import WsApiTransport
 
 logger = logging.getLogger(__name__)
@@ -38,9 +44,17 @@ class OneBotApi:
     def __init__(self, ws_transport: WsApiTransport, file_upload_timeout: float = 600.0) -> None:
         self._ws = ws_transport
         self._file_upload_timeout = file_upload_timeout
+        self._config: AdapterConfig | None = None
+        self._name_resolver: Any = None
 
     def update_file_upload_timeout(self, timeout: float) -> None:
         self._file_upload_timeout = timeout
+
+    def configure_send_logging(self, *, config: AdapterConfig, name_resolver: Any = None) -> None:
+        """Attach config used to emit unified outbound ``发送 ->`` lines."""
+        self._config = config
+        if name_resolver is not None:
+            self._name_resolver = name_resolver
 
     @property
     def connected(self) -> bool:
@@ -71,7 +85,7 @@ class OneBotApi:
                         "OneBot API upload_group_file timed out but was confirmed in group history: %s",
                         safe_json(confirmed, 500),
                     )
-                    return {
+                    result = {
                         "status": "ok",
                         "retcode": 0,
                         "data": {
@@ -80,6 +94,8 @@ class OneBotApi:
                             "confirmed_after_timeout": True,
                         },
                     }
+                    await self._log_outbound_send(action, params, result)
+                    return result
                 group_id = params.get("group_id", "")
                 name = params.get("name") or os.path.basename(str(params.get("file", "")))
                 raise UploadOutcomeUnknownError(
@@ -119,7 +135,38 @@ class OneBotApi:
                 f"status={data.get('status')} msg={error_message}"
             )
         logger.debug("OneBot API %s -> ok duration_ms=%.1f", action, duration_ms)
+        await self._log_outbound_send(action, params, data)
         return data
+
+    async def _log_outbound_send(
+        self, action: str, params: dict[str, Any], response: dict[str, Any],
+    ) -> None:
+        """Emit a ``发送 ->`` line for successful chat sends and file uploads."""
+        cfg = self._config
+        described = describe_outbound_send(action, params)
+        if cfg is None or described is None:
+            return
+        payload = response.get("data") if isinstance(response.get("data"), dict) else {}
+        message_id = str((payload or {}).get("message_id") or "")
+        group_name = ""
+        try:
+            if described["is_group"] and self._name_resolver is not None:
+                num_id = described["chat_id"].split(":", 1)[-1]
+                group_name = await self._name_resolver.resolve_group_name(str(num_id))
+            await log_send_line(
+                chat_id=described["chat_id"],
+                segs=described["segs"],
+                is_group=described["is_group"],
+                group_name=group_name,
+                reply_to=described["reply_to"],
+                preview=cfg.log_message_preview,
+                name_resolver=self._name_resolver,
+                file_message_mode=cfg.log_file_message_mode,
+                req_id=outbound_log_req_id.get(),
+                message_id=message_id,
+            )
+        except Exception:
+            logger.debug("outbound send log failed action=%s", action, exc_info=True)
 
     async def _confirm_group_file_upload(
         self, params: dict[str, Any], started_wall: float,

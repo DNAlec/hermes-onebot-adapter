@@ -185,3 +185,44 @@ async def test_logs_endpoint_returns_list(client):
     data = await resp.json()
     assert "logs" in data
     assert isinstance(data["logs"], list)
+    assert data["source"] == "memory"
+    assert data["memory_limit"] == 500
+
+
+async def test_logs_file_tail_and_download(tmp_path, monkeypatch):
+    monkeypatch.setenv("ONEBOT_ADAPTER_CONFIG", str(tmp_path / "cfg.json"))
+    log_dir = tmp_path / "logs"
+    cfg = AdapterConfig(
+        self_id="123",
+        webui_token=_WT,
+        webui_token_lifetime_hours=24,
+        webui_token_epoch=_EPOCH,
+        log_file_enabled=True,
+        log_file_dir=str(log_dir),
+    )
+    service = AdapterService(ConfigStore(cfg))
+    service._setup_file_logging(cfg)
+    log_path = log_dir / "adapter.log"
+    log_path.write_text("first\nsecond\nthird\n", encoding="utf-8")
+    app = service.build_webui_app()
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        client = TestClient(server)
+        resp = await client.get("/api/v1/logs/file?lines=2", headers=_auth())
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["source"] == "file"
+        assert data["file_available"] is True
+        assert data["logs"][-2:] == ["second", "third"]
+        resp = await client.get("/api/v1/logs/file/download", headers=_auth())
+        assert resp.status == 200
+        body = await resp.read()
+        assert b"first" in body
+        assert 'attachment; filename="adapter.log"' in resp.headers.get("Content-Disposition", "")
+    finally:
+        await server.close()
+        if service._file_handler is not None:
+            logging.getLogger("onebot_adapter").removeHandler(service._file_handler)
+            logging.getLogger("onebot_adapter.file").removeHandler(service._file_handler)
+            service._file_handler.close()

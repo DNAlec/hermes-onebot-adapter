@@ -15,13 +15,13 @@ import time
 from typing import Any
 
 from onebot_adapter.config import AdapterConfig
-from onebot_adapter.logging_utils import safe_json
-from onebot_adapter.onebot.log_format import log_recv_line
+from onebot_adapter.logging_utils import safe_json, text_summary
+from onebot_adapter.onebot.log_format import log_dropped_event, log_recv_line
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.parser import parse_event
 from onebot_adapter.onebot.seq_map import SeqMap, seq_map_add
 from onebot_adapter.onebot.ws_api import WsApiTransport
-from onebot_adapter.relay.protocol import FilteredEvent
+from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +115,12 @@ class OneBotHandler:
         if parsed is None:
             logger.debug("OneBot %s event ignored (post_type=%s)", self.label, data.get("post_type"))
             return
+        if isinstance(parsed, DroppedEvent):
+            log_dropped_event(parsed)
+            return
         # FilteredEvent → reject message via callback, don't forward to Hermes
         if isinstance(parsed, FilteredEvent):
+            log_dropped_event(parsed)
             logger.debug(
                 "OneBot %s event filtered: type=%s chat_id=%s cmd=%s",
                 self.label, parsed.filter_type, parsed.chat_id, parsed.command_name,
@@ -133,7 +137,7 @@ class OneBotHandler:
             self._config.log_message_preview,
             self._config.log_file_message_mode,
         )
-        logger.debug("OneBot %s parsed text preview: %r", self.label, (event.text or "")[:500])
+        logger.debug("OneBot %s parsed text=%s", self.label, text_summary(event.text))
         if self._on_event:
             try:
                 await self._on_event(event)

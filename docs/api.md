@@ -414,7 +414,7 @@ Content-Type: application/json
 
 **`GET /api/v1/logs`**
 
-返回服务端环形缓冲区中的最近日志行。
+返回服务端内存环形缓冲区中的最近日志行（默认最多 500 条，进程重启即空）。完整记录在文件日志中。
 
 响应 `200`：
 ```json
@@ -422,9 +422,23 @@ Content-Type: application/json
   "logs": [
     "2025-01-01 12:00:00 INFO onebot_adapter.app: Service starting...",
     "2025-01-01 12:00:01 INFO onebot_adapter.app: OneBot connected"
-  ]
+  ],
+  "source": "memory",
+  "memory_limit": 500,
+  "file_enabled": true,
+  "file_available": true,
+  "file_path": "/home/user/.onebot_adapter/logs/adapter.log",
+  "file_size": 1234
 }
 ```
+
+**`GET /api/v1/logs/file`**
+
+读取当前 `adapter.log` 尾部。查询参数 `lines`（默认 1000，最大 5000）。文件未启用或尚不存在时 `logs` 为空且 `file_available=false`。
+
+**`GET /api/v1/logs/file/download`**
+
+下载当前 `adapter.log`（`Content-Disposition: attachment`）。文件不可用时返回 `404`。
 
 ---
 

@@ -1,10 +1,17 @@
 """Tests for the message-flow log line formatters."""
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock
 
-from onebot_adapter.onebot.log_format import format_recv_line, format_send_line, truncate
-from onebot_adapter.relay.protocol import NormalizedEvent
+from onebot_adapter.onebot.log_format import (
+    describe_outbound_send,
+    format_recv_line,
+    format_send_line,
+    log_dropped_event,
+    truncate,
+)
+from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent, NormalizedEvent
 
 # ── truncate ─────────────────────────────────────────────────────────────
 
@@ -235,3 +242,40 @@ async def test_format_send_line_empty_segs():
     line = await format_send_line(chat_id="group:42", segs=[], is_group=True, group_name="g")
     assert "群聊" in line
     assert "[42" in line
+
+
+def test_describe_outbound_send_group_text():
+    described = describe_outbound_send(
+        "send_group_msg",
+        {"group_id": 42, "message": [{"type": "text", "data": {"text": "hi"}}]},
+    )
+    assert described is not None
+    assert described["is_group"] is True
+    assert described["chat_id"] == "group:42"
+    assert described["segs"][0]["type"] == "text"
+
+
+def test_describe_outbound_send_upload_uses_filename_not_path():
+    described = describe_outbound_send(
+        "upload_group_file",
+        {"group_id": 7, "file": "/secret/path/doc.pdf", "name": "doc.pdf"},
+    )
+    assert described is not None
+    assert described["segs"] == [{"type": "file", "data": {"name": "doc.pdf"}}]
+
+
+def test_log_dropped_event_has_reason_not_body(caplog):
+    with caplog.at_level(logging.INFO, logger="onebot_adapter.onebot.log_format"):
+        log_dropped_event(DroppedEvent(
+            reason="mention", chat_id="group:42", user_id="100",
+            user_name="Tester", message_id="9",
+        ))
+        log_dropped_event(FilteredEvent(
+            chat_id="group:42", chat_type="group", user_id="100", user_name="Tester",
+            command_name="help", reject_message="nope secret body",
+            message_id="10", filter_type="bot_blacklist",
+        ))
+    text = caplog.text
+    assert "reason=mention" in text
+    assert "reason=blacklist" in text
+    assert "nope secret body" not in text

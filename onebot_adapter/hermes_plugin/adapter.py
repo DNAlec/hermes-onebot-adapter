@@ -30,6 +30,25 @@ from .markdown import strip_markdown
 
 logger = logging.getLogger(__name__)
 
+try:
+    from onebot_adapter.logging_utils import safe_json, sanitize_for_log, text_summary
+except ImportError:  # copied into ~/.hermes/plugins/onebot without the adapter package
+    try:
+        from .log_sanitize import safe_json, sanitize_for_log, text_summary
+    except ImportError:  # pragma: no cover - last-resort local fallback
+        def sanitize_for_log(value: Any, *, key: str = "") -> Any:
+            return value
+
+        def text_summary(value: Any, *, preview: int = 0) -> str:
+            text = "" if value is None else str(value)
+            return f"<text len={len(text)}>"
+
+        def safe_json(value: Any, limit: int = 2000) -> str:
+            try:
+                return json.dumps(value, ensure_ascii=False, default=str)[:limit]
+            except (TypeError, ValueError):
+                return "<unserializable>"
+
 # Per-message context for tool handlers.  Set in _dispatch_event so that
 # concurrent message processing (multiple _dispatch_event tasks) each see
 # their own admin/group/user context without racing on instance attributes.
@@ -123,24 +142,7 @@ _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 
 def _safe_log_json(value: Any, limit: int = 2000) -> str:
     """Render protocol diagnostics without tokens, message bodies, or signed URL queries."""
-    def scrub(item: Any, key: str = "") -> Any:
-        lowered = key.lower()
-        if any(part in lowered for part in ("token", "authorization", "password", "secret", "cookie")):
-            return "<redacted>"
-        if lowered in {"text", "content", "caption", "reply_to_text"}:
-            return f"<text len={len(str(item))}>"
-        if isinstance(item, dict):
-            return {str(k): scrub(v, str(k)) for k, v in item.items()}
-        if isinstance(item, list):
-            return [scrub(v) for v in item]
-        if isinstance(item, str) and "://" in item and "?" in item:
-            return item.split("?", 1)[0] + "?<redacted>"
-        return item
-
-    try:
-        return json.dumps(scrub(value), ensure_ascii=False, default=str)[:limit]
-    except (TypeError, ValueError):
-        return "<unserializable>"
+    return safe_json(value, limit)
 
 
 def _ext_from_url(url: str, fallback: str = "") -> str:
@@ -626,7 +628,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             data.get("chat_id", ""),
             len(data.get("text", "") or ""),
         )
-        logger.debug("OneBot plugin event text preview: %r", (data.get("text", "") or "")[:500])
+        logger.debug("OneBot plugin event text=%s", text_summary(data.get("text", "")))
 
         text = data.get("text", "")
 
@@ -854,9 +856,15 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                     continue
                 media_urls.append(path)
                 media_types.append(mime)
-                logger.debug("OneBot: cached media kind=%s url=%s -> %s", kind, url[:80], path)
+                logger.debug(
+                    "OneBot: cached media kind=%s url=%s -> %s",
+                    kind, sanitize_for_log(url), sanitize_for_log(path, key="file_path"),
+                )
             except Exception as exc:
-                logger.warning("OneBot: cache media failed kind=%s url=%s: %s", kind, (url or "")[:80], exc)
+                logger.warning(
+                    "OneBot: cache media failed kind=%s url=%s: %s",
+                    kind, sanitize_for_log(url or ""), exc,
+                )
                 # Skip this media; LLM still sees its [图N] placeholder.
                 continue
         return media_urls, media_types
@@ -1179,7 +1187,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         try:
-            logger.debug("OneBot plugin send_image: chat_id=%s url=%s", chat_id, image_url)
+            logger.debug("OneBot plugin send_image: chat_id=%s url=%s", chat_id, sanitize_for_log(image_url))
             payload: dict[str, Any] = {"chat_id": chat_id, "image_url": image_url}
             if caption:
                 payload["caption"] = strip_markdown(caption)
@@ -1201,7 +1209,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         **kwargs,
     ) -> SendResult:
         try:
-            logger.debug("OneBot plugin send_voice: chat_id=%s path=%s", chat_id, audio_path)
+            logger.debug(
+                "OneBot plugin send_voice: chat_id=%s path=%s",
+                chat_id, sanitize_for_log(audio_path, key="audio_path"),
+            )
             payload: dict[str, Any] = {"chat_id": chat_id, "audio_path": audio_path}
             if reply_to:
                 payload["reply_to"] = reply_to
@@ -1223,7 +1234,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         **kwargs,
     ) -> SendResult:
         try:
-            logger.debug("OneBot plugin send_video: chat_id=%s path=%s", chat_id, video_path)
+            logger.debug(
+                "OneBot plugin send_video: chat_id=%s path=%s",
+                chat_id, sanitize_for_log(video_path, key="video_path"),
+            )
             payload: dict[str, Any] = {"chat_id": chat_id, "video_path": video_path}
             if caption:
                 payload["caption"] = strip_markdown(caption)
@@ -1246,7 +1260,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         **kwargs,
     ) -> SendResult:
         try:
-            logger.debug("OneBot plugin send_document: chat_id=%s path=%s", chat_id, file_path)
+            logger.debug(
+                "OneBot plugin send_document: chat_id=%s path=%s",
+                chat_id, sanitize_for_log(file_path, key="file_path"),
+            )
             payload: dict[str, Any] = {"chat_id": chat_id, "file_path": file_path}
             if file_name:
                 payload["filename"] = file_name

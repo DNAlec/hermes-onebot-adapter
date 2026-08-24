@@ -29,13 +29,27 @@ def _sanitize_url(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "<redacted>" if parsed.query else "", ""))
 
 
+def text_summary(value: Any, *, preview: int = 0) -> str:
+    """Return a bounded diagnostic view of a message body.
+
+    By default only the length is shown (``<text len=N>``).  When *preview*
+    is positive, a truncated excerpt is included for operators who already
+    opted into DEBUG.
+    """
+    text = "" if value is None else str(value)
+    if preview > 0:
+        shown = text if len(text) <= preview else text[:preview] + "..."
+        return f"<text len={len(text)} preview={shown!r}>"
+    return _summary(text, "text")
+
+
 def sanitize_for_log(value: Any, *, key: str = "") -> Any:
     """Return a JSON-serialisable diagnostic view without secrets or message bodies."""
     lowered = key.lower()
     if any(fragment in lowered for fragment in _SECRET_FRAGMENTS):
         return "<redacted>"
     if lowered in _TEXT_KEYS:
-        return _summary(value, "text")
+        return text_summary(value)
     if isinstance(value, dict):
         return {str(k): sanitize_for_log(v, key=str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

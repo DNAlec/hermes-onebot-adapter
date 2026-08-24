@@ -30,7 +30,7 @@ from onebot_adapter._async_utils import log_task_exception as _log_task_exceptio
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.logging_utils import safe_json
 from onebot_adapter.onebot import api as ob
-from onebot_adapter.onebot.log_format import log_send_line
+from onebot_adapter.onebot.log_format import outbound_log_req_id
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.outbound_filter import (
@@ -1104,42 +1104,36 @@ class HermesRelayServer:
                 await ws.send_json(result_message(req_id, True, data={"filtered": True}))
                 return
 
-            if action == "send_document":
-                await self._send_document(data, req_id, chat_id, is_group, num_id)
+            req_token = outbound_log_req_id.set(str(req_id))
+            try:
+                if action == "send_document":
+                    await self._send_document(data, req_id, chat_id, is_group, num_id)
+                    if dedup_key is not None:
+                        self._send_cache[dedup_key] = (time.monotonic(), "")
+                        self._maybe_evict_send_cache()
+                    self._touch_busy_group(chat_id, is_group)
+                    await ws.send_json(result_message(req_id, True))
+                    return
+
+                segs = _build_send_segments(str(action), data)
+
+                if is_group:
+                    async with self._send_api_semaphore:
+                        resp = await self._api.send_group_msg(num_id, segs)
+                else:
+                    async with self._send_api_semaphore:
+                        resp = await self._api.send_private_msg(num_id, segs)
+                msg_id = str(resp.get("message_id", ""))
+                # 写入去重缓存:在 SeqMap/log 之前,确保后续步骤异常时重试仍能命中。
                 if dedup_key is not None:
-                    self._send_cache[dedup_key] = (time.monotonic(), "")
+                    self._send_cache[dedup_key] = (time.monotonic(), msg_id)
                     self._maybe_evict_send_cache()
-                self._touch_busy_group(chat_id, is_group)
-                await ws.send_json(result_message(req_id, True))
-                return
-
-            segs = _build_send_segments(str(action), data)
-
-            if is_group:
-                async with self._send_api_semaphore:
-                    resp = await self._api.send_group_msg(num_id, segs)
-            else:
-                async with self._send_api_semaphore:
-                    resp = await self._api.send_private_msg(num_id, segs)
-            msg_id = str(resp.get("message_id", ""))
-            # 写入去重缓存:在 SeqMap/log 之前,确保后续步骤异常时重试仍能命中。
-            if dedup_key is not None:
-                self._send_cache[dedup_key] = (time.monotonic(), msg_id)
-                self._maybe_evict_send_cache()
-            logger.debug(
-                "relay send response: action=%s chat_id=%s msg_id=%s resp=%s",
-                action, chat_id, msg_id, safe_json(resp, 1000),
-            )
-            group_name = await self._resolve_group_name(is_group, num_id)
-            await log_send_line(
-                chat_id=chat_id, segs=segs, is_group=is_group,
-                group_name=group_name, reply_to=data.get("reply_to"),
-                preview=self._config.log_message_preview,
-                name_resolver=self._name_resolver,
-                file_message_mode=self._config.log_file_message_mode,
-                req_id=req_id,
-                message_id=msg_id,
-            )
+                logger.debug(
+                    "relay send response: action=%s chat_id=%s msg_id=%s resp=%s",
+                    action, chat_id, msg_id, safe_json(resp, 1000),
+                )
+            finally:
+                outbound_log_req_id.reset(req_token)
             # result frame 必须先回 plugin,SeqMap 补写后置为 fire-and-forget。
             # 原因:get_msg 走同一条 OneBot WS,NapCat 串行处理 API 请求,
             # 多人并发 send 时 get_msg 排队累积延迟会拖慢 result frame 回传,
@@ -1208,18 +1202,6 @@ class HermesRelayServer:
         if not file_ref:
             raise ValueError("no file_path provided")
         filename = data.get("filename") or file_ref.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-        group_name = await self._resolve_group_name(is_group, num_id)
-        await log_send_line(
-            chat_id=chat_id,
-            segs=[{"type": "file", "data": {"name": filename}}],
-            is_group=is_group,
-            group_name=group_name,
-            reply_to=data.get("reply_to"),
-            preview=self._config.log_message_preview,
-            name_resolver=self._name_resolver,
-            file_message_mode=self._config.log_file_message_mode,
-            req_id=req_id,
-        )
         async with self._send_api_semaphore:
             if is_group:
                 await self._api.upload_group_file(num_id, file_ref, filename)
@@ -1237,14 +1219,6 @@ class HermesRelayServer:
                 await self._api.send_group_msg(num_id, caption_segs)
             else:
                 await self._api.send_private_msg(num_id, caption_segs)
-
-    async def _resolve_group_name(self, is_group: bool, num_id: int) -> str:
-        if not is_group or self._name_resolver is None:
-            return ""
-        try:
-            return await self._name_resolver.resolve_group_name(str(num_id))
-        except Exception:
-            return ""
 
     def _touch_busy_group(self, chat_id: str, is_group: bool) -> None:
         if not is_group or not chat_id.startswith("group:"):
@@ -1282,32 +1256,36 @@ class HermesRelayServer:
         params = data.get("params", {}) or {}
         logger.debug("relay api_call: action=%s req_id=%s", action, req_id)
         logger.debug("relay api_call params: %s", safe_json(params))
-        if self._local_api_call is not None and action.startswith("adapter_"):
-            try:
-                result = await self._local_api_call(action, params)
-                await ws.send_json(result_message(req_id, True, data=result))
-            except Exception as exc:
-                logger.warning("local api_call %s failed: %s", action, exc)
-                await ws.send_json(result_message(req_id, False, error=str(exc)))
-            return
-        # 拦截 real_seq → message_id 转换(适配器侧 SeqMap 查询)
-        params = self._resolve_seq_params(action, params)
-        if action in API_SEND_ACTIONS and self._drop_filtered_api_call(params):
-            await ws.send_json(result_message(req_id, True, data={"filtered": True}))
-            return
+        req_token = outbound_log_req_id.set(str(req_id))
         try:
-            result = await self._api.call(action, params)
-            logger.debug(
-                "relay api_call result: action=%s ok=True data=%s",
-                action, safe_json(result.get("data")),
-            )
-            await ws.send_json(result_message(req_id, True, data=result.get("data")))
-        except ob.UploadOutcomeUnknownError as exc:
-            logger.warning("api_call %s outcome unknown: %s", action, exc)
-            await ws.send_json(result_message(req_id, False, error=str(exc), retryable=False))
-        except Exception as exc:
-            logger.warning("api_call %s failed: %s", action, exc)
-            await ws.send_json(result_message(req_id, False, error=str(exc)))
+            if self._local_api_call is not None and action.startswith("adapter_"):
+                try:
+                    result = await self._local_api_call(action, params)
+                    await ws.send_json(result_message(req_id, True, data=result))
+                except Exception as exc:
+                    logger.warning("local api_call %s failed: %s", action, exc)
+                    await ws.send_json(result_message(req_id, False, error=str(exc)))
+                return
+            # 拦截 real_seq → message_id 转换(适配器侧 SeqMap 查询)
+            params = self._resolve_seq_params(action, params)
+            if action in API_SEND_ACTIONS and self._drop_filtered_api_call(params):
+                await ws.send_json(result_message(req_id, True, data={"filtered": True}))
+                return
+            try:
+                result = await self._api.call(action, params)
+                logger.debug(
+                    "relay api_call result: action=%s ok=True data=%s",
+                    action, safe_json(result.get("data")),
+                )
+                await ws.send_json(result_message(req_id, True, data=result.get("data")))
+            except ob.UploadOutcomeUnknownError as exc:
+                logger.warning("api_call %s outcome unknown: %s", action, exc)
+                await ws.send_json(result_message(req_id, False, error=str(exc), retryable=False))
+            except Exception as exc:
+                logger.warning("api_call %s failed: %s", action, exc)
+                await ws.send_json(result_message(req_id, False, error=str(exc)))
+        finally:
+            outbound_log_req_id.reset(req_token)
 
     def _drop_filtered_send(
         self, action: str, data: dict[str, Any], is_group: bool, num_id: int,
