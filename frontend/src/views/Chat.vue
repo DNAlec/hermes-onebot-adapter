@@ -665,7 +665,8 @@ function resetHint() {
         </label>
       </div>
 
-      <table v-if="blacklistEntries.length" class="group-table blacklist-table">
+      <div v-if="blacklistEntries.length" class="table-wrap">
+      <table class="group-table blacklist-table">
         <thead>
           <tr><th>用户</th><th>范围</th><th>原因</th><th>发起用户</th><th>创建时间</th><th>到期/剩余</th><th>操作</th></tr>
         </thead>
@@ -681,6 +682,7 @@ function resetHint() {
           </tr>
         </tbody>
       </table>
+      </div>
       <p v-else-if="!blacklistLoading" class="empty">暂无有效动态黑名单记录</p>
     </div>
 
@@ -841,7 +843,8 @@ function resetHint() {
         </div>
       </div>
 
-      <table v-if="groups.length" class="group-table">
+      <div v-if="groups.length" class="table-wrap">
+      <table class="group-table">
         <thead>
           <tr>
             <th>群号</th><th>群名</th><th>状态</th><th>@bot</th><th>首@</th><th>关键词</th><th>操作</th>
@@ -866,12 +869,15 @@ function resetHint() {
           </tr>
         </tbody>
       </table>
+      </div>
       <p v-else class="empty">暂无群配置，点击「从 OneBot 同步」或「添加群」</p>
     </div>
 
+    <div class="save-bar">
     <button @click="saveGlobal" :disabled="saving" class="save-btn">
       {{ saving ? "保存中..." : "保存配置" }}
     </button>
+    </div>
 
     <!-- 群详情编辑弹窗 -->
     <div v-if="showEditor && editingGroup" class="modal-overlay" @click.self="showEditor = false">

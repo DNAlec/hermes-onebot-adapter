@@ -368,9 +368,11 @@ function copyAdapterUrl() {
         </div>
       </div>
 
+      <div class="save-bar">
       <button @click="save" :disabled="saving" class="save-btn">
         {{ saving ? "保存中..." : "保存配置" }}
       </button>
+      </div>
     </div>
   </div>
 </template>
