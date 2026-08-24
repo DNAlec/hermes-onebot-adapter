@@ -17,6 +17,7 @@ const msg = ref("");
 const msgType = ref<"success" | "error">("success");
 const editingGroup = ref<GroupConfig | null>(null);
 const showEditor = ref(false);
+const editingExistingGroup = ref(false);
 const blacklistEntries = ref<BotBlacklistEntry[]>([]);
 const blacklistLoading = ref(false);
 const blacklistMaxHours = ref(24);
@@ -35,8 +36,16 @@ const modeMsgType = ref<"success" | "error" | "warning">("success");
 
 function ensureOutboundFilterFields() {
   if (!cfg.value) return;
-  if (!Array.isArray(cfg.value.outbound_filter_patterns)) {
-    cfg.value.outbound_filter_patterns = [];
+  const listFields = [
+    "outbound_filter_patterns",
+    "group_trigger_keywords",
+    "global_admins",
+    "dm_user_list",
+  ] as const;
+  for (const key of listFields) {
+    if (!Array.isArray(cfg.value[key])) {
+      cfg.value[key] = [];
+    }
   }
   if (typeof cfg.value.outbound_filter_enabled !== "boolean") {
     cfg.value.outbound_filter_enabled = false;
@@ -212,6 +221,7 @@ async function syncFromOneBot() {
 }
 
 function addGroup() {
+  editingExistingGroup.value = false;
   editingGroup.value = {
     group_id: "", name: "", enabled: true, require_mention: null,
     mention_first_only: null, trigger_keywords: null, keyword_first_only: null, strip_first_mention: null,
@@ -230,12 +240,39 @@ function addGroup() {
 }
 
 function editGroup(g: GroupConfig) {
+  editingExistingGroup.value = true;
   editingGroup.value = {
     ...g,
+    require_mention: g.require_mention ?? null,
+    mention_first_only: g.mention_first_only ?? null,
+    trigger_keywords: g.trigger_keywords ?? null,
+    keyword_first_only: g.keyword_first_only ?? null,
+    strip_first_mention: g.strip_first_mention ?? null,
+    message_show_group_id: g.message_show_group_id ?? null,
+    reaction_emoji_enabled: g.reaction_emoji_enabled ?? null,
+    command_filter_enabled: g.command_filter_enabled ?? null,
+    command_filter_unknown: g.command_filter_unknown ?? null,
+    command_permissions: g.command_permissions ?? null,
     outbound_filter_enabled: g.outbound_filter_enabled ?? null,
     outbound_filter_patterns: g.outbound_filter_patterns ?? null,
+    notify_poke_enabled: g.notify_poke_enabled ?? null,
+    notify_member_change_enabled: g.notify_member_change_enabled ?? null,
+    group_rate_limit_algorithm: g.group_rate_limit_algorithm ?? null,
+    group_rate_limit_messages: g.group_rate_limit_messages ?? null,
+    group_rate_limit_window_seconds: g.group_rate_limit_window_seconds ?? null,
   };
   showEditor.value = true;
+}
+
+function setTriggerKeywordsMode(mode: string) {
+  if (!editingGroup.value) return;
+  if (mode === "global") {
+    editingGroup.value.trigger_keywords = null;
+    return;
+  }
+  if (editingGroup.value.trigger_keywords == null) {
+    editingGroup.value.trigger_keywords = [];
+  }
 }
 
 async function saveGroup() {
@@ -284,8 +321,8 @@ function addTag(list: string[] | null | undefined, value: string) {
   const v = value.trim();
   if (v && !list.includes(v)) list.push(v);
 }
-function removeTag(list: string[], idx: number) {
-  list.splice(idx, 1);
+function removeTag(list: string[] | null | undefined, idx: number) {
+  list?.splice(idx, 1);
 }
 
 function toggleGroupOutboundFilterPatterns(enabled: boolean) {
@@ -859,9 +896,9 @@ function resetHint() {
                 {{ g.enabled ? '✅ 启用' : '❌ 禁用' }}
               </span>
             </td>
-            <td>{{ g.require_mention === null ? '跟随全局' : (g.require_mention ? '是' : '否') }}</td>
-            <td>{{ g.mention_first_only === null ? '跟随全局' : (g.mention_first_only ? '是' : '否') }}</td>
-            <td>{{ g.trigger_keywords === null ? '跟随全局' : (g.trigger_keywords.length ? g.trigger_keywords.join(', ') : '禁用') }}</td>
+            <td>{{ g.require_mention == null ? '跟随全局' : (g.require_mention ? '是' : '否') }}</td>
+            <td>{{ g.mention_first_only == null ? '跟随全局' : (g.mention_first_only ? '是' : '否') }}</td>
+            <td>{{ g.trigger_keywords == null ? '跟随全局' : (g.trigger_keywords.length ? g.trigger_keywords.join(', ') : '禁用') }}</td>
             <td>
               <button @click="editGroup(g)" class="row-btn">编辑</button>
               <button @click="removeGroup(g.group_id)" class="row-btn danger">删除</button>
@@ -886,7 +923,7 @@ function resetHint() {
 
         <label>
           群号
-          <input v-model="editingGroup.group_id" :disabled="!!groups.find(g => g.group_id === editingGroup?.group_id)" placeholder="输入群号" />
+          <input v-model="editingGroup.group_id" :disabled="editingExistingGroup" placeholder="输入群号" />
         </label>
         <label>
           群名
@@ -917,13 +954,16 @@ function resetHint() {
 
         <label>
           触发关键词模式
-          <select v-model="editingGroup.trigger_keywords">
-            <option :value="null">跟随全局</option>
-            <option :value="[]">自定义（见下）</option>
+          <select
+            :value="editingGroup.trigger_keywords == null ? 'global' : 'custom'"
+            @change="setTriggerKeywordsMode(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="global">跟随全局</option>
+            <option value="custom">自定义（见下）</option>
           </select>
         </label>
 
-        <label v-if="editingGroup.trigger_keywords !== null">
+        <label v-if="editingGroup.trigger_keywords != null">
           关键词列表（回车添加）
           <div class="tag-input-container">
             <span v-for="(kw, i) in editingGroup.trigger_keywords" :key="i" class="tag">
@@ -1027,12 +1067,12 @@ function resetHint() {
         <label class="checkbox-row">
           <input
             type="checkbox"
-            :checked="editingGroup.group_rate_limit_messages !== null"
+            :checked="editingGroup.group_rate_limit_messages != null"
             @change="toggleGroupRateLimitOverride(($event.target as HTMLInputElement).checked)"
           />
           <span>覆盖全局群聊限流配置</span>
         </label>
-        <template v-if="editingGroup.group_rate_limit_messages !== null">
+        <template v-if="editingGroup.group_rate_limit_messages != null">
           <label>算法
             <select v-model="editingGroup.group_rate_limit_algorithm">
               <option value="sliding_window">滑动窗口</option>
