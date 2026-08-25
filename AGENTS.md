@@ -117,7 +117,8 @@ Hermes → OneBot 发送路径上的文本过滤，实现于 `outbound_filter.py
 - 适配器总开关关闭(``event_queue_enabled=False``)：直接广播，不排队
 - 以上条件全部不满足(共享 + 开关开)：
   - 群未 busy → 标记 busy（记录 user_id + 时间戳），广播
-  - 群 busy → **一律入队** `self._queues[gid]`（FIFO,包括 busy 用户自身）
+  - 群 busy 且发送者 == 当前 busy 用户且队列为空 → 直接广播（刷新 busy 时间戳，不入队）
+  - 群 busy 其他情况 → 入队 `self._queues[gid]`（FIFO,包括 busy 用户自身；队列非空时 busy 用户也不能插队）
   - 出队时连续同用户消息自动合并为一条（`\n\n` 拼接 text）
 - `/` 开头的消息：**始终绕过排队直接广播**（与 ring buffer 跳过 /command 同思路）
 - `/new`、`/reset`：`event_queue_clear_on_session_reset=true`（默认）时先清空当前群待处理队列，再广播给 Hermes；不影响当前 busy turn

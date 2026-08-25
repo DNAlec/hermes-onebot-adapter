@@ -565,8 +565,9 @@ class HermesRelayServer:
         - 适配器排队总开关打开(``event_queue_enabled=True``)
         - 非 /命令(/命令绕过排队,与 ring buffer 同思路)
 
-        排队规则:群未 busy → 标记 busy 并广播;群 busy → 一律入队 FIFO
-        (包括 busy 用户自身,不再放行同用户消息)。
+        排队规则:群未 busy → 标记 busy 并广播;群 busy 时若发送者就是
+        当前 busy 用户且队列为空 → 直接广播(刷新 busy 时间戳,不入队);
+        否则一律入队 FIFO(含 busy 用户自身,避免插队)。
 
         Returns ``"broadcast"``, ``"queued"``, ``"handled"`` or ``"dropped"`` (see push_event).
         """
@@ -615,8 +616,19 @@ class HermesRelayServer:
                     self._busy_groups.pop(gid, None)
                     self._schedule_group_lock_cleanup(gid)
                 return result
-            # Group busy — enqueue (all users, including the busy user).
+            # Group busy.
             busy_user_id, _ = busy
+            q = self._queues.get(gid)
+            if event.user_id == busy_user_id and not q:
+                # Same sender, nothing waiting: deliver now instead of
+                # queueing behind the in-flight turn.  Refresh the busy
+                # timestamp so the watchdog follows the latest follow-up.
+                self._busy_groups[gid] = (busy_user_id, time.monotonic())
+                logger.info(
+                    "relay same-user bypass: gid=%s busy_user=%s delivery_id=%s text_len=%d",
+                    gid, busy_user_id, event.delivery_id, len(event.text or ""),
+                )
+                return await self._broadcast_with_status(event)
             q = self._queues.setdefault(gid, deque())
             cap = self._config.event_queue_max_per_chat
             if len(q) >= cap:

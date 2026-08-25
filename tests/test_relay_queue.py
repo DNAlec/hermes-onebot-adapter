@@ -6,7 +6,7 @@
 
 测试覆盖:
 - DM 直接放行 / per_user=True 不排队 / event_queue_enabled=False 不排队
-- shared 群聊 busy 时任何用户(含 busy 用户自身)都入队
+- shared 群聊 busy 时:同用户且队列空则直接广播;否则入队(含 busy 用户,队列非空时不插队)
 - 连续同用户消息出队时合并为一条
 - /命令绕过排队
 - idle 帧 dequeue + dispatch
@@ -138,18 +138,37 @@ async def test_shared_group_first_message_marks_busy():
     assert since > 0
 
 
-async def test_shared_group_busy_same_user_enqueues():
-    """busy 时同人新消息也入队,不再放行。"""
+async def test_shared_group_busy_same_user_empty_queue_bypasses():
+    """busy 且队列为空时,同一发送者的新消息直接广播,不入队。"""
     relay, _, _ = _make_relay()
     relay._broadcast_event = AsyncMock()
     await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    busy_user, since = relay._busy_groups["42"]
+    relay._busy_groups["42"] = (busy_user, since - 10)
     ev2 = _group_event("msg2", gid="42", uid="100", mid="2")
     result = await relay._enqueue_or_broadcast(ev2)
+    assert result == "broadcast"
+    assert relay._broadcast_event.await_count == 2
+    relay._broadcast_event.assert_awaited_with(ev2)
+    assert not relay._queues.get("42")
+    assert "42" in relay._busy_groups
+    assert relay._busy_groups["42"][0] == "100"
+    assert relay._busy_groups["42"][1] > since - 10
+
+
+async def test_shared_group_busy_same_user_nonempty_queue_enqueues():
+    """队列已有等待消息时, busy 用户不能插队,仍入队。"""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    ev3 = _group_event("msg3", gid="42", uid="100", mid="3")
+    result = await relay._enqueue_or_broadcast(ev3)
     assert result == "queued"
-    assert relay._broadcast_event.await_count == 1  # only msg1 broadcast
-    assert "42" in relay._queues
-    assert len(relay._queues["42"]) == 1
-    assert relay._queues["42"][0].user_id == "100"
+    assert relay._broadcast_event.await_count == 1
+    q = relay._queues["42"]
+    assert [e.user_id for e in q] == ["200", "100"]
+    assert [e.text for e in q] == ["msg2", "msg3"]
 
 
 async def test_shared_group_busy_different_user_enqueues():
