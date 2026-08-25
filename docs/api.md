@@ -1218,7 +1218,8 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | Hermes 隔离群成员（per_user=True） | 直接转发，不排队 |
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
-| 群 busy | 入队等待（含 busy 用户自身）；出队时连续同用户消息合并为一条 |
+| 群 busy，发送者相同且队列为空 | 直接转发（刷新 busy 时间戳，不入队） |
+| 群 busy（其他情况） | 入队等待（含 busy 用户自身；队列非空时 busy 用户也不能插队）；出队时连续同用户消息合并为一条 |
 | `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
 | `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
 | 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
