@@ -396,6 +396,47 @@ async def test_parser_command_filter_no_is_known_fn_treats_as_unknown():
     assert isinstance(result, FilteredEvent)
 
 
+async def test_parser_command_detected_without_strip_mention():
+    """@bot /cmd is still a command when strip_first_mention is False."""
+    cfg = AdapterConfig(
+        command_filter_enabled=True,
+        command_filter_unknown=True,
+        group_strip_first_mention=False,
+        group_require_mention=True,
+    )
+    result = await parser.parse_event(
+        _group_cmd_event("/foobar"),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert isinstance(result, FilteredEvent)
+    assert result.command_name == "foobar"
+
+
+async def test_denied_command_replies_to_the_command_message():
+    cfg = AdapterConfig(
+        command_filter_enabled=True,
+        command_permissions={"kick": COMMAND_PERM_DISABLED},
+        group_require_mention=False,
+    )
+    segs = [
+        {"type": "reply", "data": {"id": "50"}},
+        {"type": "text", "data": {"text": "/kick"}},
+    ]
+    result = await parser.parse_event(
+        _group_cmd_event("/kick", mention=False, segments=segs, message_id=77),
+        self_id="999",
+        group_require_mention=False,
+        config=cfg,
+        is_known_command_fn=MagicMock(return_value=True),
+        canonical_command_name_fn=MagicMock(return_value="kick"),
+    )
+    assert isinstance(result, FilteredEvent)
+    assert result.message_id == "77"
+    assert result.reply_to_message_id == "77"
+
+
 async def test_parser_command_filter_non_command_passthrough():
     """Non-/command messages are not affected by the filter."""
     cfg = AdapterConfig(

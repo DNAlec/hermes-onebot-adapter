@@ -149,7 +149,6 @@ class HermesRelayServer:
         onebot_connected_fn: Callable[[], bool],
         on_connect: Callable[[], Any] | None = None,
         on_disconnect: Callable[[], Any] | None = None,
-        on_filtered: Callable[[Any], Any] | None = None,
         on_dispatch: Callable[[NormalizedEvent], Awaitable[None]] | None = None,
         seq_map: SeqMap | None = None,
         name_resolver: NameResolver | None = None,
@@ -161,7 +160,6 @@ class HermesRelayServer:
         self._onebot_connected_fn = onebot_connected_fn
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
-        self._on_filtered = on_filtered
         self._on_dispatch = on_dispatch
         self._seq_map = seq_map
         self._name_resolver = name_resolver
@@ -193,8 +191,10 @@ class HermesRelayServer:
         # 排队生效条件:per_user=False AND config.event_queue_enabled=True
         self._hermes_group_sessions_per_user: bool = True
         self._busy_groups: dict[str, tuple[str, float]] = {}
+        self._busy_inflight: dict[str, int] = {}
         self._queues: dict[str, deque[NormalizedEvent]] = {}
         self._group_locks: dict[str, asyncio.Lock] = {}
+        self._event_push_lock = asyncio.Lock()
         self._watchdog_task: asyncio.Task[None] | None = None
         # Limit concurrent OneBot API send calls to prevent NapCat WS
         # serialization from inflating latency past _RESULT_TIMEOUT.
@@ -228,6 +228,7 @@ class HermesRelayServer:
                     len(self._busy_groups),
                 )
             self._busy_groups.clear()
+            self._busy_inflight.clear()
             self._queues.clear()
         # 插件运行时配置变化:广播 fresh ready 让插件实时切换。
         # broadcast_self_id 复用 ready 帧机制,这里用新 config 广播。
@@ -312,6 +313,7 @@ class HermesRelayServer:
                         len(self._busy_groups),
                     )
                 self._busy_groups.clear()
+                self._busy_inflight.clear()
                 self._queues.clear()
 
     def _store_plugin_version(self, plugin_version: str) -> None:
@@ -393,6 +395,7 @@ class HermesRelayServer:
                 logger.warning("relay: watchdog task raised on cancel", exc_info=True)
             self._watchdog_task = None
         self._busy_groups.clear()
+        self._busy_inflight.clear()
         self._queues.clear()
 
     async def broadcast_commands_refresh(self) -> None:
@@ -516,6 +519,7 @@ class HermesRelayServer:
                         len(self._busy_groups),
                     )
                 self._busy_groups.clear()
+                self._busy_inflight.clear()
                 self._queues.clear()
                 self._plugin_version = None
                 self._version_mismatch = True
@@ -544,17 +548,18 @@ class HermesRelayServer:
         # Skip slash commands from the ring buffer — control commands like
         # /restart, /stop, /update must not be replayed to a reconnecting
         # plugin, otherwise they create an infinite restart loop.
-        if not event.delivery_id:
-            event.delivery_id = uuid.uuid4().hex
-        if not event.delivery_ids:
-            event.delivery_ids = [event.delivery_id]
-        logger.debug(
-            "relay push: chat_id=%s message_id=%s delivery_id=%s clients=%d text_len=%d",
-            event.chat_id, event.message_id, event.delivery_id, len(self._clients), len(event.text or ""),
-        )
-        if not (event.text or "").startswith("/"):
-            self._ring_buffer.append((time.monotonic(), event))
-        return await self._enqueue_or_broadcast(event)
+        async with self._event_push_lock:
+            if not event.delivery_id:
+                event.delivery_id = uuid.uuid4().hex
+            if not event.delivery_ids:
+                event.delivery_ids = [event.delivery_id]
+            logger.debug(
+                "relay push: chat_id=%s message_id=%s delivery_id=%s clients=%d text_len=%d",
+                event.chat_id, event.message_id, event.delivery_id, len(self._clients), len(event.text or ""),
+            )
+            if not (event.text or "").startswith("/"):
+                self._ring_buffer.append((time.monotonic(), event))
+            return await self._enqueue_or_broadcast(event)
 
     async def _enqueue_or_broadcast(self, event: NormalizedEvent) -> str:
         """Apply the per-chat queue policy then broadcast.
@@ -591,8 +596,10 @@ class HermesRelayServer:
                 and self._config.event_queue_clear_on_session_reset
             ):
                 await self._clear_group_queue(gid)
+            busy_marker = None
+            async with self._get_group_lock(gid):
+                busy_marker = self._busy_groups.get(gid)
             result = await self._broadcast_with_status(event)
-            busy_marker = self._busy_groups.get(gid)
             if result == "broadcast" and command in self._INTERRUPT_COMMANDS and busy_marker is not None:
                 task = asyncio.create_task(self._delayed_stop_cleanup(gid, busy_marker))
                 self._text_tasks.add(task)
@@ -608,12 +615,14 @@ class HermesRelayServer:
             if busy is None:
                 # Idle — claim the group and broadcast immediately.
                 self._busy_groups[gid] = (event.user_id, time.monotonic())
+                self._busy_inflight[gid] = 1
                 self._ensure_watchdog()
                 result = await self._broadcast_with_status(event)
                 if result == "dropped":
                     # No client received the event — roll back the busy claim so
                     # the next message (or reconnect replay) can try again.
                     self._busy_groups.pop(gid, None)
+                    self._busy_inflight.pop(gid, None)
                     self._schedule_group_lock_cleanup(gid)
                 return result
             # Group busy.
@@ -623,12 +632,22 @@ class HermesRelayServer:
                 # Same sender, nothing waiting: deliver now instead of
                 # queueing behind the in-flight turn.  Refresh the busy
                 # timestamp so the watchdog follows the latest follow-up.
+                # Count a second in-flight turn so the first idle does not
+                # dequeue someone else while this follow-up is still running.
                 self._busy_groups[gid] = (busy_user_id, time.monotonic())
+                self._busy_inflight[gid] = self._busy_inflight.get(gid, 1) + 1
                 logger.info(
                     "relay same-user bypass: gid=%s busy_user=%s delivery_id=%s text_len=%d",
                     gid, busy_user_id, event.delivery_id, len(event.text or ""),
                 )
-                return await self._broadcast_with_status(event)
+                result = await self._broadcast_with_status(event)
+                if result == "dropped":
+                    n = self._busy_inflight.get(gid, 1) - 1
+                    if n <= 0:
+                        self._busy_inflight.pop(gid, None)
+                    else:
+                        self._busy_inflight[gid] = n
+                return result
             q = self._queues.setdefault(gid, deque())
             cap = self._config.event_queue_max_per_chat
             if len(q) >= cap:
@@ -681,6 +700,7 @@ class HermesRelayServer:
                 lock is not None
                 and not lock.locked()
                 and gid not in self._busy_groups
+                and gid not in self._busy_inflight
                 and not self._queues.get(gid)
             ):
                 self._group_locks.pop(gid, None)
@@ -759,14 +779,17 @@ class HermesRelayServer:
                 now = time.monotonic()
                 timeout = self._config.event_queue_idle_timeout
                 for gid in list(self._busy_groups.keys()):
-                    busy_user, since = self._busy_groups.get(gid, ("", now))
-                    if now - since < timeout:
-                        continue
-                    logger.warning(
-                        "relay busy watchdog: gid=%s busy_user=%s timeout=%.0fs — force-clearing",
-                        gid, busy_user, now - since,
-                    )
                     async with self._get_group_lock(gid):
+                        busy = self._busy_groups.get(gid)
+                        if busy is None:
+                            continue
+                        busy_user, since = busy
+                        if now - since < timeout:
+                            continue
+                        logger.warning(
+                            "relay busy watchdog: gid=%s busy_user=%s timeout=%.0fs — force-clearing",
+                            gid, busy_user, now - since,
+                        )
                         self._dequeue_and_dispatch(gid)
                     self._schedule_group_lock_cleanup(gid)
             except asyncio.CancelledError:
@@ -792,6 +815,7 @@ class HermesRelayServer:
         buffer replays the recent events from scratch.
         """
         self._busy_groups.pop(gid, None)
+        self._busy_inflight.pop(gid, None)
         if not self._clients:
             # No plugin connected — leave the queue in place; the watchdog
             # will retry on its next sweep once a plugin reconnects.
@@ -840,6 +864,7 @@ class HermesRelayServer:
         if not q:
             self._queues.pop(gid, None)
         self._busy_groups[gid] = (nxt.user_id, time.monotonic())
+        self._busy_inflight[gid] = 1
         self._ensure_watchdog()
         # Schedule the broadcast + on_dispatch as a single tracked task so
         # stop() can cancel it and _on_dispatch only fires when the event
@@ -853,6 +878,7 @@ class HermesRelayServer:
                     current = self._busy_groups.get(gid)
                     if current and current[0] == nxt.user_id:
                         self._busy_groups.pop(gid, None)
+                        self._busy_inflight.pop(gid, None)
                 self._schedule_group_lock_cleanup(gid)
 
         task = asyncio.create_task(_dispatch_nxt())
@@ -896,9 +922,9 @@ class HermesRelayServer:
     async def _handle_idle(self, data: dict[str, Any]) -> None:
         """Handle an ``idle`` frame from the Hermes plugin.
 
-        The plugin fires this via its ``register_post_delivery_callback``
-        hook after a shared-group turn finishes.  We clear the busy slot for
-        the group and dispatch the next queued message (if any).
+        The plugin fires this from ``on_processing_complete`` after a
+        shared-group turn finishes.  We decrement inflight and, when it
+        reaches zero, dispatch the next queued message (if any).
         """
         gid = str(data.get("group_id", ""))
         if not gid:
@@ -919,6 +945,15 @@ class HermesRelayServer:
             if gid not in self._busy_groups:
                 logger.info("relay idle for non-busy gid=%s (already cleared by watchdog/replay/disconnect)", gid)
                 return
+            remaining = self._busy_inflight.get(gid, 1) - 1
+            if remaining > 0:
+                self._busy_inflight[gid] = remaining
+                logger.info(
+                    "relay idle: gid=%s inflight remaining=%d — not dequeuing",
+                    gid, remaining,
+                )
+                return
+            self._busy_inflight.pop(gid, None)
             logger.info("relay idle: gid=%s — dispatching next queued", gid)
             self._dequeue_and_dispatch(gid)
         self._schedule_group_lock_cleanup(gid)
@@ -970,16 +1005,23 @@ class HermesRelayServer:
         the offending entry is purged from the ring buffer and the caller must
         close the now-dirty WebSocket.
         """
-        if not self._ring_buffer:
-            return True
+        async with self._event_push_lock:
+            if not self._ring_buffer:
+                return True
+            return await self._replay_ring_buffer_locked(ws)
+
+    async def _replay_ring_buffer_locked(self, ws: aiohttp.web.WebSocketResponse) -> bool:
         # Clear any leftover queue state from the previous (now-dead) session
         # so the replay rebuilds busy/queue state cleanly from the buffer.
         self._busy_groups.clear()
+        self._busy_inflight.clear()
         self._queues.clear()
         now = time.monotonic()
         cutoff = now - self._RING_BUFFER_MAX_AGE
-        # Iterate over a snapshot: we may purge an entry below.
-        for entry in list(self._ring_buffer):
+        # Snapshot before any concurrent push can append; entries added after
+        # this point are handled by push_event once the replay lock is released.
+        snapshot = list(self._ring_buffer)
+        for entry in snapshot:
             ts, event = entry
             if ts < cutoff:
                 continue
@@ -1112,7 +1154,7 @@ class HermesRelayServer:
                 if dedup_key is not None:
                     self._send_cache[dedup_key] = (time.monotonic(), "")
                     self._maybe_evict_send_cache()
-                self._touch_busy_group(chat_id, is_group)
+                await self._touch_busy_group(chat_id, is_group)
                 await ws.send_json(result_message(req_id, True, data={"filtered": True}))
                 return
 
@@ -1123,7 +1165,7 @@ class HermesRelayServer:
                     if dedup_key is not None:
                         self._send_cache[dedup_key] = (time.monotonic(), "")
                         self._maybe_evict_send_cache()
-                    self._touch_busy_group(chat_id, is_group)
+                    await self._touch_busy_group(chat_id, is_group)
                     await ws.send_json(result_message(req_id, True))
                     return
 
@@ -1155,7 +1197,7 @@ class HermesRelayServer:
             # Hermes 发出的任意消息(send_text / 长任务心跳等)都说明 agent 仍在活跃,
             # 顺便刷新该群 busy 槽的时间戳,防止看门狗误判超时。busy 槽用原始群号
             # 字符串作 key(保留前导零),与 _group_id_of / _handle_idle 保持一致。
-            self._touch_busy_group(chat_id, is_group)
+            await self._touch_busy_group(chat_id, is_group)
             if self._seq_map is not None and is_group and msg_id:
                 task = asyncio.create_task(
                     self._populate_seq_map(str(num_id), msg_id),
@@ -1232,12 +1274,16 @@ class HermesRelayServer:
             else:
                 await self._api.send_private_msg(num_id, caption_segs)
 
-    def _touch_busy_group(self, chat_id: str, is_group: bool) -> None:
+    async def _touch_busy_group(self, chat_id: str, is_group: bool) -> None:
         if not is_group or not chat_id.startswith("group:"):
             return
         raw_gid = chat_id[len("group:"):]
-        if raw_gid in self._busy_groups:
-            busy_user, _ = self._busy_groups[raw_gid]
+        lock = self._get_group_lock(raw_gid)
+        async with lock:
+            busy = self._busy_groups.get(raw_gid)
+            if busy is None:
+                return
+            busy_user, _ = busy
             self._busy_groups[raw_gid] = (busy_user, time.monotonic())
 
     async def _populate_seq_map(self, group_id: str, msg_id: str) -> None:

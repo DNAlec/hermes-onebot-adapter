@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import {
   getHermesTools, putHermesTools, resetHermesTools,
   type ToolsetInfo, type McpServerInfo,
@@ -23,6 +23,10 @@ const checked = ref<Set<string>>(new Set());
 const mcpChecked = ref<Set<string>>(new Set());
 // no_mcp sentinel
 const noMcp = ref(false);
+
+watch(noMcp, (on) => {
+  if (on) mcpChecked.value = new Set();
+});
 
 onMounted(async () => {
   try {
@@ -97,7 +101,7 @@ async function save() {
   msg.value = "";
   try {
     const toolsetsArr = Array.from(checked.value);
-    const mcpArr = Array.from(mcpChecked.value);
+    const mcpArr = noMcp.value ? [] : Array.from(mcpChecked.value);
     const res = await putHermesTools({
       toolsets: toolsetsArr,
       mcp_servers: mcpArr,

@@ -226,7 +226,7 @@ def _login(store: ConfigStore, state: dict[str, Any]):
                 {"error": "webui_token not configured — restart the adapter service to regenerate it"},
                 status=401,
             )
-        if not hmac.compare_digest(token, cfg.webui_token):
+        if not _hmac_equal(token, cfg.webui_token):
             fails, first_ts = failures.get(ip, (0, now))
             failures[ip] = (fails + 1, first_ts)
             audit_logger.warning(
@@ -247,6 +247,14 @@ def _login(store: ConfigStore, state: dict[str, Any]):
         })
 
     return handler
+
+
+def _hmac_equal(left: str, right: str) -> bool:
+    """Constant-time compare that never raises on length or non-ASCII input."""
+    try:
+        return hmac.compare_digest(left, right)
+    except (TypeError, ValueError):
+        return False
 
 
 def _extract_token(request: aiohttp.web.Request) -> str:
@@ -278,7 +286,7 @@ def _verify_session_token(token: str, secret: str, epoch: int, lifetime_hours: i
         return False
     msg = f"{epoch}:{issued_at}".encode()
     expected = hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig, expected)
+    return _hmac_equal(sig, expected)
 
 
 def _make_auth_middleware(store: ConfigStore):
@@ -564,6 +572,10 @@ def _put_config(store: ConfigStore, state: dict[str, Any]):
                     data["webui_token_lifetime_hours"] != store.config.webui_token_lifetime_hours:
                 data["webui_token_epoch"] = store.config.webui_token_epoch + 1
             new_cfg = AdapterConfig.from_dict({**store.config.to_dict(), **data})
+            if "webui_token" in data and (not new_cfg.webui_token or len(new_cfg.webui_token) < 8):
+                return aiohttp.web.json_response(
+                    {"error": "webui_token must be at least 8 characters"}, status=400,
+                )
             errors = new_cfg.validate()
             if errors:
                 return aiohttp.web.json_response({"error": "; ".join(errors)}, status=400)
@@ -723,15 +735,16 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
             # Persist the install dir so subsequent toolset reads / uninstalls
             # use the same path without the user re-entering it in the config page.
             if install_dir and str(target) != cfg.hermes_install_dir:
-                store.patch(hermes_install_dir=str(target))
+                new_cfg = store.config.with_overrides(hermes_install_dir=str(target))
                 save_config(
-                    store.config,
+                    new_cfg,
                     source="webui",
                     reason="plugin.install.persist_directory",
                     actor="authenticated_webui_session",
                     metadata=_config_request_metadata(request, cfg),
                     submitted_fields=["hermes_install_dir"],
                 )
+                store.update(new_cfg)
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin install failed")
@@ -757,15 +770,16 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
             # Persist the resolved install dir so the config reflects where
             # the plugin was managed, matching _install_plugin's behavior.
             if install_dir and str(target) != store.config.hermes_install_dir:
-                store.patch(hermes_install_dir=str(target))
+                new_cfg = store.config.with_overrides(hermes_install_dir=str(target))
                 save_config(
-                    store.config,
+                    new_cfg,
                     source="webui",
                     reason="plugin.uninstall.persist_directory",
                     actor="authenticated_webui_session",
                     metadata=_config_request_metadata(request, store.config),
                     submitted_fields=["hermes_install_dir"],
                 )
+                store.update(new_cfg)
             return aiohttp.web.json_response(result)
         except Exception as exc:
             logger.exception("plugin uninstall failed")

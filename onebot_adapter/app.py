@@ -159,7 +159,6 @@ class AdapterService:
             onebot_connected_fn=self._onebot_connected,
             on_connect=self._on_plugin_connect,
             on_disconnect=self._update_status,
-            on_filtered=self._on_filtered_command,
             on_dispatch=self._maybe_react_delivered,
             seq_map=self._seq_map,
             name_resolver=self._name_resolver,
@@ -686,6 +685,9 @@ class AdapterService:
         for old_val, new_val, label in [
             (old.onebot_reverse_ws_path, new.onebot_reverse_ws_path, "onebot_reverse_ws_path"),
             (old.hermes_ws_path, new.hermes_ws_path, "hermes_ws_path"),
+            (old.onebot_reverse_ws_port, new.onebot_reverse_ws_port, "onebot_reverse_ws_port"),
+            (old.hermes_ws_port, new.hermes_ws_port, "hermes_ws_port"),
+            (old.webui_port, new.webui_port, "webui_port"),
         ]:
             if old_val != new_val:
                 logger.warning(
@@ -700,14 +702,15 @@ class AdapterService:
         for _ in range(10):
             try:
                 info = await self._api.get_login_info()
-                self.store.patch(self_id=str(info.get("user_id", "")))
+                new_cfg = self.store.config.with_overrides(self_id=str(info.get("user_id", "")))
                 save_config(
-                    self.store.config,
+                    new_cfg,
                     source="onebot",
                     reason="onebot.self_id_probe",
                     actor="adapter_service",
                     submitted_fields=["self_id"],
                 )
+                self.store.update(new_cfg)
                 self._self_id_probed = True
                 logger.info("OneBot self_id probed: %s", self.store.config.self_id)
                 # Notify already-connected plugins of the new self_id
@@ -808,12 +811,27 @@ class AdapterService:
         ]
         if not no_webui:
             runner_label_port.append((webui_runner, "WebUI", host, cfg.webui_port, "webui_port"))
+        remapped: dict[str, int] = {}
         for runner, label, hst, port, cfg_key in runner_label_port:
             site = await self._try_port(runner, hst, port, label, 50)
             bindings.append(site)
             if site.port != port:
                 logger.warning("%s port %d busy, using %d instead", label, port, site.port)
-                self.store.patch(**{cfg_key: site.port})
+                remapped[cfg_key] = site.port
+        if remapped:
+            new_cfg = self.store.config.with_overrides(**remapped)
+            try:
+                save_config(
+                    new_cfg,
+                    source="startup",
+                    reason="port_remap",
+                    actor="adapter_service",
+                    submitted_fields=list(remapped),
+                )
+            except Exception:
+                logger.exception("failed to persist remapped listen ports")
+            else:
+                self.store.update(new_cfg)
         cfg = self.store.config
         if not no_webui:
             logger.info("WebUI ready at http://%s:%d", host, cfg.webui_port)

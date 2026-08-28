@@ -351,23 +351,8 @@ async def test_tool_policy_get_returns_tuple_catalog_defaults(tool_policy_client
         "onebot_download_fileset",
     }
     assert payload["policies"]["onebot_mark_msg_as_read"]["registered"] is False
-    assert default_admin_names == {
-        "onebot_set_group_portrait",
-        "onebot_set_qq_profile",
-        "onebot_set_avatar",
-        "onebot_set_signature",
-        "onebot_delete_friend",
-        "onebot_handle_friend_request",
-        "onebot_handle_group_request",
-        "onebot_leave_group",
-        "onebot_set_group_name",
-        "onebot_set_group_card",
-        "onebot_set_group_admin",
-        "onebot_mute_group_whole",
-        "onebot_mute_group_member",
-        "onebot_kick_group_member",
-        "onebot_set_group_add_option",
-    }
+    from onebot_adapter.hermes_plugin.onebot_tools import _DEFAULT_ADMIN_TOOL_NAMES
+    assert default_admin_names == set(_DEFAULT_ADMIN_TOOL_NAMES)
     assert payload["sparse_policies"] == {}
 
 

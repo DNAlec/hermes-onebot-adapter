@@ -14,6 +14,7 @@ ws_reverse / ws_forward 在每条 WS 连接建立/断开时调用 ``register(ws)
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import uuid
@@ -22,6 +23,22 @@ from typing import Any
 from onebot_adapter.logging_utils import safe_json
 
 logger = logging.getLogger(__name__)
+
+# Bound for the duration of one inbound event's parse/dispatch so API calls
+# made while handling that event (get_msg, get_forward_msg, …) go back on
+# the same OneBot WebSocket that delivered it.  Outbound plugin/WebUI calls
+# leave this unset and fall back to _pick_ws().
+_current_request_ws: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "onebot_request_ws", default=None,
+)
+
+
+def bind_request_ws(ws: Any) -> contextvars.Token[Any]:
+    return _current_request_ws.set(ws)
+
+
+def reset_request_ws(token: contextvars.Token[Any]) -> None:
+    _current_request_ws.reset(token)
 
 _DEFAULT_TIMEOUT = 300.0
 
@@ -146,7 +163,10 @@ class WsApiTransport:
     def _pick_ws(self) -> Any:
         if not self._active:
             raise RuntimeError("no active OneBot WS connection for API call")
-        # 取第一个活跃连接（set 迭代顺序不保证，但对单实例部署无影响；多实例场景极少见）
+        current = _current_request_ws.get()
+        if current is not None and current in self._active:
+            return current
+        # 无入站绑定（插件/WebUI 主动调用）时取一条活跃连接。
         return next(iter(self._active))
 
     def _reject_all_pending(self, reason: str) -> None:

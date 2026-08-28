@@ -20,7 +20,7 @@ from onebot_adapter.onebot.log_format import log_dropped_event, log_recv_line
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.parser import parse_event
 from onebot_adapter.onebot.seq_map import SeqMap, seq_map_add
-from onebot_adapter.onebot.ws_api import WsApiTransport
+from onebot_adapter.onebot.ws_api import WsApiTransport, bind_request_ws, reset_request_ws
 from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,22 @@ class OneBotHandler:
         may itself await an API response carried by the same WebSocket.
         """
         return self._ws_api_transport is not None and self._ws_api_transport.on_text(raw)
+
+    def record_inbound_seq(self, raw: str) -> None:
+        """Populate SeqMap on the receive loop, before the bounded event queue.
+
+        Must run even for frames that are later dropped when the queue is full,
+        otherwise ``real_seq`` lookups miss the messages an LLM is most likely
+        to cite under load.
+        """
+        if self._seq_map is None:
+            return
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if isinstance(data, dict) and data.get("post_type") == "message":
+            seq_map_add(self._seq_map, data)
 
     async def handle_event_text(self, raw: str) -> None:
         """Parse and dispatch a frame already known not to be an API response."""
@@ -163,7 +179,7 @@ class OneBotEventDispatcher:
     ) -> None:
         self._handler = handler
         self._label = label
-        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=max_queue_size)
+        self._queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=max_queue_size)
         self._worker: asyncio.Task[None] | None = None
         self._dropped = 0
         self._last_drop_log = 0.0
@@ -176,18 +192,24 @@ class OneBotEventDispatcher:
     def dropped(self) -> int:
         return self._dropped
 
-    def dispatch(self, raw: str) -> bool:
+    def dispatch(self, raw: str, ws: Any = None) -> bool:
         """Handle a response immediately or enqueue an event.
 
         Returns ``False`` only when the bounded event queue is full and the
         event has to be dropped.  The receive loop must remain non-blocking so
         it can continue resolving API responses needed by the active worker.
+
+        *ws* is the connection that carried this frame; parse-time API calls
+        are pinned to it so multi-instance reverse WS does not mix sockets.
         """
         if self._handler.intercept_api_response(raw):
             return True
+        record = getattr(self._handler, "record_inbound_seq", None)
+        if record is not None:
+            record(raw)
         self._ensure_worker()
         try:
-            self._queue.put_nowait(raw)
+            self._queue.put_nowait((raw, ws))
             return True
         except asyncio.QueueFull:
             self._dropped += 1
@@ -210,7 +232,8 @@ class OneBotEventDispatcher:
 
     async def _run(self) -> None:
         while True:
-            raw = await self._queue.get()
+            raw, ws = await self._queue.get()
+            token = bind_request_ws(ws) if ws is not None else None
             try:
                 await self._handler.handle_event_text(raw)
             except asyncio.CancelledError:
@@ -218,6 +241,8 @@ class OneBotEventDispatcher:
             except Exception:
                 logger.exception("OneBot %s event worker failed; continuing", self._label)
             finally:
+                if token is not None:
+                    reset_request_ws(token)
                 self._queue.task_done()
 
     async def stop(self) -> None:

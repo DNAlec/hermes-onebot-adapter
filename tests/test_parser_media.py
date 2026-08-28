@@ -13,6 +13,12 @@ from onebot_adapter.config import MEDIA_DELIVERY_CACHE, AdapterConfig
 from onebot_adapter.onebot import parser
 
 
+async def _parse_event(*args, **kwargs):
+    if "config" not in kwargs:
+        kwargs.setdefault("media_delivery_mode", "passthrough")
+    return await parser.parse_event(*args, **kwargs)
+
+
 def _msg_event(
     segments: list[dict],
     *,
@@ -39,7 +45,7 @@ def _msg_event(
 
 
 async def test_parser_image_url_placeholder():
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "image", "data": {"url": "https://example.com/cat.jpg"}}]),
         self_id="999",
         group_require_mention=True,
@@ -51,7 +57,7 @@ async def test_parser_image_url_placeholder():
 
 async def test_parser_image_fallback_to_file():
     """Image segment without url falls back to data.file as the URL."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "image", "data": {"file": "/local/snap.jpg"}}]),
         self_id="999",
         group_require_mention=True,
@@ -65,7 +71,7 @@ async def test_parser_image_fallback_to_file():
 
 
 async def test_parser_voice_url_placeholder():
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "record", "data": {"url": "https://example.com/voice.silk"}}]),
         self_id="999",
         group_require_mention=True,
@@ -79,7 +85,7 @@ async def test_parser_voice_url_placeholder():
 
 
 async def test_parser_video_url_placeholder():
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "video", "data": {"url": "https://example.com/clip.mp4"}}]),
         self_id="999",
         group_require_mention=True,
@@ -93,7 +99,7 @@ async def test_parser_video_url_placeholder():
 
 
 async def test_parser_file_url_placeholder():
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "file", "data": {"file": "report.pdf", "url": "https://example.com/report.pdf"}}]),
         self_id="999",
         group_require_mention=True,
@@ -105,7 +111,7 @@ async def test_parser_file_url_placeholder():
 
 async def test_parser_file_no_url():
     """File segment with only file_id and no URL → placeholder shows 无URL."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "file", "data": {"file": "doc.zip", "file_id": "abc123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -119,7 +125,7 @@ async def test_parser_file_no_url():
 
 
 async def test_parser_text_and_image_mixed():
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([
             {"type": "text", "data": {"text": "look at this "}},
             {"type": "image", "data": {"url": "https://example.com/pic.jpg"}},
@@ -134,7 +140,7 @@ async def test_parser_text_and_image_mixed():
 
 
 async def test_parser_multiple_images_with_text_between():
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([
             {"type": "image", "data": {"url": "https://example.com/a.jpg"}},
             {"type": "text", "data": {"text": " and "}},
@@ -163,7 +169,7 @@ async def test_parser_reply_with_image():
         "real_seq": "10",
     }
     mock_api.get_msg = AsyncMock(return_value=quoted)
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([
             {"type": "reply", "data": {"id": "555"}},
             {"type": "text", "data": {"text": "reply"}},
@@ -192,7 +198,7 @@ async def test_parser_reply_with_multiple_images():
         "real_seq": "10",
     }
     mock_api.get_msg = AsyncMock(return_value=quoted)
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([
             {"type": "reply", "data": {"id": "555"}},
             {"type": "text", "data": {"text": "ok"}},
@@ -228,7 +234,7 @@ async def test_parser_forward_with_image():
             },
         ],
     })
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "forward", "data": {"id": "fwd123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -264,7 +270,7 @@ async def test_parser_forward_with_multiple_media_types():
             },
         ],
     })
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "forward", "data": {"id": "fwd123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -308,7 +314,7 @@ async def test_parser_nested_forward_inline_content():
             },
         ],
     })
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "forward", "data": {"id": "fwd123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -354,7 +360,7 @@ async def test_parser_nested_forward_inline_content_3levels():
             },
         ],
     })
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "forward", "data": {"id": "fwd123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -393,7 +399,7 @@ async def test_parser_forward_depth_limit_inline():
             },
         ],
     })
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "forward", "data": {"id": "fwd123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -426,7 +432,7 @@ async def test_parser_reply_with_forward():
             },
         ],
     })
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([
             {"type": "reply", "data": {"id": "555"}},
             {"type": "text", "data": {"text": "re"}}
@@ -455,7 +461,7 @@ def _config_with_cache() -> AdapterConfig:
 
 async def test_parser_cache_image_no_url_in_placeholder():
     """In cache mode, image placeholders omit the URL but media_items is populated."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "image", "data": {"url": "https://example.com/cat.jpg"}}]),
         self_id="999",
         group_require_mention=True,
@@ -472,7 +478,7 @@ async def test_parser_cache_image_no_url_in_placeholder():
 
 async def test_parser_cache_voice_populates_media_items():
     """In cache mode, voice segments populate media_items."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "record", "data": {"url": "https://example.com/voice.silk"}}]),
         self_id="999",
         group_require_mention=True,
@@ -487,7 +493,7 @@ async def test_parser_cache_voice_populates_media_items():
 
 async def test_parser_cache_video_populates_media_items():
     """In cache mode, video segments populate media_items."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "video", "data": {"url": "https://example.com/clip.mp4"}}]),
         self_id="999",
         group_require_mention=True,
@@ -502,7 +508,7 @@ async def test_parser_cache_video_populates_media_items():
 
 async def test_parser_cache_file_with_url():
     """In cache mode, file segments with URL populate media_items with file info."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "file", "data": {"file": "report.pdf", "url": "https://example.com/report.pdf"}}]),
         self_id="999",
         group_require_mention=True,
@@ -519,7 +525,7 @@ async def test_parser_cache_file_with_url():
 
 async def test_parser_cache_file_no_url_skipped():
     """In cache mode, file segments without URL are skipped (no media_item)."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "file", "data": {"file": "doc.zip", "file_id": "abc123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -534,7 +540,7 @@ async def test_parser_cache_file_no_url_skipped():
 
 async def test_parser_cache_mixed_media_indices():
     """In cache mode, mixed media types get correct indices in media_items."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([
             {"type": "text", "data": {"text": "look "}},
             {"type": "image", "data": {"url": "https://example.com/a.jpg"}},
@@ -566,7 +572,7 @@ async def test_parser_cache_reply_populates_media_items():
         "real_seq": "10",
     }
     mock_api.get_msg = AsyncMock(return_value=quoted)
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([
             {"type": "reply", "data": {"id": "555"}},
             {"type": "text", "data": {"text": "reply"}},
@@ -597,7 +603,7 @@ async def test_parser_cache_forward_populates_media_items():
             },
         ],
     })
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "forward", "data": {"id": "fwd123"}}]),
         self_id="999",
         group_require_mention=True,
@@ -614,7 +620,7 @@ async def test_parser_cache_forward_populates_media_items():
 
 async def test_parser_passthrough_no_media_items():
     """In passthrough mode (default), media_items is empty."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "image", "data": {"url": "https://example.com/cat.jpg"}}]),
         self_id="999",
         group_require_mention=True,
@@ -627,7 +633,7 @@ async def test_parser_passthrough_no_media_items():
 
 async def test_parser_cache_mode_to_dict_includes_media_items():
     """NormalizedEvent.to_dict serializes media_items."""
-    result = await parser.parse_event(
+    result = await _parse_event(
         _msg_event([{"type": "image", "data": {"url": "https://example.com/cat.jpg"}}]),
         self_id="999",
         group_require_mention=True,

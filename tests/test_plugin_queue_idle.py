@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,35 +13,32 @@ def _make_adapter() -> plugin_adapter.OneBotAdapter:
         "thread_sessions_per_user": False,
     }
     adapter._ws = MagicMock(closed=False)
-    adapter.register_post_delivery_callback = MagicMock()
+    adapter._ws.send_json = AsyncMock()
+    adapter._send_idle = AsyncMock()
     return adapter
 
 
-def test_shared_group_message_registers_idle_callback(monkeypatch):
+def _event(chat_id: str, text: str) -> MagicMock:
+    event = MagicMock()
+    event.source.chat_id = chat_id
+    event.text = text
+    return event
+
+
+async def test_shared_group_message_fires_idle_on_processing_complete():
     adapter = _make_adapter()
-    monkeypatch.setattr(plugin_adapter, "_BASE_AVAILABLE", True)
-    monkeypatch.setattr(plugin_adapter, "SessionSource", object)
-    monkeypatch.setattr(plugin_adapter, "build_session_key", lambda *args, **kwargs: "onebot:group:42")
-
-    adapter._maybe_register_idle_callback(
-        {"chat_id": "group:42", "text": "hello"},
-        MagicMock(),
-    )
-
-    adapter.register_post_delivery_callback.assert_called_once()
+    await adapter.on_processing_complete(_event("group:42", "hello"))
+    adapter._send_idle.assert_awaited_once_with("group:42")
 
 
 @pytest.mark.parametrize("command", ["/stop", "/new", "/reset", "/status"])
-def test_slash_command_does_not_register_idle_callback(command, monkeypatch):
+async def test_slash_command_does_not_fire_idle(command):
     adapter = _make_adapter()
-    monkeypatch.setattr(plugin_adapter, "_BASE_AVAILABLE", True)
-    monkeypatch.setattr(plugin_adapter, "SessionSource", object)
-    monkeypatch.setattr(plugin_adapter, "build_session_key", MagicMock())
+    await adapter.on_processing_complete(_event("group:42", command))
+    adapter._send_idle.assert_not_called()
 
-    adapter._maybe_register_idle_callback(
-        {"chat_id": "group:42", "text": command},
-        MagicMock(),
-    )
 
-    plugin_adapter.build_session_key.assert_not_called()
-    adapter.register_post_delivery_callback.assert_not_called()
+async def test_dm_does_not_fire_idle():
+    adapter = _make_adapter()
+    await adapter.on_processing_complete(_event("100", "hello"))
+    adapter._send_idle.assert_not_called()

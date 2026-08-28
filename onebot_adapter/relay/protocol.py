@@ -188,7 +188,7 @@ def ready_message(
     onebot_connected: bool,
     adapter_version: str,
     self_id: str = "",
-    media_delivery_mode: str = "passthrough",
+    media_delivery_mode: str = "cache",
     file_upload_timeout: float = 600.0,
 ) -> dict[str, Any]:
     return envelope(
