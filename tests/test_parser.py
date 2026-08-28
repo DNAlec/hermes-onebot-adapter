@@ -278,6 +278,7 @@ async def test_parse_image_url_placeholder():
         _msg_event("", segments=[{"type": "image", "data": {"url": "http://x/img.png"}}], user_id=100),
         self_id="999",
         group_require_mention=True,
+        media_delivery_mode="passthrough",
     )
     assert result is not None
     event = result
@@ -296,6 +297,7 @@ async def test_parse_reply_with_image():
         self_id="999",
         group_require_mention=True,
         api=mock_api,
+        media_delivery_mode="passthrough",
     )
     assert result is not None
     event = result
@@ -1245,6 +1247,42 @@ async def test_notice_member_change_per_group_override():
     )
     assert result is not None
     assert result.is_system_notice is True
+
+
+async def test_notice_skipped_when_group_disabled():
+    from onebot_adapter.config import AdapterConfig, GroupConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+        groups={"42": GroupConfig(group_id="42", enabled=False).to_dict()},
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=42),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is None
+
+
+async def test_notice_poke_group_id_zero_is_dm():
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+        dm_user_filter_mode="blacklist",
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=0),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert result is not None
+    assert result.chat_type == "dm"
+    assert result.chat_id == "100"
 
 
 async def test_notice_unhandled_type_ignored():

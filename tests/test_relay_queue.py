@@ -154,6 +154,28 @@ async def test_shared_group_busy_same_user_empty_queue_bypasses():
     assert "42" in relay._busy_groups
     assert relay._busy_groups["42"][0] == "100"
     assert relay._busy_groups["42"][1] > since - 10
+    assert relay._busy_inflight["42"] == 2
+
+
+async def test_same_user_bypass_idle_waits_for_all_inflight_turns():
+    """Bypass increments inflight so the first idle does not dequeue the next user."""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("followup", gid="42", uid="100", mid="2"))
+    await relay._enqueue_or_broadcast(_group_event("other", gid="42", uid="200", mid="3"))
+    assert relay._busy_inflight["42"] == 2
+    assert [e.user_id for e in relay._queues["42"]] == ["200"]
+
+    await relay._handle_idle({"group_id": "42"})
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 2
+    assert relay._busy_groups["42"][0] == "100"
+    assert [e.user_id for e in relay._queues["42"]] == ["200"]
+
+    await relay._handle_idle({"group_id": "42"})
+    await asyncio.sleep(0)
+    assert relay._busy_groups["42"][0] == "200"
 
 
 async def test_shared_group_busy_same_user_nonempty_queue_enqueues():

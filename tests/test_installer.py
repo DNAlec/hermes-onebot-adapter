@@ -133,6 +133,16 @@ def test_uninstall_preserves_other_env_vars(tmp_path):
     assert "ONEBOT_ADAPTER_URL" not in content
 
 
+def test_uninstall_preserves_quoted_env_values(tmp_path):
+    env = tmp_path / "hermes" / ".env"
+    env.parent.mkdir(parents=True)
+    env.write_text('OTHER_VAR="value with # hash"\nONEBOT_ADAPTER_TOKEN=tok\n')
+    installer.uninstall(str(tmp_path / "hermes"))
+    content = env.read_text()
+    assert 'OTHER_VAR="value with # hash"' in content
+    assert "ONEBOT_ADAPTER_TOKEN" not in content
+
+
 # ── _write_env quoting + atomic write ──────────────────────────────────────
 
 

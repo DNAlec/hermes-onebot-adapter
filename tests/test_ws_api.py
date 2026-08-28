@@ -18,7 +18,7 @@ from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot import api as api_module
 from onebot_adapter.onebot.api import OneBotApi, UploadOutcomeUnknownError
 from onebot_adapter.onebot.log_format import PREVIEW_LOGGER_NAME
-from onebot_adapter.onebot.ws_api import WsApiTransport
+from onebot_adapter.onebot.ws_api import WsApiTransport, bind_request_ws, reset_request_ws
 
 
 def _make_ws() -> MagicMock:
@@ -284,6 +284,25 @@ async def test_unregister_rejects_only_that_ws_pending():
     t.unregister(ws1)
     with pytest.raises(ConnectionError):
         await task1
+
+
+async def test_request_uses_bound_inbound_ws():
+    t = WsApiTransport()
+    ws1 = _make_ws()
+    ws2 = _make_ws()
+    t.register(ws1)
+    t.register(ws2)
+    token = bind_request_ws(ws2)
+    try:
+        task = asyncio.create_task(t.request("get_login_info", {}, timeout=2))
+        await asyncio.sleep(0.01)
+        assert ws2.send_json.await_count == 1
+        echo = ws2.send_json.await_args.args[0]["echo"]
+        assert t.on_text(json.dumps({"echo": echo, "retcode": 0, "data": {"user_id": 1}}))
+        data = await task
+        assert data["retcode"] == 0
+    finally:
+        reset_request_ws(token)
 
 
 # ── OneBotApi on top of WsApiTransport ──────────────────────────────

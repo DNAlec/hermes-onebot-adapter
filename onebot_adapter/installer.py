@@ -86,6 +86,21 @@ def _read_env(env_path: Path) -> dict[str, str]:
     return env
 
 
+def _persist_env(env_path: Path, env: dict[str, str]) -> None:
+    """Atomically write a full env mapping with the same quoting as ``_write_env``."""
+    lines: list[str] = []
+    for k, v in env.items():
+        if v and any(c in v for c in (" ", "\t", "'", '"', "#", "$", "\\")):
+            escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'{k}="{escaped}"')
+        else:
+            lines.append(f"{k}={v}")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, env_path)
+
+
 def _write_env(env_path: Path, updates: dict[str, str]) -> dict[str, str]:
     """Merge *updates* into an existing env file and persist atomically.
 
@@ -96,22 +111,7 @@ def _write_env(env_path: Path, updates: dict[str, str]) -> dict[str, str]:
     """
     env = _read_env(env_path)
     env.update(updates)
-    lines: list[str] = []
-    for k, v in env.items():
-        # Quote values that contain spaces or special shell characters to
-        # ensure correct dotenv parsing. Values without special chars are
-        # written bare for readability.
-        if v and any(c in v for c in (" ", "\t", "'", '"', "#", "$", "\\")):
-            # Escape backslashes first (dotenv interprets \ as escape in
-            # double-quoted strings), then escape any embedded double quotes.
-            escaped = v.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'{k}="{escaped}"')
-        else:
-            lines.append(f"{k}={v}")
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.replace(tmp, env_path)
+    _persist_env(env_path, env)
     return env
 
 
@@ -269,9 +269,8 @@ def uninstall(install_dir: str | None = None) -> dict:
             del env[key]
             removed_any = True
     if removed_any:
-        lines = [f"{k}={v}" for k, v in env.items()]
-        if lines:
-            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if env:
+            _persist_env(env_path, env)
         else:
             env_path.unlink(missing_ok=True)
         result["env_cleaned"] = True

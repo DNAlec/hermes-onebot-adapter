@@ -81,6 +81,11 @@ try:
         cache_image_from_url,
         cache_video_from_bytes,
     )
+    try:
+        from gateway.platforms.base import cache_audio_from_bytes, cache_image_from_bytes
+    except ImportError:
+        cache_image_from_bytes = None  # type: ignore[assignment]
+        cache_audio_from_bytes = None  # type: ignore[assignment]
     from gateway.session import SessionSource, build_session_key
     _BASE_AVAILABLE = True
 except ImportError:
@@ -96,6 +101,8 @@ except ImportError:
     cache_audio_from_url = None  # type: ignore[assignment]
     cache_video_from_bytes = None  # type: ignore[assignment]
     cache_document_from_bytes = None  # type: ignore[assignment]
+    cache_image_from_bytes = None  # type: ignore[assignment]
+    cache_audio_from_bytes = None  # type: ignore[assignment]
 
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
@@ -168,7 +175,21 @@ def _ext_from_url(url: str, fallback: str = "") -> str:
 _DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB hard cap on media downloads
 
 
-async def _download_url_bytes(url: str) -> bytes:
+async def _cache_url_or_bytes(url: str, ext: str, from_url, from_bytes) -> str:
+    """Try the host URL helper first; fall back to a private-LAN download."""
+    if from_url is not None:
+        try:
+            return await from_url(url, ext=ext)
+        except Exception:
+            if from_bytes is None:
+                raise
+    if from_bytes is None:
+        raise RuntimeError("no cache helper available")
+    data = await _download_url_bytes(url, allow_private=True)
+    return from_bytes(data, ext)
+
+
+async def _download_url_bytes(url: str, *, allow_private: bool = False) -> bytes:
     """Download bytes from a URL with SSRF protection + size limit.
 
     Uses aiohttp with a 30s timeout and follows redirects.  Raises
@@ -176,15 +197,20 @@ async def _download_url_bytes(url: str) -> bytes:
     the host's ``is_safe_url`` check when available, else a minimal guard).
     Raises ``ValueError`` if the response exceeds ``_DOWNLOAD_MAX_BYTES``
     to prevent OOM from malicious or misconfigured media URLs.
+
+    *allow_private* permits loopback/RFC1918 hosts used by NapCat's local
+    file server. Link-local / metadata addresses stay blocked.
     """
-    # Try the host's SSRF guard first — it knows the full private-range list.
-    try:
-        from tools.url_safety import is_safe_url  # type: ignore[import-untyped]
-        if not is_safe_url(url):
-            raise ValueError(f"Blocked unsafe URL (SSRF protection): {url[:80]}")
-    except ImportError:
-        # tools.url_safety not available — fall back to a basic private-IP guard.
-        _basic_ssrf_guard(url)
+    if allow_private:
+        _onebot_media_url_guard(url)
+    else:
+        # Try the host's SSRF guard first — it knows the full private-range list.
+        try:
+            from tools.url_safety import is_safe_url  # type: ignore[import-untyped]
+            if not is_safe_url(url):
+                raise ValueError(f"Blocked unsafe URL (SSRF protection): {url[:80]}")
+        except ImportError:
+            _basic_ssrf_guard(url)
 
     timeout = aiohttp.ClientTimeout(total=30.0)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -268,6 +294,27 @@ def _basic_ssrf_guard(url: str) -> None:
         raise ValueError(f"Blocked CGN IP (SSRF protection): {url[:80]}")
 
 
+def _onebot_media_url_guard(url: str) -> None:
+    """Allow NapCat loopback/LAN file URLs while still blocking metadata IPs."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Blocked non-HTTP URL: {url[:80]}")
+    host = (parsed.hostname or "").strip("[]")
+    if not host or host == "localhost":
+        return
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if ip.is_link_local or ip.is_unspecified or ip.is_reserved:
+        raise ValueError(f"Blocked link-local/metadata IP: {url[:80]}")
+    if ip.version == 4 and ip in ipaddress.ip_network("169.254.0.0/16"):
+        raise ValueError(f"Blocked link-local IP: {url[:80]}")
+
+
 def _read_plugin_version() -> str:
     try:
         text = _PLUGIN_YAML_PATH.read_text(encoding="utf-8")
@@ -324,7 +371,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._send_semaphore = asyncio.Semaphore(_MAX_INFLIGHT_SENDS)
         self._onebot_connected = False
         self._self_id = ""
-        self._media_delivery_mode = "passthrough"
+        self._media_delivery_mode = "cache"
         self._file_upload_timeout = _DEFAULT_FILE_UPLOAD_TIMEOUT
         self._plugin_version = _read_plugin_version()
         self._completed_deliveries: dict[str, None] = {}
@@ -570,7 +617,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if mtype == "ready":
             self._onebot_connected = data.get("onebot_connected", False)
             self._self_id = data.get("self_id", "")
-            self._media_delivery_mode = data.get("media_delivery_mode", "passthrough")
+            self._media_delivery_mode = data.get("media_delivery_mode", "cache")
             self._file_upload_timeout = float(
                 data.get("file_upload_timeout", _DEFAULT_FILE_UPLOAD_TIMEOUT)
             )
@@ -697,7 +744,9 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # 群聊排队:shared 群聊(group:<gid> 无 :user: 且 Hermes group_sessions_per_user=False)
         # 才注册 post_delivery callback,处理完后发 idle 帧给适配器,适配器 dequeue 下一条。
         # per_user 群聊 / 私聊 / Hermes per_user 隔离时不注册(无需排队)。
-        self._maybe_register_idle_callback(data, message_event)
+        # Idle is fired from on_processing_complete after the turn finishes.
+        # register_post_delivery_callback(generation=None) is ignored by
+        # Hermes when it pops with a run generation.
         # Dispatch handle_message as a background task so the receive loop is
         # NOT blocked.  Previously this was ``await self.handle_message(...)``
         # which deadlocked when handle_message hit the bypass-active-session
@@ -782,6 +831,45 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         except Exception:
             logger.warning("OneBot: event ack send failed", exc_info=True)
 
+    async def on_processing_complete(self, event, outcome=None, *args, **kwargs) -> None:
+        """Fire idle after a shared-group turn so the adapter can dequeue."""
+        try:
+            parent = getattr(super(), "on_processing_complete", None)
+            if callable(parent):
+                result = parent(event, outcome, *args, **kwargs)
+                if asyncio.iscoroutine(result):
+                    await result
+        except Exception:
+            logger.debug("OneBot: super on_processing_complete failed", exc_info=True)
+        await self._maybe_fire_idle_from_event(event)
+
+    async def _maybe_fire_idle_from_event(self, event: Any) -> None:
+        source = getattr(event, "source", None)
+        chat_id = str(getattr(source, "chat_id", "") or "")
+        text = str(getattr(event, "text", "") or "")
+        if not chat_id.startswith("group:"):
+            return
+        if text.lstrip().startswith("/"):
+            return
+        try:
+            if self.config.extra.get("group_sessions_per_user", True):
+                return
+        except Exception:
+            return
+        await self._send_idle(chat_id)
+
+    async def _send_idle(self, chat_id: str) -> None:
+        ws = self._ws
+        if ws is None or ws.closed:
+            logger.warning("OneBot: idle frame dropped — ws closed (chat_id=%s)", chat_id)
+            return
+        gid = chat_id[len("group:"):]
+        try:
+            await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
+            logger.info("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
+        except Exception:
+            logger.warning("OneBot: idle frame send failed gid=%s", gid, exc_info=True)
+
     async def _send_duplicate_idle(self, data: dict[str, Any]) -> None:
         """Release a replay-created busy slot when a delivery was already done."""
         chat_id = str(data.get("chat_id", ""))
@@ -792,10 +880,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 return
         except Exception:
             return
-        ws = self._ws
-        if ws is not None and not ws.closed:
-            gid = chat_id[len("group:"):]
-            await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
+        await self._send_idle(chat_id)
 
     async def _cache_media_items(self, raw_items: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
         """Download media referenced by *raw_items* and cache them locally.
@@ -836,19 +921,23 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             try:
                 if kind == "image":
                     ext = _ext_from_url(url, ".jpg")
-                    path = await cache_image_from_url(url, ext=ext)
+                    path = await _cache_url_or_bytes(
+                        url, ext, cache_image_from_url, cache_image_from_bytes,
+                    )
                     mime = f"image/{ext.lstrip('.')}" if ext else "image/jpeg"
                 elif kind == "record":
                     ext = _ext_from_url(url, ".ogg")
-                    path = await cache_audio_from_url(url, ext=ext)
+                    path = await _cache_url_or_bytes(
+                        url, ext, cache_audio_from_url, cache_audio_from_bytes,
+                    )
                     mime = f"audio/{ext.lstrip('.')}" if ext else "audio/ogg"
                 elif kind == "video":
                     ext = _ext_from_url(url, ".mp4")
-                    data = await _download_url_bytes(url)
+                    data = await _download_url_bytes(url, allow_private=True)
                     path = cache_video_from_bytes(data, ext=ext)
                     mime = f"video/{ext.lstrip('.')}" if ext else "video/mp4"
                 elif kind == "file":
-                    data = await _download_url_bytes(url)
+                    data = await _download_url_bytes(url, allow_private=True)
                     path = cache_document_from_bytes(data, name or "file")
                     mime = "application/octet-stream"
                 else:
@@ -887,88 +976,6 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # Use the raw group_id as the lookup key (matches Discord's raw channel id convention).
         lookup_key = chat_id.split(":", 1)[1] if chat_id.startswith("group:") else chat_id
         return resolve_channel_prompt(_extra, lookup_key)
-
-    def _maybe_register_idle_callback(
-        self, data: dict[str, Any], message_event: Any
-    ) -> None:
-        """Register a post_delivery callback that fires an ``idle`` frame to
-        the adapter service after a shared-group turn finishes.
-
-        Conditions (all must hold):
-        - chat_id is a group chat (``group:<gid>``).  DMs don't queue.
-        - The event is not a slash command.  Slash commands bypass the adapter
-          queue and therefore do not own its busy slot.
-        - Hermes ``group_sessions_per_user`` is False — read from
-          ``self.config.extra`` exactly like ``BasePlatformAdapter.handle_message``
-          does at base.py:4606, so the plugin's notion of "shared" matches
-          Hermes' actual session-key construction.  When True, Hermes gives
-          each participant their own session and queueing is pointless.
-        - The host exposes ``register_post_delivery_callback`` (older Hermes
-          builds don't — we silently skip and the adapter's busy-timeout
-          watchdog handles any stuck slot).
-        """
-        if not _BASE_AVAILABLE or build_session_key is None or SessionSource is None:
-            return
-        chat_id = data.get("chat_id", "")
-        if not chat_id.startswith("group:"):
-            return  # DM — no queueing.
-        if str(data.get("text", "")).startswith("/"):
-            return  # Slash commands bypass the adapter queue and own no busy slot.
-        try:
-            group_sessions_per_user = self.config.extra.get("group_sessions_per_user", True)
-        except Exception:
-            group_sessions_per_user = True
-        if group_sessions_per_user:
-            return  # Hermes isolates per-user; queueing pointless.
-        if not hasattr(self, "register_post_delivery_callback"):
-            return  # host too old — skip; adapter watchdog covers stuck slots.
-        # Compute the same session_key base.py:handle_message will compute so
-        # the callback registered here is the one base.py pops after the turn.
-        try:
-            session_key = build_session_key(
-                message_event.source,
-                group_sessions_per_user=group_sessions_per_user,
-                thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-            )
-        except Exception:
-            logger.debug("OneBot: build_session_key failed, skipping idle callback")
-            return
-        if not session_key:
-            return
-        # generation ties the callback to the current gateway run so stale
-        # runs cannot fire (and clear) a fresher run's idle slot.  We read
-        # the generation at fire-time (inside _fire_idle) rather than at
-        # registration time, because handle_message may bump the generation
-        # (e.g. /stop /new /reset) and we want the callback tied to the run
-        # that actually processes this message.
-        gid = chat_id[len("group:"):]
-        if self._ws is None or self._ws.closed:
-            return
-
-        async def _fire_idle() -> None:
-            # Re-fetch self._ws at fire time instead of closing over the value
-            # captured at registration.  If the plugin reconnected between
-            # register_post_delivery_callback and the post-delivery callback
-            # firing, the stale ws would be closed and the idle frame would
-            # be lost silently — leaving the adapter's busy slot stuck until
-            # the watchdog reaps it (default 300s).
-            ws = self._ws
-            if ws is None or ws.closed:
-                logger.warning("OneBot: idle frame dropped — ws closed at fire time (gid=%s)", gid)
-                return
-            try:
-                await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
-                logger.info("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
-            except Exception:
-                logger.warning("OneBot: idle frame send failed (ws closed?) gid=%s", gid, exc_info=True)
-
-        try:
-            # Pass generation=None — the host will tie the callback to the
-            # current run's generation at pop time.  Reading it here would
-            # race with handle_message bumping it (e.g. interrupt commands).
-            self.register_post_delivery_callback(session_key, _fire_idle, generation=None)
-        except Exception:
-            logger.warning("OneBot: register_post_delivery_callback failed gid=%s", gid, exc_info=True)
 
     # ── Slash-command registry push ─────────────────────────────────────
 

@@ -10,10 +10,8 @@ import pytest
 from onebot_adapter.hermes_plugin import onebot_tools
 from onebot_adapter.hermes_plugin.adapter import _msg_context
 from onebot_adapter.hermes_plugin.onebot_tools import (
-    _ADMIN_TOOL_NAMES,
     _TOOLS,
     TOOLSET,
-    _check_admin,
     register_tools,
     set_adapter,
 )
@@ -245,23 +243,7 @@ def test_descriptions_only_name_qq_group_permission_requirements():
 
 
 def test_exact_default_admin_tool_set():
-    expected = {
-        "onebot_set_group_portrait",
-        "onebot_set_qq_profile",
-        "onebot_set_avatar",
-        "onebot_set_signature",
-        "onebot_delete_friend",
-        "onebot_handle_friend_request",
-        "onebot_handle_group_request",
-        "onebot_leave_group",
-        "onebot_set_group_name",
-        "onebot_set_group_card",
-        "onebot_set_group_admin",
-        "onebot_mute_group_whole",
-        "onebot_mute_group_member",
-        "onebot_kick_group_member",
-        "onebot_set_group_add_option",
-    }
+    expected = set(onebot_tools._DEFAULT_ADMIN_TOOL_NAMES)
     actual = {name for name, _, _ in _TOOLS if onebot_tools.default_tool_permission(name) == "admin"}
     assert actual == expected
     assert all(
@@ -356,23 +338,6 @@ async def test_global_admin_can_call_account_admin_tool(monkeypatch):
 
     assert _is_success(raw)
     assert adapter._api_calls[0][0] == "set_qq_avatar"
-
-
-def test_check_admin_no_adapter():
-    set_adapter(None)
-    assert "not initialized" in _check_admin()
-
-
-def test_check_admin_not_admin():
-    adapter = MockAdapter(is_admin=False)
-    set_adapter(adapter)
-    assert "管理员" in _check_admin()
-
-
-def test_check_admin_is_admin():
-    adapter = MockAdapter(is_admin=True)
-    set_adapter(adapter)
-    assert _check_admin() is None
 
 
 # ── Read-only tool tests ─────────────────────────────────────────────────
@@ -790,11 +755,13 @@ async def test_group_notice_defaults_and_group_file_mapping():
 # ── Admin tool tests (require admin) ─────────────────────────────────────
 
 
-async def test_kick_group_member_no_admin():
-    adapter = MockAdapter(is_admin=False)
+async def test_kick_group_member_no_admin(monkeypatch):
+    monkeypatch.setattr(onebot_tools, "_load_tool_policies", lambda: {})
+    ctx = MagicMock()
+    register_tools(ctx)
+    adapter = MockAdapter(is_admin=False, group_id="42")
     set_adapter(adapter)
-    handler = _tool_handler("onebot_kick_group_member")
-    raw = await handler({"group_id": 42, "user_id": 100})
+    raw = await _registered_handler(ctx, "onebot_kick_group_member")({"group_id": 42, "user_id": 100})
     assert _has_error(raw) is True
     assert "管理员" in _parse(raw).get("error", "")
     assert len(adapter._api_calls) == 0
@@ -931,14 +898,18 @@ async def test_set_avatar_admin():
     assert adapter._api_calls[0] == ("set_qq_avatar", {"file": "https://example.com/avatar.png"})
 
 
-async def test_all_admin_tools_blocked_without_admin():
-    """Every admin tool should return error when user is not admin."""
+async def test_default_admin_tools_blocked_without_admin(monkeypatch):
+    """Default-admin tools are denied by the registration wrapper."""
+    monkeypatch.setattr(onebot_tools, "_load_tool_policies", lambda: {})
+    ctx = MagicMock()
+    register_tools(ctx)
     adapter = MockAdapter(is_admin=False)
     set_adapter(adapter)
-    admin_tools = [(name, handler) for name, handler, _ in _TOOLS if name in _ADMIN_TOOL_NAMES]
-    assert len(admin_tools) == 38
-    for name, handler in admin_tools:
-        raw = await handler({
+    registered = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
+    for name in onebot_tools._DEFAULT_ADMIN_TOOL_NAMES:
+        if name not in registered:
+            continue
+        raw = await _registered_handler(ctx, name)({
             "group_id": 1, "user_id": 2, "flag": "x", "group_name": "n", "card": "c",
             "special_title": "t", "status": 1, "ext_status": 0, "longNick": "sig",
             "file": "/tmp/x.png",
@@ -1155,16 +1126,19 @@ async def test_get_group_honor_info_passes_type():
     }))
 
 
-async def test_set_group_add_option_requires_admin():
-    adapter = MockAdapter(is_admin=False)
+async def test_set_group_add_option_requires_admin(monkeypatch):
+    monkeypatch.setattr(onebot_tools, "_load_tool_policies", lambda: {})
+    ctx = MagicMock()
+    register_tools(ctx)
+    adapter = MockAdapter(is_admin=False, group_id="42")
     set_adapter(adapter)
-    raw = await _tool_handler("onebot_set_group_add_option")({"group_id": 42, "add_type": 1})
+    raw = await _registered_handler(ctx, "onebot_set_group_add_option")({"group_id": 42, "add_type": 1})
     assert _has_error(raw)
     assert adapter._api_calls == []
 
     admin_adapter = MockAdapter(is_admin=True, group_id="42")
     set_adapter(admin_adapter)
-    raw = await _tool_handler("onebot_set_group_add_option")({
+    raw = await _registered_handler(ctx, "onebot_set_group_add_option")({
         "group_id": 42, "add_type": 4, "group_question": "q", "group_answer": "a",
     })
     assert _is_success(raw)

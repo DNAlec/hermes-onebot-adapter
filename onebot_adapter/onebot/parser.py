@@ -229,15 +229,24 @@ async def _resolve_at_mentions(
 # ── /command extraction & filtering ───────────────────────────────────────
 
 
-def _extract_command_name(segments: list[dict]) -> str | None:
+def _extract_command_name(segments: list[dict], self_id: str = "") -> str | None:
     """Extract a slash-command name from *segments* after @bot stripping.
 
-    The command is detected when the leading text (after lstrip) starts with
-    ``/``.  The name is the first whitespace-delimited token after ``/``,
+    Leading ``reply`` segments and an optional leading @bot mention are
+    skipped so ``@bot /stop`` is detected even when ``strip_first_mention``
+    is off.  The name is the first whitespace-delimited token after ``/``,
     lowercased, with any ``@botname`` suffix stripped (Telegram-style).  A
     bare ``/`` or a token containing ``/`` (file path) returns None.
     """
-    text = seg.extract_text(segments)
+    i = 0
+    n = len(segments)
+    while i < n and segments[i].get("type") == "reply":
+        i += 1
+    if self_id and i < n:
+        item = segments[i]
+        if item.get("type") == "at" and str((item.get("data") or {}).get("qq")) == str(self_id):
+            i += 1
+    text = seg.extract_text(segments[i:])
     if not text.startswith("/"):
         return None
     parts = text.split(maxsplit=1)
@@ -271,7 +280,7 @@ def _check_command_filter(
     / *canonical_command_name_fn* to resolve the command's registration and
     permission level.
     """
-    cmd = _extract_command_name(segments)
+    cmd = _extract_command_name(segments, str(config.self_id or ""))
     if not cmd:
         return None  # not a /command
 
@@ -296,7 +305,7 @@ def _check_command_filter(
     if allowed:
         return None
 
-    reply_to_id = seg.extract_reply_id(segments)
+    filtered_message_id = str(event.get("message_id", ""))
     return FilteredEvent(
         chat_id=chat_id,
         chat_type="group" if is_group else "dm",
@@ -304,8 +313,8 @@ def _check_command_filter(
         user_name=sender_name,
         command_name=canonical,
         reject_message=reject_msg or "",
-        message_id=str(event.get("message_id", "")),
-        reply_to_message_id=str(reply_to_id) if reply_to_id else None,
+        message_id=filtered_message_id,
+        reply_to_message_id=filtered_message_id or None,
         timestamp=float(event.get("time", 0) or 0),
     )
 
@@ -343,7 +352,7 @@ async def parse_event(
     strip_first_mention: bool = True,
     is_known_command_fn: Callable[[str], bool] | None = None,
     canonical_command_name_fn: Callable[[str], str] | None = None,
-    media_delivery_mode: str = "passthrough",
+    media_delivery_mode: str = MEDIA_DELIVERY_CACHE,
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
 ) -> NormalizedEvent | FilteredEvent | DroppedEvent | None:
     """Parse a OneBot 11 message event.
@@ -353,7 +362,7 @@ async def parse_event(
         * :class:`FilteredEvent` when the message is a /command or blacklist
           hit that should get a reject reply (not forwarded to Hermes).
         * :class:`DroppedEvent` when a candidate message is silently dropped
-          (``user_filter`` / ``mention`` / ``empty``) — logged at INFO without
+          (``user_filter`` / ``mention`` / ``empty``) — logged at DEBUG without
           the body, not forwarded to Hermes.
         * ``None`` for heartbeats, unhandled/disabled notices, and other
           non-candidate events.
@@ -512,7 +521,8 @@ async def _prepare_message_state(
             "mention", event, is_group=is_group, sender_id=sender_id,
             sender_name=sender_name, group_id=group_id,
         )
-    if is_group and options.self_id and strip_mention:
+    command_name = _extract_command_name(raw_segments, options.self_id)
+    if is_group and options.self_id and (strip_mention or command_name):
         raw_segments = seg.strip_first_bot_mention(raw_segments, options.self_id)
 
     group_name = ""
@@ -672,19 +682,30 @@ async def _render_forward_context(
     media_items: list[MediaItem],
 ) -> str:
     forward_id = seg.extract_forward_id(state.raw_segments)
-    if not forward_id or not options.api:
-        return ""
-    logger.debug("parse_event: expanding forward msg_id=%s", forward_id)
-    return await _expand_forward(
-        options.api,
-        forward_id,
-        counter,
-        depth=0,
+    inline = seg.extract_forward_content(state.raw_segments)
+    expand_kwargs = dict(
+        counter=counter,
         name_resolver=options.name_resolver,
         group_id=state.group_id,
         include_url=state.include_url,
         media_items=media_items,
     )
+    if forward_id and options.api:
+        logger.debug("parse_event: expanding forward msg_id=%s", forward_id)
+        expanded = await _expand_forward(
+            options.api,
+            forward_id,
+            depth=0,
+            **expand_kwargs,
+        )
+        if expanded is not None:
+            return expanded
+    if inline:
+        logger.debug("parse_event: expanding forward from inline content")
+        return await _expand_messages(inline, depth=0, **expand_kwargs)
+    if forward_id:
+        return "[合并转发(已跳过:读取失败)]"
+    return ""
 
 
 def _render_main_segments(
@@ -812,7 +833,7 @@ async def _expand_forward(
     group_id: str = "",
     include_url: bool = True,
     media_items: list[MediaItem] | None = None,
-) -> str:
+) -> str | None:
     """Fetch a merged-forward by id and expand it into text.
 
     This is the API-fetching entry point: it calls ``get_forward_msg`` once
@@ -828,7 +849,7 @@ async def _expand_forward(
         fwd_data = await api.get_forward_msg(forward_id)
     except Exception as exc:
         logger.warning("get_forward_msg failed id=%s: %s", forward_id, exc)
-        return "[合并转发(已跳过:读取失败)]"
+        return None
     messages: list[dict] = (fwd_data or {}).get("messages", []) or []
     logger.debug(
         "get_forward_msg response: forward_id=%s messages=%d depth=%d",
@@ -949,7 +970,7 @@ async def _parse_notice_event(
     sub_type = event.get("sub_type", "")
     user_id = str(event.get("user_id", ""))
     group_id_raw = event.get("group_id")
-    group_id = str(group_id_raw) if group_id_raw is not None else ""
+    group_id = str(group_id_raw) if group_id_raw not in (None, "", 0, "0") else ""
     is_group = bool(group_id)
     timestamp = float(event.get("time", 0) or 0)
 
@@ -959,6 +980,8 @@ async def _parse_notice_event(
     )
 
     if config is None:
+        return None
+    if is_group and not config.get_group_config(group_id).enabled:
         return None
 
     kind = _notice_kind(event, self_id, config, group_id, is_group, user_id)

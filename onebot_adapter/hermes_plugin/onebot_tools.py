@@ -7,8 +7,9 @@ through the adapter service's WS ``api_call`` channel.
 Registration is done via ``ctx.register_tool(...)`` at plugin load time —
 no dependency on the host's ``tools/qq_tool.py``.
 
-Admin gating uses a per-message ``ContextVar`` so concurrent messages cannot
-share or overwrite authorization state.
+Admin gating is applied by the Hermes registration wrapper
+(``_wrap_hermes_handler``) using WebUI tool policy and the per-message
+``ContextVar`` of the current sender. HTTP automation does not use that wrapper.
 """
 from __future__ import annotations
 
@@ -26,9 +27,6 @@ logger = logging.getLogger(__name__)
 _adapter: Any = None  # OneBotAdapter instance (set by register_tools)
 _api_caller: contextvars.ContextVar[Callable[[str, dict[str, Any]], Any] | None] = contextvars.ContextVar(
     "_onebot_api_caller", default=None,
-)
-_tool_authorized: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "_onebot_tool_authorized", default=False,
 )
 
 
@@ -138,22 +136,6 @@ except ImportError:
 
     def tool_error(msg: str) -> str:
         return json.dumps({"error": msg}, ensure_ascii=False)
-
-
-# ── Admin gating ─────────────────────────────────────────────────────────
-
-
-def _check_admin() -> str | None:
-    """Return an error string if the current user is not an admin."""
-    if _tool_authorized.get():
-        return None
-    ctx = _msg_context.get()
-    is_admin = ctx[0] if ctx is not None else False
-    if _adapter is None and _api_caller.get() is None:
-        return "OneBot adapter not initialized"
-    if not is_admin:
-        return "此操作需要管理员权限"
-    return None
 
 
 def _current_group_id() -> str:
@@ -568,14 +550,12 @@ async def _set_msg_emoji_like(args: dict, **_) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ADMIN TOOLS (require admin)
+# GROUP / ACCOUNT MUTATING TOOLS
+# Hermes ``admin`` policy is enforced by ``_wrap_hermes_handler``, not here.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 async def _kick_group_member(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call(
             "set_group_kick",
@@ -590,9 +570,6 @@ async def _kick_group_member(args: dict, **_) -> str:
 
 
 async def _mute_group_member(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         duration = int(args["duration"])
         await _api_call(
@@ -608,9 +585,6 @@ async def _mute_group_member(args: dict, **_) -> str:
 
 
 async def _mute_group_whole(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         enable = bool(args["enable"])
         await _api_call("set_group_whole_ban", group_id=int(args["group_id"]), enable=enable)
@@ -621,9 +595,6 @@ async def _mute_group_whole(args: dict, **_) -> str:
 
 
 async def _set_group_admin(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call(
             "set_group_admin",
@@ -638,9 +609,6 @@ async def _set_group_admin(args: dict, **_) -> str:
 
 
 async def _set_group_card(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call(
             "set_group_card",
@@ -655,9 +623,6 @@ async def _set_group_card(args: dict, **_) -> str:
 
 
 async def _set_group_name(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call("set_group_name", group_id=int(args["group_id"]), group_name=args["group_name"])
         return tool_result({"name_set": True})
@@ -667,9 +632,6 @@ async def _set_group_name(args: dict, **_) -> str:
 
 
 async def _leave_group(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call("set_group_leave", group_id=int(args["group_id"]))
         return tool_result({"left": True})
@@ -679,9 +641,6 @@ async def _leave_group(args: dict, **_) -> str:
 
 
 async def _handle_group_request(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         sub_type = str(args["sub_type"])
         if sub_type not in {"add", "invite"}:
@@ -700,9 +659,6 @@ async def _handle_group_request(args: dict, **_) -> str:
 
 
 async def _handle_friend_request(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call(
             "set_friend_add_request",
@@ -717,9 +673,6 @@ async def _handle_friend_request(args: dict, **_) -> str:
 
 
 async def _delete_friend(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call("delete_friend", user_id=int(args["user_id"]))
         return tool_result({"deleted": True})
@@ -729,9 +682,6 @@ async def _delete_friend(args: dict, **_) -> str:
 
 
 async def _set_group_special_title(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call(
             "set_group_special_title",
@@ -746,9 +696,6 @@ async def _set_group_special_title(args: dict, **_) -> str:
 
 
 async def _set_online_status(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call(
             "set_online_status",
@@ -763,9 +710,6 @@ async def _set_online_status(args: dict, **_) -> str:
 
 
 async def _set_signature(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call("set_self_longnick", longNick=args["longNick"])
         return tool_result({"signature_set": True})
@@ -775,9 +719,6 @@ async def _set_signature(args: dict, **_) -> str:
 
 
 async def _set_avatar(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     try:
         await _api_call("set_qq_avatar", file=args["file"])
         return tool_result({"avatar_set": True})
@@ -856,16 +797,10 @@ async def _get_essence_msg_list(args: dict, **_) -> str:
 
 
 async def _set_essence_msg(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("set_essence_msg", **_group_seq_params(args))
 
 
 async def _delete_essence_msg(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("delete_essence_msg", **_group_seq_params(args))
 
 
@@ -874,9 +809,6 @@ async def _get_group_notice(args: dict, **_) -> str:
 
 
 async def _send_group_notice(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action(
         "_send_group_notice", group_id=int(args["group_id"]), content=args["content"], image=args.get("image"),
         pinned=int(args.get("pinned", 0)), type=int(args.get("type", 1)),
@@ -886,9 +818,6 @@ async def _send_group_notice(args: dict, **_) -> str:
 
 
 async def _del_group_notice(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("_del_group_notice", group_id=int(args["group_id"]), notice_id=args["notice_id"])
 
 
@@ -914,9 +843,6 @@ async def _get_group_album_media_list(args: dict, **_) -> str:
 
 
 async def _upload_image_to_qun_album(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action(
         "upload_image_to_qun_album", group_id=int(args["group_id"]), album_id=args["album_id"],
         album_name=args["album_name"], file=args["file"],
@@ -945,9 +871,6 @@ async def _do_group_album_comment(args: dict, **_) -> str:
 
 
 async def _del_group_album_media(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action(
         "del_group_album_media", group_id=int(args["group_id"]), album_id=args["album_id"], lloc=args["lloc"],
     )
@@ -958,30 +881,18 @@ async def _group_todo(args: dict, action: str) -> str:
 
 
 async def _set_group_todo(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _group_todo(args, "set_group_todo")
 
 
 async def _complete_group_todo(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _group_todo(args, "complete_group_todo")
 
 
 async def _cancel_group_todo(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _group_todo(args, "cancel_group_todo")
 
 
 async def _set_friend_remark(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("set_friend_remark", user_id=int(args["user_id"]), remark=args["remark"])
 
 
@@ -990,9 +901,6 @@ async def _get_unidirectional_friend_list(args: dict, **_) -> str:
 
 
 async def _set_qq_profile(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action(
         "set_qq_profile", nickname=args["nickname"], personal_note=args.get("personal_note"), sex=args.get("sex"),
     )
@@ -1015,9 +923,6 @@ async def _fetch_custom_face_detail(args: dict, **_) -> str:
 
 
 async def _add_custom_face(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action(
         "add_custom_face", file=args["file"], emoji_id=args.get("emoji_id"), package_id=args.get("package_id"),
         file_name=args.get("file_name"), file_size=args.get("file_size"), md5=args.get("md5"),
@@ -1026,32 +931,20 @@ async def _add_custom_face(args: dict, **_) -> str:
 
 
 async def _delete_custom_face(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("delete_custom_face", res_id=args.get("res_id"), ids=args.get("ids"))
 
 
 async def _set_custom_face_desc(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action(
         "set_custom_face_desc", emoji_id=args["emoji_id"], res_id=args["res_id"], md5=args["md5"], desc=args["desc"],
     )
 
 
 async def _set_group_portrait(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("set_group_portrait", group_id=int(args["group_id"]), file=args["file"])
 
 
 async def _set_group_remark(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("set_group_remark", group_id=int(args["group_id"]), remark=args["remark"])
 
 
@@ -1072,9 +965,6 @@ async def _get_group_detail_info(args: dict, **_) -> str:
 
 
 async def _create_collection(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _run_action("create_collection", rawData=args["rawData"], brief=args["brief"])
 
 
@@ -1127,30 +1017,18 @@ async def _admin_group_file(args: dict, action: str, **extra: Any) -> str:
 
 
 async def _delete_group_file(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _admin_group_file(args, "delete_group_file", file_id=args["file_id"])
 
 
 async def _create_group_file_folder(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _admin_group_file(args, "create_group_file_folder", folder_name=args["folder_name"])
 
 
 async def _delete_group_folder(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _admin_group_file(args, "delete_group_folder", folder_id=args["folder_id"])
 
 
 async def _move_group_file(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _admin_group_file(
         args, "move_group_file", file_id=args["file_id"], current_parent_directory=args["current_parent_directory"],
         target_parent_directory=args["target_parent_directory"],
@@ -1158,9 +1036,6 @@ async def _move_group_file(args: dict, **_) -> str:
 
 
 async def _rename_group_file(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _admin_group_file(
         args, "rename_group_file", file_id=args["file_id"], current_parent_directory=args["current_parent_directory"],
         new_name=args["new_name"],
@@ -1168,9 +1043,6 @@ async def _rename_group_file(args: dict, **_) -> str:
 
 
 async def _trans_group_file(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     return await _admin_group_file(args, "trans_group_file", file_id=args["file_id"])
 
 
@@ -1282,9 +1154,6 @@ async def _get_group_honor_info(args: dict, **_) -> str:
 
 
 async def _set_group_add_option(args: dict, **_) -> str:
-    err = _check_admin()
-    if err:
-        return tool_error(err)
     add_type = int(args["add_type"])
     question = args.get("group_question")
     answer = args.get("group_answer")
@@ -1923,54 +1792,8 @@ _TOOLS: list[tuple[str, Callable, dict]] = [
 ]
 
 
-# Names of tools that require admin (call ``_check_admin()`` in their handler).
-# Used by tests and the WebUI to identify privileged tools.  Kept in sync
-# with the handler implementations — each admin handler starts with
-# ``err = _check_admin()``.
-_ADMIN_TOOL_NAMES = frozenset({
-    "onebot_add_custom_face",
-    "onebot_cancel_group_todo",
-    "onebot_complete_group_todo",
-    "onebot_create_collection",
-    "onebot_create_group_file_folder",
-    "onebot_del_group_album_media",
-    "onebot_del_group_notice",
-    "onebot_delete_custom_face",
-    "onebot_delete_essence_msg",
-    "onebot_delete_friend",
-    "onebot_delete_group_file",
-    "onebot_delete_group_folder",
-    "onebot_handle_friend_request",
-    "onebot_handle_group_request",
-    "onebot_kick_group_member",
-    "onebot_leave_group",
-    "onebot_mute_group_member",
-    "onebot_mute_group_whole",
-    "onebot_move_group_file",
-    "onebot_rename_group_file",
-    "onebot_send_group_notice",
-    "onebot_set_custom_face_desc",
-    "onebot_set_essence_msg",
-    "onebot_set_friend_remark",
-    "onebot_set_avatar",
-    "onebot_set_group_admin",
-    "onebot_set_group_add_option",
-    "onebot_set_group_card",
-    "onebot_set_group_name",
-    "onebot_set_group_portrait",
-    "onebot_set_group_remark",
-    "onebot_set_group_special_title",
-    "onebot_set_group_todo",
-    "onebot_set_online_status",
-    "onebot_set_qq_profile",
-    "onebot_set_signature",
-    "onebot_trans_group_file",
-    "onebot_upload_image_to_qun_album",
-})
-
-# Hermes defaults are intentionally narrower than the raw handler checks.
-# The registration wrapper may explicitly authorize an ``everyone`` tool and
-# bypass its legacy handler-level check; HTTP automation remains unrestricted.
+# Hermes default tool policy. The registration wrapper enforces ``admin``
+# against adapter WebUI admins; HTTP automation is unrestricted.
 _DEFAULT_ADMIN_TOOL_NAMES = frozenset({
     "onebot_delete_friend",
     "onebot_handle_friend_request",
@@ -1987,6 +1810,13 @@ _DEFAULT_ADMIN_TOOL_NAMES = frozenset({
     "onebot_set_qq_profile",
     "onebot_set_signature",
     "onebot_set_group_add_option",
+    "onebot_set_essence_msg",
+    "onebot_delete_essence_msg",
+    "onebot_send_group_notice",
+    "onebot_del_group_notice",
+    "onebot_set_group_todo",
+    "onebot_complete_group_todo",
+    "onebot_cancel_group_todo",
 })
 
 _ACCOUNT_TOOL_NAMES = frozenset({
@@ -2195,11 +2025,7 @@ def _wrap_hermes_handler(
         error = _permission_error(name, schema, args, permission)
         if error:
             return tool_error(error)
-        token = _tool_authorized.set(True)
-        try:
-            return await handler(args, **kwargs)
-        finally:
-            _tool_authorized.reset(token)
+        return await handler(args, **kwargs)
 
     return wrapped
 

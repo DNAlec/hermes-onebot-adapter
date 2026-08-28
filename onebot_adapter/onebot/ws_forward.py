@@ -180,7 +180,7 @@ class OneBotForwardClient:
                 if self._stop.is_set():
                     break
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    self._event_dispatcher.dispatch(msg.data)
+                    self._event_dispatcher.dispatch(msg.data, ws)
                 elif msg.type in (
                     aiohttp.WSMsgType.ERROR,
                     aiohttp.WSMsgType.CLOSE,
