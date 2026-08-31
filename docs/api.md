@@ -1170,7 +1170,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `event_queue_max_per_chat` | int | `50` | 群聊排队：单群队列上限，超限拒绝入队（详见[群聊消息排队](#群聊消息排队)） |
 | `event_queue_idle_timeout` | float | `300.0` | 群聊排队：plugin 无 idle 信号的超时阈值（秒），超时强制清空 busy 状态 |
 | `event_queue_clear_on_session_reset` | bool | `true` | 使用 `/new`、`/reset` 时清空当前群待处理队列 |
-| `event_queue_clean_command_enabled` | bool | `true` | 启用适配器本地 `/clean` 命令；清空当前群待处理队列且不转发 Hermes |
+| `event_queue_clean_command_enabled` | bool | `true` | 启用适配器本地 `/clean` 命令；清空当前群待处理队列并释放 busy，且不转发 Hermes |
 | `rate_limit_enabled` | bool | `false` | 入站消息限流总开关；全局/群聊/个人三维度同时检查，管理员豁免 |
 | `global_rate_limit_algorithm` | string | `"sliding_window"` | 全局限流算法：`sliding_window` / `token_bucket` |
 | `global_rate_limit_messages` | int | `0` | 全局限流消息数；`0`=禁用该维度 |
@@ -1244,17 +1244,17 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | Hermes 隔离群成员（per_user=True） | 直接转发，不排队 |
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy（记录 user_id + 时间戳），转发 |
-| 群 busy，发送者相同且队列为空 | 直接转发（刷新 busy 时间戳，不入队） |
+| 群 busy，发送者相同且队列为空 | 直接转发（刷新 busy 时间戳，不入队；仍算同一 Hermes session） |
 | 群 busy（其他情况） | 入队等待（含 busy 用户自身；队列非空时 busy 用户也不能插队）；出队时连续同用户消息合并为一条 |
-| `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列 |
-| `/clean` | 默认由适配器本地清空当前群待处理队列，不发送给 Hermes |
+| `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列（不释放 busy） |
+| `/clean` | 默认由适配器本地清空当前群待处理队列**并释放 busy**，不发送给 Hermes |
 | 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
 ### idle 信号
 
-处理完成的 idle 信号由 Hermes 插件在 `on_processing_complete` 中发送：每轮 agent 处理结束后，插件向适配器发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧；适配器在该群 inflight 归零后清空 busy 并从队列取下一条。同一发送者在 busy 期间直推会增加 inflight，避免第一条 idle 提前放出下一个人。
+处理完成的 idle 信号由 Hermes 插件在 `on_processing_complete` 中发送：仅当 shared 群聊 session 没有 pending/debounce 后续时发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧；适配器把它当作 **session 空闲**并出队下一条。同一发送者在 busy 且队列为空时仍直推（喂给当前 Hermes session 的 redirect/steer/pending），但不再按直推次数等待多帧 idle。
 
-`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**（gateway `run.py:11099-11112` 直接 pop callback 不调用），适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。
+`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**（gateway `run.py:11099-11112` 直接 pop callback 不调用），适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死（按 busy 代数识别，bot 发送刷新时间戳不会取消清理）。`/stop` 只中断 Hermes 任务：网关已空闲时（「没有可停止的活跃任务」）不会解开适配器 busy；此时应使用 `/clean`。
 
 ### 看门狗兜底
 
@@ -1262,6 +1262,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 
 ### 清理时机
 
+- `/clean`：清空当前群待处理队列并释放 busy（不转发 Hermes）
 - 最后一个 Hermes 插件连接断开时清空所有 busy/queue
 - 适配器服务停止时清空所有状态
 - 插件重连重放 ring buffer 时清空 queue/busy（重新建立状态）

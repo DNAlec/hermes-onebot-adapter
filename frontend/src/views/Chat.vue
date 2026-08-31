@@ -773,7 +773,7 @@ function resetHint() {
       <h4>适配器群聊排队</h4>
       <p class="hint" style="margin-bottom:0.75rem;">
         当 Hermes 不隔离群成员时,适配器对群消息排队串行处理。
-        群 busy 时：若新消息发送者与当前任务相同且队列为空,则直接转发、不入队；否则排队等待（含 busy 用户自身,队列非空时不能插队）。出队时连续同用户消息会自动合并为一条。所有/命令会绕过排队。
+        群 busy 时：若新消息发送者与当前任务相同且队列为空,则直接转发、不入队（仍算同一 session）；否则排队等待（含 busy 用户自身,队列非空时不能插队）。出队时连续同用户消息会自动合并为一条。所有/命令会绕过排队。排队卡死时可发 /clean 清空队列并释放 busy。
       </p>
       <label class="checkbox-row">
         <input type="checkbox" v-model="cfg.event_queue_enabled" />
@@ -785,7 +785,7 @@ function resetHint() {
       </label>
       <label class="checkbox-row">
         <input type="checkbox" v-model="cfg.event_queue_clean_command_enabled" />
-        <span>启用适配器本地 /clean 命令（清空当前群队列，不发送给 Hermes）</span>
+        <span>启用适配器本地 /clean 命令（清空当前群队列并释放 busy，不发送给 Hermes）</span>
       </label>
       <label>
         单群队列上限
