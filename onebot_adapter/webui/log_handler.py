@@ -1,4 +1,4 @@
-"""Logging handler that buffers recent log lines for the WebUI /api/logs endpoint."""
+"""Logging handler that buffers recent log lines for the WebUI ``/api/v1/logs`` endpoint."""
 from __future__ import annotations
 
 import logging

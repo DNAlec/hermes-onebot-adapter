@@ -11,6 +11,21 @@ NapCat ──双向 OneBot 11 WS（事件 + API）── 适配器服务 ──W
 
 适配器服务承担全部 OneBot 交互；事件接收和 API 调用共用同一条 OneBot WebSocket，不需要独立的 OneBot HTTP API 端口。插件只与适配器服务通信，不直接接触 OneBot，也不修改 Hermes 本身的代码。
 
+更细的 REST API 字段、专项诊断和维护者架构说明见 [文档索引](docs/README.md)。
+
+- [快速开始](#快速开始)
+- [配置流程](#配置流程)
+- [CLI 用法](#cli-用法)
+- [自动化工具 API](#自动化工具-api)
+- [OneBot 连接模式](#onebot-连接模式)
+- [WebUI 功能](#webui-功能)
+- [准入控制](#准入控制)
+- [出站消息过滤](#出站消息过滤)
+- [媒体投递](#媒体投递)
+- [notice 事件](#notice-事件)
+- [日志](#日志)
+- [群聊消息排队](#群聊消息排队)
+
 ## 环境要求
 
 - Python >= 3.11
@@ -172,12 +187,12 @@ ws://127.0.0.1:3001
 |------|------|
 | 仪表盘 | 服务/插件状态、版本检查、使用统计图表（趋势/活跃群/活跃用户） |
 | 连接管理 | 配置 OneBot 连接模式和 WS 地址；安装/卸载 Hermes 插件 |
-| 聊天配置 | 全局群聊触发设置、入站消息限流、Bot 动态黑名单、会话隔离与群聊排队、贴表情回应 |
-| 群组管理 | 查看群列表、每群启用/禁用 Bot、群成员过滤 |
+| 聊天配置 | 全局群聊触发、出站正则过滤、入站限流、Bot 动态黑名单、会话隔离与群聊排队、媒体投递、notice 事件、贴表情回应；同页管理群组（每群启用/成员过滤及覆盖项） |
 | 指令过滤 | 管理 `/` 指令的权限（所有人 / 管理员 / 禁用） |
 | 工具管理 | 启停 OneBot 平台的 Hermes 工具集 |
 | OneBot 工具 | 逐项控制 OneBot 工具是否注册给 Hermes，以及所有人/管理员调用权限 |
-| 高级设置 | 私聊过滤、全局管理员、文件上传超时、使用统计、发送去重、序列号映射、日志等 |
+| 高级设置 | WebUI Token、登录有效期、自动化 API、文件上传超时、使用统计、发送去重、序列号映射、文件日志策略 |
+| 日志 | 内存环形缓冲（最近 500 条）或 `adapter.log` 尾部；可下载当前日志文件 |
 
 ## 工具集管理
 
@@ -296,6 +311,30 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 **每群覆盖**：`outbound_filter_enabled` / `outbound_filter_patterns` 为 `None` 时跟随全局；群级 `patterns` 整表覆盖（不与全局合并），`[]` 表示此群无规则。
 
+## 媒体投递
+
+入站图片/语音/视频/文件由 `media_delivery_mode` 控制（WebUI「聊天配置」，热更新后向已连接插件广播新的 `ready` 帧）：
+
+| 模式 | 行为 |
+|------|------|
+| `cache`（默认） | 文本里放空占位符（`[图1]`），插件把媒体下载到 `~/.hermes/cache/`，填入 `MessageEvent.media_urls`；缓存失败则跳过该媒体、保留占位符 |
+| `passthrough` | 文本里内联 URL 占位符（`[图1](https://...)`），`media_items` 为空，由 LLM 按需拉取 |
+
+没有 URL 的 file 段一律跳过，LLM 用 `onebot_get_file` 按 `file_id` 获取。适配器本身不再下载或转码语音。
+
+## notice 事件
+
+默认关闭。开启后将 OneBot notice 合成为以 `[系统]` 开头的文本，走与普通消息相同的排队和投递路径（插件设 `MessageEvent.internal=True`，绕过 Hermes 文本去抖）。群配置可单独覆盖。
+
+| 配置项 | 默认 | 说明 |
+|--------|------|------|
+| `notify_poke_enabled` | `false` | 仅 bot 被戳时推送（含私聊），走群/DM 用户过滤 |
+| `notify_member_change_enabled` | `false` | 其他成员进群/退群；退群区分主动离开 `leave` 与被踢 `kick` |
+
+## 日志
+
+控制台和 WebUI 内存视图走独立的 `onebot_adapter.onebot.message_preview` logger（不写入文件）。文件日志由 `log_file_message_mode` 控制（`none` / `preview` / `full`，默认 `preview`），达到 `log_file_max_bytes`（默认 10 MiB）后轮转。未进入 Hermes 的候选消息只在 DEBUG 记 `丢弃 -- reason=`，不含正文。WebUI「日志」页可切换内存缓冲与 `adapter.log` 尾部，并下载当前文件。
+
 ## 群聊消息排队
 
 适配器内置 shared 群聊消息排队机制，防止群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes 配置 `group_sessions_per_user: false`（全群共享 session）且适配器 `event_queue_enabled: true` 时生效**；per_user 模式每人独立 session，无需排队。
@@ -322,7 +361,7 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 ### idle 信号
 
-处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后插件向适配器发 `idle` 帧，适配器清空 busy 并从队列取下一条转发。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
+处理完成的 idle 信号由 Hermes 插件在 `on_processing_complete` 中发送：每轮 agent 处理结束后插件向适配器发 `idle` 帧；适配器在该群 inflight 归零后清空 busy 并从队列取下一条。同一发送者在 busy 期间直推会增加 inflight，避免第一条 idle 提前放出下一个人。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
 
 `/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。默认情况下，`/new` 和 `/reset` 还会立即丢弃当前群尚未处理的排队消息；`/clean` 可手动执行同样的队列清理，但不会发送给 Hermes。两种清理都不会中断当前正在执行的 turn。
 
@@ -346,9 +385,11 @@ cd frontend && npm install && npm run dev   # 前端开发 (Vite 代理到 :1882
 ./scripts/build_frontend.sh      # 构建前端到 webui/static/
 ```
 
+维护者架构与模块约定见 [AGENTS.md](AGENTS.md)；文档目录见 [docs/README.md](docs/README.md)。发布前更新 [CHANGELOG.md](CHANGELOG.md)，再打 `vX.Y.Z` 标签。
+
 ## 配置文件
 
-适配器服务配置持久化于 `~/.onebot_adapter/config.json`（或 `ONEBOT_ADAPTER_CONFIG` 指定路径），WebUI 修改即保存。
+适配器服务配置持久化于 `~/.onebot_adapter/config.json`（或 `ONEBOT_ADAPTER_CONFIG` 指定路径），WebUI 修改即保存。完整字段见 [REST API 文档](docs/api.md#config-字段)。损坏或非法的配置文件会使服务 fail-fast，不会覆盖原文件。
 
 ## 技术栈
 
