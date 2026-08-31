@@ -2,6 +2,14 @@
 
 基础地址: `http://<host>:18820`（默认端口，可在配置中修改 `webui_port`）
 
+安装、功能说明与其他文档见 [文档索引](README.md)。
+
+- [鉴权](#鉴权)
+- [端点](#端点)
+- [Config 字段](#config-字段)
+- [GroupConfig 字段](#groupconfig-字段)
+- [群聊消息排队](#群聊消息排队)
+
 ---
 
 ## 鉴权
@@ -264,6 +272,8 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 {"error": "onebot_mode must be one of ['forward', 'reverse']"}
 ```
 
+写入 `webui_token` 时长度必须至少 8 个字符，否则同样返回 `400`：`{"error": "webui_token must be at least 8 characters"}`。`webui_token_epoch` 不可由客户端设置；修改 `webui_token_lifetime_hours` 时服务端会自动递增纪元，使已签发 session 立即失效。
+
 ---
 
 ### 5. Hermes 安装目录状态
@@ -414,7 +424,7 @@ Content-Type: application/json
 
 **`GET /api/v1/logs`**
 
-返回服务端内存环形缓冲区中的最近日志行（默认最多 500 条，进程重启即空）。完整记录在文件日志中。
+返回服务端内存环形缓冲区中的最近日志行（默认最多 500 条，进程重启即空）。收发预览走独立 logger，不进入此缓冲对应的文件副本。完整记录在文件日志中。
 
 响应 `200`：
 ```json
@@ -434,11 +444,27 @@ Content-Type: application/json
 
 **`GET /api/v1/logs/file`**
 
-读取当前 `adapter.log` 尾部。查询参数 `lines`（默认 1000，最大 5000）。文件未启用或尚不存在时 `logs` 为空且 `file_available=false`。
+读取当前 `adapter.log` 尾部。查询参数 `lines`（默认 1000，最大 5000，非法值回退默认）。文件未启用或尚不存在时 `logs` 为空且 `file_available=false`。
+
+响应 `200`：
+```json
+{
+  "logs": ["..."],
+  "source": "file",
+  "truncated": true,
+  "lines": 1000,
+  "file_enabled": true,
+  "file_available": true,
+  "file_path": "/home/user/.onebot_adapter/logs/adapter.log",
+  "file_size": 1234
+}
+```
+
+`truncated=true` 表示文件行数多于本次返回的尾部。读取失败返回 `500`：`{"error": "failed to read log file"}`。
 
 **`GET /api/v1/logs/file/download`**
 
-下载当前 `adapter.log`（`Content-Disposition: attachment`）。文件不可用时返回 `404`。
+下载当前 `adapter.log`（`Content-Disposition: attachment`）。文件不可用时返回 `404`：`{"error": "file logging disabled or log file missing"}`。
 
 ---
 
@@ -1226,7 +1252,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 
 ### idle 信号
 
-处理完成的"idle"信号由 Hermes 插件通过 `register_post_delivery_callback` 钩子发送：每轮 agent 处理结束后，插件向适配器发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧，适配器清空 busy 并从队列取下一条转发。
+处理完成的 idle 信号由 Hermes 插件在 `on_processing_complete` 中发送：每轮 agent 处理结束后，插件向适配器发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧；适配器在该群 inflight 归零后清空 busy 并从队列取下一条。同一发送者在 busy 期间直推会增加 inflight，避免第一条 idle 提前放出下一个人。
 
 `/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**（gateway `run.py:11099-11112` 直接 pop callback 不调用），适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死。
 

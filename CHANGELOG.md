@@ -2,13 +2,17 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-31
+
 ### 新增
 - 出站消息正则过滤：可在 WebUI「聊天配置」添加 Python 正则，Hermes 发往 OneBot 的文本（`send_text`、媒体/文件说明、`onebot_send_message` 的 text 段）命中后直接丢弃；群配置可覆盖开关和规则列表
-- 入站未进 Hermes 的候选消息在 DEBUG 记 `丢弃 -- reason=`（`user_filter` / `mention` / `command` / `blacklist` / `rate_limit` / `empty`），不含正文
+- 解析器对静默丢弃引入 `DroppedEvent`（准入、未 @bot、空消息等），与会回复拒绝提示的 `FilteredEvent` 分开；入站未进 Hermes 的候选消息在 DEBUG 记 `丢弃 -- reason=`（`user_filter` / `mention` / `command` / `blacklist` / `rate_limit` / `empty`），不含正文
 - WebUI 日志页可查看 `adapter.log` 尾部并下载当前文件；内存视图标明仅保留最近 500 条
+- `PATCH /api/v1/config` 写入 `webui_token` 时校验长度至少 8 个字符
 
 ### 变更
-- shared 群聊排队：当前任务进行中、队列为空且新消息发送者与当前任务相同的，不再入队，直接转发给 Hermes
+- shared 群聊排队：当前任务进行中、队列为空且新消息发送者与当前任务相同的，不再入队，直接转发给 Hermes；同一发送者直推会增加 inflight，避免第一条 idle 提前放出下一个人
+- Hermes 插件在 `on_processing_complete` 发送 idle（不再依赖会被 gateway 直接 pop 的 `register_post_delivery_callback`）
 - WebUI 窄屏布局：顶栏改为汉堡菜单、禁止横向撑开页面；两列表单在约 700px 以下收成单列；宽表在容器内横向滚动；聊天/指令/连接/高级页保存按钮吸底；群编辑弹窗在手机上贴底全宽
 - 收发预览改走独立 `onebot_adapter.onebot.message_preview` logger（不进文件）；真实 OneBot 发送（含 `api_call` 发送类、拒绝回复、文件上传成功后、自动化工具）统一打 `发送 ->`
 - 插件 DEBUG 诊断复用 `logging_utils` 脱敏，不再输出完整消息正文
@@ -17,6 +21,15 @@
 - 添加群时若输入已有群号，群号输入框会被误禁用且无法改回
 - 群编辑「触发关键词模式」用空数组做 option 值，已有自定义关键词时下拉选不中「自定义」
 - 指令过滤统计按权限表条目计数，可能出现「所有人可用」为负数；搜索在 description/aliases 缺失时会抛错
+- WebUI 登录比较对异常长度或非 ASCII 输入不再抛异常
+- 卸载插件时保留 Hermes `.env` 中带引号的其他环境变量值
+
+### 升级说明
+- 无需手动迁移配置
+- 升级适配器后需重新安装随包提供的 Hermes 插件并重启 Hermes 网关，确保 idle 信号与媒体策略与服务端一致
+
+### 文档
+- 补充文档索引；校正 README / REST API / AGENTS 中的排队 idle、DroppedEvent、日志端点、出站过滤、媒体投递与 notice 事件说明
 
 ## [1.5.0] - 2026-08-18
 
@@ -206,7 +219,8 @@
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
 
-[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.2.0...v1.3.0

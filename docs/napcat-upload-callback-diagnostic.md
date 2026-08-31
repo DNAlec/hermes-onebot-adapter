@@ -1,5 +1,7 @@
 # NapCat Group Upload Callback Diagnostic
 
+面向维护者的专项诊断：区分 NapCat `v4.18.13` 群文件上传完成回调的两种失败模式。补丁只加警告日志，不改变上传行为或成功判定。日志含 QQ/群号、消息 ID、文件名等敏感信息，复现结束后立刻恢复原 bundle。完整步骤见下文英文说明。
+
 This procedure distinguishes two failure modes in NapCat `v4.18.13`:
 
 1. QQNT never emits a final successful `onMsgInfoListUpdate` record.

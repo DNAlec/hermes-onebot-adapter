@@ -2,3 +2,5 @@ graft onebot_adapter/webui/static
 include LICENSE
 include README.md
 include CHANGELOG.md
+include AGENTS.md
+include docs/*.md

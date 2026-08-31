@@ -251,10 +251,11 @@ def commands_refresh_message() -> dict[str, Any]:
 
 
 def idle_message(chat_id: str, group_id: str) -> dict[str, Any]:
-    """P->A: Hermes plugin -> adapter service.  Plugin fires this after a
-    shared-group session finishes processing a turn (via the host's
-    ``register_post_delivery_callback`` hook).  The adapter uses it as the
-    "busy -> idle" signal to dequeue the next queued message for that group.
+    """P->A: Hermes plugin -> adapter service.  Plugin fires this from
+    ``on_processing_complete`` after a shared-group session finishes a turn
+    (slash commands do not send idle).  The adapter waits until inflight for
+    that group reaches zero, then treats it as the "busy -> idle" signal to
+    dequeue the next queued message.
 
     ``chat_id`` is the original event chat_id (``group:<gid>`` form, no
     ``:user:`` suffix — only shared groups send idle).  ``group_id`` is the
