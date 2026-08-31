@@ -7,9 +7,11 @@
 测试覆盖:
 - DM 直接放行 / per_user=True 不排队 / event_queue_enabled=False 不排队
 - shared 群聊 busy 时:同用户且队列空则直接广播;否则入队(含 busy 用户,队列非空时不插队)
+- 同一发送者直推仍算同一 session,一帧 idle 即可出队
 - 连续同用户消息出队时合并为一条
 - /命令绕过排队
 - idle 帧 dequeue + dispatch
+- /clean 同时释放 busy
 - 队列超限拒绝新消息
 - 看门狗超时清空
 - plugin 断开清空 busy
@@ -154,28 +156,24 @@ async def test_shared_group_busy_same_user_empty_queue_bypasses():
     assert "42" in relay._busy_groups
     assert relay._busy_groups["42"][0] == "100"
     assert relay._busy_groups["42"][1] > since - 10
-    assert relay._busy_inflight["42"] == 2
+    assert relay._busy_epoch["42"] == 1
 
 
-async def test_same_user_bypass_idle_waits_for_all_inflight_turns():
-    """Bypass increments inflight so the first idle does not dequeue the next user."""
+async def test_same_user_bypass_idle_releases_session():
+    """Same-user redirect/steer is one Hermes session: one idle dequeues the next user."""
     relay, _, _ = _make_relay()
     relay._broadcast_event = AsyncMock()
     await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
     await relay._enqueue_or_broadcast(_group_event("followup", gid="42", uid="100", mid="2"))
     await relay._enqueue_or_broadcast(_group_event("other", gid="42", uid="200", mid="3"))
-    assert relay._busy_inflight["42"] == 2
+    assert relay._busy_epoch["42"] == 1
     assert [e.user_id for e in relay._queues["42"]] == ["200"]
 
     await relay._handle_idle({"group_id": "42"})
     await asyncio.sleep(0)
-    assert relay._broadcast_event.await_count == 2
-    assert relay._busy_groups["42"][0] == "100"
-    assert [e.user_id for e in relay._queues["42"]] == ["200"]
-
-    await relay._handle_idle({"group_id": "42"})
-    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 3
     assert relay._busy_groups["42"][0] == "200"
+    assert "42" not in relay._queues
 
 
 async def test_shared_group_busy_same_user_nonempty_queue_enqueues():
@@ -435,6 +433,25 @@ async def test_stop_cleanup_noop_if_idle_arrives_first():
     assert relay._broadcast_event.await_count == 3  # still 3, no extra dequeue
 
 
+async def test_stop_cleanup_still_runs_after_busy_timestamp_refresh():
+    """A send that refreshes busy timestamp must not cancel delayed /stop cleanup."""
+    relay, _, _ = _make_relay()
+    relay._STOP_IDLE_DELAY = 0.05
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    epoch = relay._busy_epoch["42"]
+    busy_user, _ = relay._busy_groups["42"]
+    await relay._touch_busy_group("group:42", True)
+    assert relay._busy_groups["42"][0] == busy_user
+    assert relay._busy_epoch["42"] == epoch
+    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
+    await asyncio.sleep(0.2)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 3
+    assert relay._busy_groups["42"][0] == "200"
+
+
 async def test_new_and_reset_commands_clear_pending_queue_by_default():
     """/new 和 /reset 默认丢弃当前群待处理消息,命令本身仍转发 Hermes。"""
     for cmd in ("/new", "/reset"):
@@ -487,9 +504,29 @@ async def test_clean_command_clears_only_current_group_without_forwarding():
     assert result == "handled"
     assert relay._broadcast_event.await_count == 2
     assert "42" not in relay._queues
+    assert "42" not in relay._busy_groups
+    assert "43" in relay._busy_groups
     assert [event.text for event in relay._queues["43"]] == ["queued-43"]
     assert [entry[1].text for entry in relay._ring_buffer] == ["active-42", "active-43", "queued-43"]
     mock_api.send_group_msg.assert_awaited_once()
+    sent = mock_api.send_group_msg.await_args.args[1]
+    assert any("busy" in str(seg) for seg in sent)
+
+
+async def test_clean_command_releases_busy_so_next_message_runs():
+    """After /clean, a new message must claim busy immediately instead of enqueueing."""
+    relay, mock_api, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    mock_api.send_group_msg = AsyncMock(return_value={"message_id": 99})
+    await relay.push_event(_group_event("active", gid="42", uid="100", mid="1"))
+    await relay.push_event(_group_event("queued", gid="42", uid="200", mid="2"))
+    await relay.push_event(_group_event("/clean", gid="42", uid="100", mid="3"))
+    assert "42" not in relay._busy_groups
+
+    result = await relay.push_event(_group_event("after-clean", gid="42", uid="300", mid="4"))
+    assert result == "broadcast"
+    assert relay._busy_groups["42"][0] == "300"
+    assert "42" not in relay._queues
 
 
 async def test_clean_command_can_be_disabled_and_forwarded_to_hermes():

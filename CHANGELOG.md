@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-01
+
+### 修复
+- shared 群聊排队：同一发送者在 busy 期间跟进、被 Hermes `redirect`/`steer` 吞进当前 turn 时，适配器不再额外等待第二帧 idle，避免任务已结束后整队持续排队（日志特征 `inflight remaining=1 — not dequeuing`）
+- 插件仅在 Hermes session 没有 pending/debounce 后续时发送 idle，与网关「一轮可能吞多条跟进」的语义对齐
+- `/clean` 同时释放该群 busy 槽，下一则消息可立即处理（不再只清队列、留下幽灵 busy，现场不必重启适配器）
+- `/stop` `/new` `/reset` 的 3 秒延迟清理按 busy 代数识别槽位，bot 发送刷新时间戳不会再取消强制出队
+
+### 变更
+- 群聊 idle 表示 Hermes session 已空闲，不再按直推次数凑齐 inflight
+
+### 升级说明
+- 无需手动迁移配置
+- **必须**重新安装随包提供的 Hermes 插件并重启 Hermes 网关；只升级适配器服务、不重装插件时，上述 idle 修复不会生效
+- 升级后若群聊仍在排队，发 `/clean` 即可释放 busy；`/stop` 在 Hermes 已空闲时解不开适配器侧卡死
+
+### 文档
+- README / REST API / WebUI 聊天配置补充 session 级 idle、`/clean` 解堵与升级必须重装插件的说明
+
 ## [1.6.0] - 2026-08-31
 
 ### 新增

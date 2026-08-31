@@ -2,7 +2,7 @@
 
 Compact guide for OpenCode sessions working in this repo. Read this before editing.
 
-User-facing docs and the REST API live under [docs/README.md](docs/README.md). Update [CHANGELOG.md](CHANGELOG.md) before tagging a release.
+User-facing docs and the REST API live under [docs/README.md](docs/README.md). Update [CHANGELOG.md](CHANGELOG.md) before tagging a release. Queue/idle protocol changes require reinstalling the bundled Hermes plugin.
 
 ## What this is
 
@@ -82,7 +82,7 @@ Key modules:
 - `onebot_adapter/logging_utils.py` / `onebot_adapter/onebot/log_format.py` — bounded/redacted DEBUG serialization and message-flow logs. Console/WebUI preview copies use the non-propagating `onebot_adapter.onebot.message_preview` logger; persistent message copies use `onebot_adapter.file` according to `log_file_message_mode` (`none`/`preview`/`full`, default `preview`). Candidate messages that do not reach Hermes log `丢弃 -- reason=` at DEBUG (`user_filter`/`mention`/`command`/`blacklist`/`rate_limit`/`empty`) without bodies. Successful OneBot `send_*` / `upload_*_file` calls emit `发送 ->` from `OneBotApi.call`. WebUI `GET /api/v1/logs` is the 500-line memory buffer; `GET /api/v1/logs/file` tails `adapter.log` and `GET /api/v1/logs/file/download` downloads it.
 - `onebot_adapter/update_check.py` — `check_for_updates()`: queries GitHub tags API, compares against `__version__` (strips setuptools-scm `.dev*`/`.dirty` suffixes), caches result 1h (errors 5min). Exposed via `GET /api/v1/update_check`.
 - `onebot_adapter/rate_limit.py` — persistent global/group/user inbound rate limiter. Buckets live in `~/.onebot_adapter/rate_limit.sqlite3` (beside the configured `config.json`) and accepted multi-scope consumption is committed atomically before relay delivery. Sliding windows persist timestamps; token buckets persist tokens + wall-clock update time so downtime naturally refills/expires quota. `rate_limit_storage_failure_mode` selects `memory_fallback` (default, ordered pending operations replay after recovery) or `reject`. Disabling the master switch preserves buckets. WebUI query/reset routes call `quota()`/`reset()`; reset is scoped and audited.
-- `onebot_adapter/hermes_plugin/adapter.py` — `OneBotAdapter(BasePlatformAdapter)` runs inside the Hermes gateway. Imports from `gateway.*` and `hermes_cli.*` are lazy (try/except) so the file is importable standalone. On connect/reconnect it pushes a `commands_snapshot` frame built from `hermes_cli.commands.COMMAND_REGISTRY` + `hermes_cli.plugins.get_plugin_commands()`. Shared-group queueing fires `idle` from `on_processing_complete` (Hermes pops `register_post_delivery_callback(generation=None)` without running it). Sets `MessageEvent.internal` from `NormalizedEvent.is_system_notice` so synthetic notice events (戳一戳/进退群) bypass Hermes' text debounce. Reads `media_delivery_mode` and `file_upload_timeout` from the `ready` frame; the group upload RPC wait limit is the configured timeout plus a 40s confirmation margin，私聊和闪传上传增加 30s 余量。RPC results whose futures belong to a worker-thread event loop are resolved through `call_soon_threadsafe`. In `cache` mode (default) calls `_cache_media_items` which uses `cache_image_from_url`/`cache_audio_from_url`/`cache_video_from_bytes`/`cache_document_from_bytes` from `gateway.platforms.base` to download media to `~/.hermes/cache/` and fills `MessageEvent.media_urls`/`media_types` with local paths; in `passthrough` mode media URLs stay inline in the text as placeholders and `media_urls` is empty. File segments without a URL are always skipped (LLM uses `onebot_get_file` tool). Outbound sends pass file paths/URLs as strings in the JSON `send` frame — no binary upload, no `send_bytes`.
+- `onebot_adapter/hermes_plugin/adapter.py` — `OneBotAdapter(BasePlatformAdapter)` runs inside the Hermes gateway. Imports from `gateway.*` and `hermes_cli.*` are lazy (try/except) so the file is importable standalone. On connect/reconnect it pushes a `commands_snapshot` frame built from `hermes_cli.commands.COMMAND_REGISTRY` + `hermes_cli.plugins.get_plugin_commands()`. Shared-group queueing fires `idle` from `on_processing_complete` only when the session has no pending/debounce follow-up (Hermes pops `register_post_delivery_callback(generation=None)` without running it). Sets `MessageEvent.internal` from `NormalizedEvent.is_system_notice` so synthetic notice events (戳一戳/进退群) bypass Hermes' text debounce. Reads `media_delivery_mode` and `file_upload_timeout` from the `ready` frame; the group upload RPC wait limit is the configured timeout plus a 40s confirmation margin，私聊和闪传上传增加 30s 余量。RPC results whose futures belong to a worker-thread event loop are resolved through `call_soon_threadsafe`. In `cache` mode (default) calls `_cache_media_items` which uses `cache_image_from_url`/`cache_audio_from_url`/`cache_video_from_bytes`/`cache_document_from_bytes` from `gateway.platforms.base` to download media to `~/.hermes/cache/` and fills `MessageEvent.media_urls`/`media_types` with local paths; in `passthrough` mode media URLs stay inline in the text as placeholders and `media_urls` is empty. File segments without a URL are always skipped (LLM uses `onebot_get_file` tool). Outbound sends pass file paths/URLs as strings in the JSON `send` frame — no binary upload, no `send_bytes`.
 - `onebot_adapter/hermes_plugin/onebot_tools.py` — canonical 100-tool OneBot catalog and handlers. Hermes registration reads sparse `plugins.entries.onebot.tool_policies` from Hermes `config.yaml`, omits `registered=false` entries, and wraps enabled handlers with `everyone`/`admin` checks; registration changes require a Hermes restart. **12 个工具默认隐藏**（`_DEFAULT_HIDDEN_TOOL_NAMES`：4 个原有工具 + 8 个闪传/文件集工具）；闪传工具仅 Windows 版客户端可用且涉及本机文件读取/上传，需在 WebUI 显式启用。HTTP calls use the complete raw catalog through `_api_caller`, so policy never removes or restricts automation routes. `admin` distinguishes global admins from group admins via `NormalizedEvent.is_global_admin`: group admins are limited to the current group, while account/cross-group operations require a global admin. Tool schemas use `real_seq`; essence/todo/emoji actions join the existing adapter-side SeqMap conversion.
 - `onebot_adapter/onebot/seq_map.py` — `SeqMap`: **global FIFO** `real_seq → message_id` ring buffer (configurable via `seq_map_size`, default 4500, aligned with NapCat's 5000-entry `MessageUnique` LRU). Populated on the receive-loop fast path (`OneBotEventDispatcher.dispatch` / `record_inbound_seq`) **before** the bounded event queue, so overflow drops still keep mappings, and in `HermesRelayServer._handle_send` for bot's own outgoing messages (via `get_msg` to fetch `real_seq`). Used by `HermesRelayServer._resolve_seq_params` to convert LLM-supplied `real_seq` back to `message_id` for OneBot API calls. On miss, passes through `real_seq` as `message_id` (go-cqhttp/Lagrange compat).
 - `onebot_adapter/webui/routes.py` — versioned management API + static SPA hosting. All business routes live under `/api/v1`; `/api/v1/health`, `/api/v1/auth/login`, and `/api/v1/openapi.json` are public, management routes use a signed WebUI session, and `/api/v1/tools*` uses the separate automation API key. Unknown `/api/*` paths return JSON 404 instead of the SPA.
@@ -111,7 +111,7 @@ Hermes → OneBot 发送路径上的文本过滤，实现于 `outbound_filter.py
 
 防止 shared 群聊中多个群成员的消息互相打断 agent 当前任务。**只在 Hermes `group_sessions_per_user=false`（全群共享 session）且适配器 `event_queue_enabled=true` 时生效**；per_user 模式每人独立 session，无需排队。
 
-**机制**：适配器侧 `HermesRelayServer` 维护 per-group busy 槽 + inflight 计数 + FIFO 队列；插件侧在 `on_processing_complete` 里对 shared 群聊发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧，适配器在 inflight 归零后 dequeue 下一条。同一发送者直推会增加 inflight，避免第一条 idle 提前放出下一个人。
+**机制**：适配器侧 `HermesRelayServer` 维护 per-group busy 槽 + FIFO 队列；插件侧在 `on_processing_complete` 里，仅当该 session 没有 pending/debounce 后续时发 `{"type":"idle","v":1,"chat_id":"group:<gid>","group_id":"<gid>"}` 帧。适配器把 idle 当作 session 空闲信号并 dequeue 下一条。同一发送者在 busy 且队列为空时直推（喂给 Hermes 当前 session 的 redirect/steer/pending），**不再**额外计数。
 
 **判定规则**（`HermesRelayServer._enqueue_or_broadcast`）：
 - 私聊：直接广播，不排队
@@ -119,20 +119,20 @@ Hermes → OneBot 发送路径上的文本过滤，实现于 `outbound_filter.py
 - 适配器总开关关闭(``event_queue_enabled=False``)：直接广播，不排队
 - 以上条件全部不满足(共享 + 开关开)：
   - 群未 busy → 标记 busy（记录 user_id + 时间戳），广播
-  - 群 busy 且发送者 == 当前 busy 用户且队列为空 → 直接广播（刷新 busy 时间戳，不入队）
+  - 群 busy 且发送者 == 当前 busy 用户且队列为空 → 直接广播（刷新 busy 时间戳，不入队；仍算同一 session）
   - 群 busy 其他情况 → 入队 `self._queues[gid]`（FIFO,包括 busy 用户自身；队列非空时 busy 用户也不能插队）
   - 出队时连续同用户消息自动合并为一条（`\n\n` 拼接 text）
 - `/` 开头的消息：**始终绕过排队直接广播**（与 ring buffer 跳过 /command 同思路）
 - `/new`、`/reset`：`event_queue_clear_on_session_reset=true`（默认）时先清空当前群待处理队列，再广播给 Hermes；不影响当前 busy turn
-- `/clean`：`event_queue_clean_command_enabled=true`（默认）时由适配器本地清空当前群待处理队列并直接回复，不广播给 Hermes
+- `/clean`：`event_queue_clean_command_enabled=true`（默认）时由适配器本地清空当前群待处理队列并释放 busy，不广播给 Hermes
 
-**插件侧判定**（`hermes_plugin/adapter.py::on_processing_complete`）：读 `self.config.extra.get("group_sessions_per_user", True)`——与 `BasePlatformAdapter.handle_message` 完全一致。只有 `group_sessions_per_user=False` 且 chat_id 是群聊、且不是 `/` 命令时才发 idle。
+**插件侧判定**（`hermes_plugin/adapter.py::on_processing_complete`）：读 `self.config.extra.get("group_sessions_per_user", True)`——与 `BasePlatformAdapter.handle_message` 完全一致。只有 `group_sessions_per_user=False`、chat_id 是群聊、不是 `/` 命令、且该 session 没有 `_pending_messages` / 文本 debounce 后续时才发 idle。
 
 **看门狗**（`_watchdog_loop`）：周期扫 `_busy_groups`，超过 `event_queue_idle_timeout`（默认 300s，可配置）未收到 idle 帧则强制清空 busy 并派发下一条。兜底 plugin 崩溃 / idle 帧丢失导致永久卡死。
 
-**`/stop` idle 丢失补救**（`_delayed_stop_cleanup`）：Hermes gateway 的 `/stop`、`/new`、`/reset` 通过 bump generation 中断当前 turn,导致 stale run 的 `post_delivery_callback` 被 pop 而不触发（`run.py:11099-11112`），adapter 收不到 idle 帧 → 队列卡死。适配器在 broadcast 这些命令后 schedule 一个 `_STOP_IDLE_DELAY`（3s）延迟任务：若 gateway 正常发 idle 则在 per-group lock 下先处理,延迟任务看到 busy 已清就 no-op；若没发 idle 则延迟任务 force-clear。看门狗（300s）是最终兜底。
+**`/stop` idle 丢失补救**（`_delayed_stop_cleanup`）：Hermes gateway 的 `/stop`、`/new`、`/reset` 通过 bump generation 中断当前 turn,导致 stale run 的 `post_delivery_callback` 被 pop 而不触发（`run.py:11099-11112`），adapter 收不到 idle 帧 → 队列卡死。适配器在 broadcast 这些命令后 schedule 一个 `_STOP_IDLE_DELAY`（3s）延迟任务，用 `(busy_user, epoch)` 识别槽位（send 刷新时间戳不会取消清理）：若 gateway 正常发 idle 则 epoch 已变,延迟任务 no-op；若没发 idle 则 force-clear。看门狗（300s）是最终兜底。
 
-**清理时机**：最后一个 plugin client 断开时清空所有 busy/queue（无人发 idle，留着只会等看门狗超时）；`stop()` 取消 watchdog 并清空状态；ring buffer replay 开始时清空 queue/busy（重新建立状态）。
+**清理时机**：`/clean` 清空当前群队列并释放 busy；最后一个 plugin client 断开时清空所有 busy/queue（无人发 idle，留着只会等看门狗超时）；`stop()` 取消 watchdog 并清空状态；ring buffer replay 开始时清空 queue/busy（重新建立状态）。
 
 **与 ring buffer 的关系**：push_event 始终写 ring buffer（用于 plugin 重连重放）；replay 时走 `_enqueue_or_broadcast` 重新评估排队状态，避免重连瞬间把多条 shared 群消息一次性推给 plugin。
 
@@ -141,7 +141,7 @@ Hermes → OneBot 发送路径上的文本过滤，实现于 `outbound_filter.py
 - `event_queue_max_per_chat`（默认 50）：单群队列上限，超限拒绝入队
 - `event_queue_idle_timeout`（默认 300.0 秒）：看门狗超时阈值
 - `event_queue_clear_on_session_reset`（默认 True）：使用 `/new`、`/reset` 时清空当前群待处理队列
-- `event_queue_clean_command_enabled`（默认 True）：启用适配器本地 `/clean` 清队列命令
+- `event_queue_clean_command_enabled`（默认 True）：启用适配器本地 `/clean` 清队列并释放 busy
 
 ## Config file
 

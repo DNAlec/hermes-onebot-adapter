@@ -741,12 +741,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             "OneBot plugin → Hermes: chat_id=%s",
             message_event.source.chat_id,
         )
-        # 群聊排队:shared 群聊(group:<gid> 无 :user: 且 Hermes group_sessions_per_user=False)
-        # 才注册 post_delivery callback,处理完后发 idle 帧给适配器,适配器 dequeue 下一条。
-        # per_user 群聊 / 私聊 / Hermes per_user 隔离时不注册(无需排队)。
-        # Idle is fired from on_processing_complete after the turn finishes.
-        # register_post_delivery_callback(generation=None) is ignored by
-        # Hermes when it pops with a run generation.
+        # 群聊排队:shared 群聊且 Hermes group_sessions_per_user=False 时,
+        # on_processing_complete 在 session 没有 pending/debounce 后续时发 idle。
         # Dispatch handle_message as a background task so the receive loop is
         # NOT blocked.  Previously this was ``await self.handle_message(...)``
         # which deadlocked when handle_message hit the bypass-active-session
@@ -832,7 +828,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.warning("OneBot: event ack send failed", exc_info=True)
 
     async def on_processing_complete(self, event, outcome=None, *args, **kwargs) -> None:
-        """Fire idle after a shared-group turn so the adapter can dequeue."""
+        """Fire idle after a shared-group session is actually free."""
         try:
             parent = getattr(super(), "on_processing_complete", None)
             if callable(parent):
@@ -852,11 +848,60 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if text.lstrip().startswith("/"):
             return
         try:
-            if self.config.extra.get("group_sessions_per_user", True):
+            extra = getattr(self.config, "extra", None) or {}
+            if extra.get("group_sessions_per_user", True):
                 return
         except Exception:
             return
+        if self._session_has_followup(event):
+            logger.info(
+                "OneBot: skip idle — session still has pending/debounce follow-up chat_id=%s",
+                chat_id,
+            )
+            return
         await self._send_idle(chat_id)
+
+    def _session_key_for_event(self, event: Any) -> str:
+        if build_session_key is None:
+            return ""
+        source = getattr(event, "source", None)
+        if source is None:
+            return ""
+        try:
+            extra = getattr(self.config, "extra", None) or {}
+            profile = None
+            if hasattr(self, "_session_key_profile"):
+                profile = self._session_key_profile(source)
+            return str(
+                build_session_key(
+                    source,
+                    group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                    thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+                    profile=profile,
+                )
+                or ""
+            )
+        except Exception:
+            logger.debug("OneBot: session key for idle check failed", exc_info=True)
+            return ""
+
+    def _session_has_followup(self, event: Any) -> bool:
+        """Return True when Hermes will start another turn for this session."""
+        session_key = self._session_key_for_event(event)
+        if not session_key:
+            return False
+        pending = getattr(self, "_pending_messages", None)
+        if isinstance(pending, dict) and session_key in pending:
+            return True
+        store: Any = getattr(self, "_text_debounce", None)
+        if store is None:
+            getter = getattr(self, "_text_debounce_store", None)
+            if callable(getter):
+                try:
+                    store = getter()
+                except Exception:
+                    store = None
+        return isinstance(store, dict) and session_key in store
 
     async def _send_idle(self, chat_id: str) -> None:
         ws = self._ws

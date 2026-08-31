@@ -42,3 +42,28 @@ async def test_dm_does_not_fire_idle():
     adapter = _make_adapter()
     await adapter.on_processing_complete(_event("100", "hello"))
     adapter._send_idle.assert_not_called()
+
+
+async def test_pending_followup_skips_idle():
+    adapter = _make_adapter()
+    adapter._session_key_for_event = lambda _event: "session:42"
+    adapter._pending_messages = {"session:42": object()}
+    await adapter.on_processing_complete(_event("group:42", "hello"))
+    adapter._send_idle.assert_not_called()
+
+
+async def test_debounce_followup_skips_idle():
+    adapter = _make_adapter()
+    adapter._session_key_for_event = lambda _event: "session:42"
+    adapter._text_debounce = {"session:42": object()}
+    await adapter.on_processing_complete(_event("group:42", "hello"))
+    adapter._send_idle.assert_not_called()
+
+
+async def test_idle_fires_when_session_has_no_followup():
+    adapter = _make_adapter()
+    adapter._session_key_for_event = lambda _event: "session:42"
+    adapter._pending_messages = {}
+    adapter._text_debounce = {}
+    await adapter.on_processing_complete(_event("group:42", "hello"))
+    adapter._send_idle.assert_awaited_once_with("group:42")
