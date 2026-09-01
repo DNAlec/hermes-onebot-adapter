@@ -34,6 +34,7 @@ from onebot_adapter.config import (
 )
 from onebot_adapter.logging_utils import text_summary
 from onebot_adapter.onebot.api import OneBotApi
+from onebot_adapter.onebot.friend_cache import FriendCache
 from onebot_adapter.onebot.log_format import (
     detach_preview_logger_handlers,
     log_dropped_event,
@@ -133,6 +134,7 @@ class AdapterService:
         self._cleaning_up = False
         self._usage_stats: UsageStatsStore | None = None
         self._bot_blacklist: BotBlacklistStore | None = None
+        self._friend_cache: FriendCache | None = None
         self._rate_limiter = MessageRateLimiter()
         self._state["rate_limiter"] = self._rate_limiter
         self._config_change_lock = asyncio.Lock()
@@ -151,6 +153,7 @@ class AdapterService:
         self._state["local_api_call"] = self._handle_local_api_call
         self._name_resolver = NameResolver(self._api)
         self._api.configure_send_logging(config=cfg, name_resolver=self._name_resolver)
+        self._friend_cache = FriendCache(self._api)
         self._seq_map = SeqMap(maxlen=cfg.seq_map_size)
         self._relay = HermesRelayServer(
             cfg,
@@ -178,6 +181,7 @@ class AdapterService:
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
             bot_blacklist_match_fn=self._match_bot_blacklist,
+            friend_cache=self._friend_cache,
         )
         self._onebot_forward = OneBotForwardClient(
             cfg,
@@ -193,6 +197,7 @@ class AdapterService:
             name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
             bot_blacklist_match_fn=self._match_bot_blacklist,
+            friend_cache=self._friend_cache,
         )
         # Register config-change listener early so hot-reload via the WebUI
         # (which starts first) notifies components immediately — previously

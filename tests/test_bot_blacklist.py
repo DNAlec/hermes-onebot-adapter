@@ -103,7 +103,7 @@ async def test_parser_blacklist_after_group_trigger_and_before_delivery(tmp_path
         reason="刷屏", created_by_user_id="200",
     )
     cfg = AdapterConfig(
-        onebot_ws_token="x", hermes_ws_token="y", dm_user_filter_mode="blacklist",
+        onebot_ws_token="x", hermes_ws_token="y", dm_policy="allow",
         bot_blacklist_reject_message="blocked {user_id} {remaining} {reason}",
     )
     def match(uid, gid):
@@ -134,7 +134,7 @@ async def test_parser_global_scope_dm_and_admin_exemption(tmp_path):
     def match(uid, gid):
         return store.match(user_id=uid, group_id=gid)
     cfg = AdapterConfig(
-        onebot_ws_token="x", hermes_ws_token="y", dm_user_filter_mode="blacklist",
+        onebot_ws_token="x", hermes_ws_token="y", dm_policy="allow",
     )
     blocked = await parse_event(
         _dm_event(), self_id="999", group_require_mention=True,
@@ -156,6 +156,29 @@ async def test_parser_global_scope_dm_and_admin_exemption(tmp_path):
         config=cfg, bot_blacklist_match_fn=match,
     )
     assert group_allowed is not None and not isinstance(group_allowed, FilteredEvent)
+    store.close()
+
+
+async def test_parser_dm_whitelist_cannot_override_bot_blacklist(tmp_path):
+    store = _store(tmp_path)
+    store.set(
+        scope="dm", user_id="100", duration_seconds=3600,
+        reason="spam", created_by_user_id="200",
+    )
+
+    def match(uid, gid):
+        return store.match(user_id=uid, group_id=gid)
+
+    cfg = AdapterConfig(
+        onebot_ws_token="x", hermes_ws_token="y",
+        dm_policy="deny", dm_whitelist=["100"],
+    )
+    blocked = await parse_event(
+        _dm_event(), self_id="999", group_require_mention=True,
+        config=cfg, bot_blacklist_match_fn=match,
+    )
+    assert isinstance(blocked, FilteredEvent)
+    assert blocked.filter_type == "bot_blacklist"
     store.close()
 
 
@@ -204,7 +227,7 @@ async def test_poke_dynamic_blacklist_is_filtered(tmp_path, scope, group_id, eve
     )
     cfg = AdapterConfig(
         onebot_ws_token="x", hermes_ws_token="y", self_id="999", notify_poke_enabled=True,
-        dm_user_filter_mode="blacklist",
+        dm_policy="allow",
     )
 
     def match(uid, gid):
@@ -296,7 +319,7 @@ async def test_handler_dispatches_blocked_poke_to_filtered_callback(tmp_path):
     )
     cfg = AdapterConfig(
         onebot_ws_token="x", hermes_ws_token="y", self_id="999", notify_poke_enabled=True,
-        dm_user_filter_mode="blacklist",
+        dm_policy="allow",
     )
 
     def match(uid, gid):

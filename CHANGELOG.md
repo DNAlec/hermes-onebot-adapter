@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-01
+
+### 新增
+- 私聊被拒回复：`dm_reject_reply_enabled`（默认关闭，静默丢弃）开启后向对方回复 `dm_reject_message`（默认 `⛔ 当前私聊策略为：{reason}`）
+  - `{reason}`：禁止私聊模式和私聊黑名单 →「禁止私聊」；仅限好友且非好友 →「仅限好友」
+  - WebUI「聊天配置 → 私聊设置」可开关并编辑文案
+
+### 变更
+- 私聊准入不再用黑/白名单模式二选一，改为三种模式 + 常驻名单：
+  - `dm_policy`：`allow`（允许私聊）/ `deny`（禁止私聊，默认）/ `friends`（仅限好友）
+  - `dm_blacklist`：无论何种模式都禁止
+  - `dm_whitelist`：无论是否好友、是否禁止私聊都允许，但不能覆盖 bot 动态黑名单
+  - 同一用户同时在黑白名单时，黑名单优先
+  - 「仅限好友」通过 OneBot `get_friend_list` 判断（有缓存）
+
+### 升级说明
+- 无需手动迁移配置；加载时把旧 `dm_user_filter_mode` / `dm_user_list` 映射到新字段，下次保存写出
+  - 旧 `whitelist` → `deny` + 白名单
+  - 旧 `blacklist` → `allow` + 黑名单
+- 默认仍拒绝所有私聊（与旧「白名单空」一致）；需要全员可私聊改为「允许私聊」，需要仅好友改为「仅限好友」，需要被拒时提示则开启「私聊被拒时回复」
+- **不必**重装 Hermes 插件；升级并重启适配器服务即可（配置热加载后也会生效）
+
+### 文档
+- README / REST API / WebUI 同步私聊三模式、常驻名单与被拒回复
+
 ## [1.6.1] - 2026-09-01
 
 ### 修复
@@ -238,7 +263,9 @@
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
 
-[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.1...v1.7.0
+[1.6.1]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.3.0...v1.4.0

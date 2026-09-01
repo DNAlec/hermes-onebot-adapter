@@ -21,6 +21,11 @@ def test_config_defaults_validate(tmp_path):
     assert cfg.event_queue_clear_on_session_reset is True
     assert cfg.event_queue_clean_command_enabled is True
     assert cfg.file_upload_timeout == 600.0
+    assert cfg.dm_policy == "deny"
+    assert cfg.dm_whitelist == []
+    assert cfg.dm_blacklist == []
+    assert cfg.dm_reject_reply_enabled is False
+    assert cfg.dm_reject_message == "⛔ 当前私聊策略为：{reason}"
 
 
 def test_config_default_tokens_empty_before_ensure():
@@ -35,6 +40,64 @@ def test_config_forward_requires_url():
     cfg = AdapterConfig(onebot_mode="forward", onebot_forward_ws_url="")
     errors = cfg.validate()
     assert any("onebot_forward_ws_url" in e for e in errors)
+
+
+def test_legacy_dm_whitelist_migrates_to_deny_plus_whitelist():
+    cfg = AdapterConfig.from_dict({
+        "onebot_ws_token": "t1",
+        "hermes_ws_token": "t2",
+        "dm_user_filter_mode": "whitelist",
+        "dm_user_list": ["100", 200],
+    })
+    assert cfg.dm_policy == "deny"
+    assert cfg.dm_whitelist == ["100", "200"]
+    assert cfg.dm_blacklist == []
+    assert cfg.is_dm_allowed("100") is True
+    assert cfg.is_dm_allowed("200") is True
+    assert cfg.is_dm_allowed("300") is False
+
+
+def test_legacy_dm_blacklist_migrates_to_allow_plus_blacklist():
+    cfg = AdapterConfig.from_dict({
+        "onebot_ws_token": "t1",
+        "hermes_ws_token": "t2",
+        "dm_user_filter_mode": "blacklist",
+        "dm_user_list": ["100"],
+    })
+    assert cfg.dm_policy == "allow"
+    assert cfg.dm_blacklist == ["100"]
+    assert cfg.dm_whitelist == []
+    assert cfg.is_dm_allowed("100") is False
+    assert cfg.is_dm_allowed("200") is True
+
+
+def test_legacy_dm_fields_ignored_when_new_fields_present():
+    cfg = AdapterConfig.from_dict({
+        "onebot_ws_token": "t1",
+        "hermes_ws_token": "t2",
+        "dm_policy": "friends",
+        "dm_whitelist": ["1"],
+        "dm_blacklist": ["2"],
+        "dm_user_filter_mode": "blacklist",
+        "dm_user_list": ["999"],
+    })
+    assert cfg.dm_policy == "friends"
+    assert cfg.dm_whitelist == ["1"]
+    assert cfg.dm_blacklist == ["2"]
+
+
+def test_dm_policy_invalid():
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", dm_policy="whitelist")
+    errors = cfg.validate()
+    assert any("dm_policy" in e for e in errors)
+
+
+def test_dm_reject_message_must_not_be_empty():
+    cfg = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", dm_reject_message="  ",
+    )
+    errors = cfg.validate()
+    assert any("dm_reject_message" in e for e in errors)
 
 
 def test_config_media_delivery_mode_invalid():
@@ -216,7 +279,8 @@ def test_save_config_includes_comments(tmp_path):
     assert "_comment_onebot_ws_token" in data
     assert "_comment_hermes_ws_token" in data
     assert "_comment_webui_token_lifetime_hours" in data
-    assert "_comment_dm_user_filter_mode" in data
+    assert "_comment_dm_policy" in data
+    assert "_comment_dm_reject_reply_enabled" in data
     assert "_comment_log_level" in data
     assert "_comment_groups" in data
 

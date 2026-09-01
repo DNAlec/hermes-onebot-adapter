@@ -37,6 +37,14 @@ USER_FILTER_WHITELIST = "whitelist"
 USER_FILTER_BLACKLIST = "blacklist"
 _VALID_USER_FILTER_MODES = {USER_FILTER_WHITELIST, USER_FILTER_BLACKLIST}
 
+DM_POLICY_ALLOW = "allow"
+DM_POLICY_DENY = "deny"
+DM_POLICY_FRIENDS = "friends"
+_VALID_DM_POLICIES = {DM_POLICY_ALLOW, DM_POLICY_DENY, DM_POLICY_FRIENDS}
+DM_REJECT_REASON_DENY = "禁止私聊"
+DM_REJECT_REASON_FRIENDS = "仅限好友"
+DEFAULT_DM_REJECT_MESSAGE = "⛔ 当前私聊策略为：{reason}"
+
 MEDIA_DELIVERY_PASSTHROUGH = "passthrough"
 MEDIA_DELIVERY_CACHE = "cache"
 _VALID_MEDIA_DELIVERY_MODES = {MEDIA_DELIVERY_PASSTHROUGH, MEDIA_DELIVERY_CACHE}
@@ -184,8 +192,12 @@ class AdapterConfig:
     global_admins: list[str] = field(default_factory=list)
 
     # ── 私聊设置 ──
-    dm_user_filter_mode: str = USER_FILTER_WHITELIST  # 默认白名单
-    dm_user_list: list[str] = field(default_factory=list)  # 默认空：白名单空=拒绝所有人
+    # allow=允许私聊 / deny=禁止私聊（默认，兼容旧白名单空拒绝） / friends=仅限好友
+    dm_policy: str = DM_POLICY_DENY
+    dm_whitelist: list[str] = field(default_factory=list)  # 常驻白名单：除 bot 拉黑外始终可私聊
+    dm_blacklist: list[str] = field(default_factory=list)  # 常驻黑名单：无论何种模式都禁止私聊
+    dm_reject_reply_enabled: bool = False
+    dm_reject_message: str = DEFAULT_DM_REJECT_MESSAGE
 
     # ── 每群覆盖 ──
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -294,17 +306,45 @@ class AdapterConfig:
         gc = self.get_group_config(group_id)
         return gc.is_user_allowed(user_id)
 
-    def is_dm_allowed(self, user_id: str) -> bool:
-        """Whether *user_id* may DM the bot.
+    def dm_needs_friend_lookup(self, user_id: str) -> bool:
+        """Whether friend status must be queried to decide DM admission."""
+        uid = str(user_id)
+        if uid in self.dm_blacklist or uid in self.dm_whitelist:
+            return False
+        return self.dm_policy == DM_POLICY_FRIENDS
 
-        - ``whitelist`` mode (default): allow only users in the list; empty list = reject all.
-        - ``blacklist`` mode: reject users in the list; empty list = allow all.
+    def dm_reject_reason(self, user_id: str, *, is_friend: bool = False) -> str | None:
+        """Label for a DM admission rejection, or ``None`` if allowed.
+
+        ``禁止私聊`` covers deny mode and the permanent blacklist.
+        ``仅限好友`` is used only for friends-mode non-friends.
         """
         uid = str(user_id)
-        if self.dm_user_filter_mode == USER_FILTER_WHITELIST:
-            return uid in self.dm_user_list
-        # blacklist
-        return uid not in self.dm_user_list
+        if uid in self.dm_blacklist:
+            return DM_REJECT_REASON_DENY
+        if uid in self.dm_whitelist:
+            return None
+        if self.dm_policy == DM_POLICY_ALLOW:
+            return None
+        if self.dm_policy == DM_POLICY_FRIENDS:
+            return None if is_friend else DM_REJECT_REASON_FRIENDS
+        return DM_REJECT_REASON_DENY
+
+    def render_dm_reject_message(self, reason: str) -> str:
+        return self.dm_reject_message.replace("{reason}", reason)
+
+    def is_dm_allowed(self, user_id: str, *, is_friend: bool = False) -> bool:
+        """Whether *user_id* may DM the bot.
+
+        Permanent lists apply in every mode: ``dm_blacklist`` always denies,
+        ``dm_whitelist`` always allows. Mode then decides the rest (``allow``,
+        ``deny``, or ``friends``). Bot dynamic blacklist is checked separately
+        and cannot be overridden by the whitelist.
+
+        When both lists contain the same user, the blacklist wins.
+        ``is_friend`` is only consulted for ``friends`` mode after lists.
+        """
+        return self.dm_reject_reason(user_id, is_friend=is_friend) is None
 
     def is_admin(self, user_id: str, group_id: str | None = None) -> bool:
         uid = str(user_id)
@@ -489,12 +529,41 @@ class AdapterConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AdapterConfig:
+        payload = dict(data)
+        _migrate_legacy_dm_fields(payload)
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        filtered = {k: v for k, v in data.items() if k in known}
+        filtered = {k: v for k, v in payload.items() if k in known}
+        for key in ("dm_whitelist", "dm_blacklist"):
+            value = filtered.get(key)
+            if isinstance(value, list):
+                filtered[key] = [str(item) for item in value]
         return cls(**filtered)
 
     def with_overrides(self, **changes: Any) -> AdapterConfig:
         return replace(self, **changes)
+
+
+def _migrate_legacy_dm_fields(data: dict[str, Any]) -> None:
+    """Map pre-1.7 ``dm_user_filter_mode`` + ``dm_user_list`` onto the new fields.
+
+    Old whitelist mode (default; empty list = reject all) becomes ``deny`` plus
+    a permanent whitelist. Old blacklist mode (empty list = allow all) becomes
+    ``allow`` plus a permanent blacklist. New fields win when already present.
+    """
+    old_mode = data.pop("dm_user_filter_mode", None)
+    old_list = data.pop("dm_user_list", None)
+    has_new = any(key in data for key in ("dm_policy", "dm_whitelist", "dm_blacklist"))
+    if has_new or (old_mode is None and old_list is None):
+        return
+    users = [str(item) for item in old_list] if isinstance(old_list, list) else []
+    if old_mode == USER_FILTER_BLACKLIST:
+        data.setdefault("dm_policy", DM_POLICY_ALLOW)
+        data.setdefault("dm_blacklist", users)
+        data.setdefault("dm_whitelist", [])
+        return
+    data.setdefault("dm_policy", DM_POLICY_DENY)
+    data.setdefault("dm_whitelist", users)
+    data.setdefault("dm_blacklist", [])
 
 
 def _validate_connection_and_storage(cfg: AdapterConfig, errors: list[str]) -> None:
@@ -584,8 +653,16 @@ def _validate_security_and_delivery(cfg: AdapterConfig, errors: list[str]) -> No
         errors.append("automation_upload_allowed_roots must be a list of non-empty paths")
     if not cfg.reaction_emoji_id:
         errors.append("reaction_emoji_id must not be empty")
-    if cfg.dm_user_filter_mode not in _VALID_USER_FILTER_MODES:
-        errors.append(f"dm_user_filter_mode must be one of {sorted(_VALID_USER_FILTER_MODES)}")
+    if cfg.dm_policy not in _VALID_DM_POLICIES:
+        errors.append(f"dm_policy must be one of {sorted(_VALID_DM_POLICIES)}")
+    if not isinstance(cfg.dm_whitelist, list) or not all(isinstance(x, str) for x in cfg.dm_whitelist):
+        errors.append("dm_whitelist must be a list of strings")
+    if not isinstance(cfg.dm_blacklist, list) or not all(isinstance(x, str) for x in cfg.dm_blacklist):
+        errors.append("dm_blacklist must be a list of strings")
+    if not isinstance(cfg.dm_reject_reply_enabled, bool):
+        errors.append("dm_reject_reply_enabled must be bool")
+    if not isinstance(cfg.dm_reject_message, str) or not cfg.dm_reject_message.strip():
+        errors.append("dm_reject_message must not be empty")
     if cfg.log_level.upper() not in _VALID_LOG_LEVELS:
         errors.append(f"log_level must be one of {sorted(_VALID_LOG_LEVELS)}")
     _validate_command_permissions(cfg.command_permissions, "command_permissions", errors)
@@ -708,7 +785,13 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "automation_api_enabled": "自动化工具 API 总开关;默认关闭",
         "automation_api_key_hash": "自动化 API key 的 SHA-256 摘要;原始 key 不落盘",
         "automation_upload_allowed_roots": "自动化 API 可引用的本地文件根目录列表",
-        "dm_user_filter_mode": "可选值: whitelist(白名单,默认) | blacklist(黑名单)",
+        "dm_policy": "可选值: allow(允许私聊) | deny(禁止私聊,默认) | friends(仅限好友);"
+                     "黑白名单始终生效:黑名单一律禁止,白名单一律允许(无法覆盖bot动态黑名单)",
+        "dm_whitelist": "常驻私聊白名单QQ号;无论模式/是否好友均可私聊,但不能覆盖bot动态黑名单",
+        "dm_blacklist": "常驻私聊黑名单QQ号;无论何种模式都禁止私聊",
+        "dm_reject_reply_enabled": "私聊被拒时是否回复提示;默认关闭(静默丢弃)",
+        "dm_reject_message": "私聊被拒回复模板;支持 {reason}。"
+                             "禁止私聊/黑名单→禁止私聊,仅限好友非好友→仅限好友",
         "log_level": "可选值: DEBUG | INFO(默认) | WARNING | ERROR",
         "log_file_message_mode": "文件日志消息正文:none(不记录)|preview(按预览长度截断,默认)|full(完整正文)",
         "log_file_max_bytes": "单个日志文件大小上限(字节,默认10 MiB);达到上限后立即轮转",

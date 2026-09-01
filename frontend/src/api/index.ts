@@ -120,8 +120,11 @@ export interface Config {
   global_admins: string[];
 
   // ── 私聊设置 ──
-  dm_user_filter_mode: string;
-  dm_user_list: string[];
+  dm_policy: string;
+  dm_whitelist: string[];
+  dm_blacklist: string[];
+  dm_reject_reply_enabled: boolean;
+  dm_reject_message: string;
   groups: Record<string, GroupConfig>;
   global_channel_prompt: string;
   hermes_ws_port: number;

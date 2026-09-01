@@ -90,6 +90,7 @@ class _ParseOptions:
     canonical_command_name_fn: Callable[[str], str] | None
     media_delivery_mode: str
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None
+    is_friend_fn: Callable[[str], Any] | None
 
 
 @dataclass
@@ -354,13 +355,14 @@ async def parse_event(
     canonical_command_name_fn: Callable[[str], str] | None = None,
     media_delivery_mode: str = MEDIA_DELIVERY_CACHE,
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
+    is_friend_fn: Callable[[str], Any] | None = None,
 ) -> NormalizedEvent | FilteredEvent | DroppedEvent | None:
     """Parse a OneBot 11 message event.
 
     Returns:
         * :class:`NormalizedEvent` for normal messages.
-        * :class:`FilteredEvent` when the message is a /command or blacklist
-          hit that should get a reject reply (not forwarded to Hermes).
+        * :class:`FilteredEvent` when the message is a /command, blacklist,
+          or DM-policy hit that should get a reject reply (not forwarded to Hermes).
         * :class:`DroppedEvent` when a candidate message is silently dropped
           (``user_filter`` / ``mention`` / ``empty``) — logged at DEBUG without
           the body, not forwarded to Hermes.
@@ -408,6 +410,7 @@ async def parse_event(
             config=config,
             name_resolver=name_resolver,
             bot_blacklist_match_fn=bot_blacklist_match_fn,
+            is_friend_fn=is_friend_fn,
         )
     if post_type != "message":
         return None
@@ -425,9 +428,10 @@ async def parse_event(
         canonical_command_name_fn=canonical_command_name_fn,
         media_delivery_mode=media_delivery_mode,
         bot_blacklist_match_fn=bot_blacklist_match_fn,
+        is_friend_fn=is_friend_fn,
     )
     state = await _prepare_message_state(event, options)
-    if isinstance(state, DroppedEvent):
+    if isinstance(state, (DroppedEvent, FilteredEvent)):
         return state
     if state is None:
         return None
@@ -488,7 +492,7 @@ def _drop_event(
 
 async def _prepare_message_state(
     event: dict[str, Any], options: _ParseOptions,
-) -> _MessageState | DroppedEvent | None:
+) -> _MessageState | DroppedEvent | FilteredEvent | None:
     is_group = event.get("message_type") == "group"
     sender = event.get("sender", {}) or {}
     sender_id = str(event.get("user_id", ""))
@@ -501,7 +505,13 @@ async def _prepare_message_state(
         event.get("message_id"), event.get("real_seq"),
         [item.get("type") for item in (event.get("message", []) or [])],
     )
-    settings = _resolved_message_settings(options, is_group, group_id, sender_id)
+    if not is_group and options.config is not None:
+        blocked = await _dm_admission_block(
+            event, options.config, sender_id, sender_name, options.is_friend_fn,
+        )
+        if blocked is not None:
+            return blocked
+    settings = await _resolved_message_settings(options, is_group, group_id, sender_id)
     if settings is None:
         return _drop_event(
             "user_filter", event, is_group=is_group, sender_id=sender_id,
@@ -545,7 +555,68 @@ async def _prepare_message_state(
     )
 
 
-def _resolved_message_settings(
+async def _lookup_dm_reject_reason(
+    config: AdapterConfig,
+    user_id: str,
+    is_friend_fn: Callable[[str], Any] | None,
+) -> str | None:
+    """Apply permanent DM lists, then policy (including optional friend lookup)."""
+    is_friend = False
+    if config.dm_needs_friend_lookup(user_id):
+        if is_friend_fn is None:
+            return config.dm_reject_reason(user_id, is_friend=False)
+        try:
+            is_friend = bool(await is_friend_fn(str(user_id)))
+        except Exception:
+            logger.warning("DM friend lookup failed user_id=%s", user_id, exc_info=True)
+            return config.dm_reject_reason(user_id, is_friend=False)
+    return config.dm_reject_reason(user_id, is_friend=is_friend)
+
+
+def _dm_policy_filtered_event(
+    event: dict[str, Any],
+    *,
+    user_id: str,
+    user_name: str,
+    reason: str,
+    config: AdapterConfig,
+) -> FilteredEvent:
+    message_id = str(event.get("message_id", "") or "")
+    return FilteredEvent(
+        chat_id=user_id,
+        chat_type="dm",
+        user_id=user_id,
+        user_name=user_name,
+        command_name="",
+        reject_message=config.render_dm_reject_message(reason),
+        message_id=message_id,
+        reply_to_message_id=message_id or None,
+        timestamp=float(event.get("time", 0) or 0),
+        filter_type="dm_policy",
+    )
+
+
+async def _dm_admission_block(
+    event: dict[str, Any],
+    config: AdapterConfig,
+    user_id: str,
+    user_name: str,
+    is_friend_fn: Callable[[str], Any] | None,
+) -> DroppedEvent | FilteredEvent | None:
+    reason = await _lookup_dm_reject_reason(config, user_id, is_friend_fn)
+    if reason is None:
+        return None
+    if config.dm_reject_reply_enabled:
+        return _dm_policy_filtered_event(
+            event, user_id=user_id, user_name=user_name, reason=reason, config=config,
+        )
+    return _drop_event(
+        "user_filter", event, is_group=False, sender_id=user_id,
+        sender_name=user_name, group_id="",
+    )
+
+
+async def _resolved_message_settings(
     options: _ParseOptions,
     is_group: bool,
     group_id: str,
@@ -576,8 +647,6 @@ def _resolved_message_settings(
             sender_id in config.global_admins,
             config.media_delivery_mode,
         )
-    if not config.is_dm_allowed(sender_id):
-        return None
     return (
         options.group_require_mention,
         options.mention_first_only,
@@ -949,6 +1018,7 @@ async def _parse_notice_event(
     config: AdapterConfig | None = None,
     name_resolver: NameResolver | None = None,
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
+    is_friend_fn: Callable[[str], Any] | None = None,
 ) -> NormalizedEvent | FilteredEvent | DroppedEvent | None:
     """Parse a OneBot 11 notice event into a synthetic NormalizedEvent.
 
@@ -959,7 +1029,7 @@ async def _parse_notice_event(
 
     All other notice types are ignored (return None).
 
-    戳一戳走群/DM 用户过滤(黑名单/白名单);成员变动不走用户过滤。
+    戳一戳走群用户过滤和私聊准入(模式+常驻黑白名单);成员变动不走用户过滤。
     所有合成事件设置 ``is_system_notice=True``,插件侧据此设 ``internal=True``。
 
     Returns:
@@ -989,8 +1059,9 @@ async def _parse_notice_event(
         return None
 
     if kind == "poke":
-        blocked = _filter_poke_notice(
-            event, config, group_id, is_group, user_id, timestamp, bot_blacklist_match_fn,
+        blocked = await _filter_poke_notice(
+            event, config, group_id, is_group, user_id, timestamp,
+            bot_blacklist_match_fn, is_friend_fn,
         )
         if blocked is not None:
             return blocked
@@ -1057,7 +1128,7 @@ def _notice_kind(
     return None
 
 
-def _filter_poke_notice(
+async def _filter_poke_notice(
     event: dict[str, Any],
     config: AdapterConfig,
     group_id: str,
@@ -1065,13 +1136,18 @@ def _filter_poke_notice(
     user_id: str,
     timestamp: float,
     bot_blacklist_match_fn: Callable[[str, str | None], Any] | None,
+    is_friend_fn: Callable[[str], Any] | None,
 ) -> DroppedEvent | FilteredEvent | None:
-    admitted = config.is_group_user_allowed(group_id, user_id) if is_group else config.is_dm_allowed(user_id)
-    if not admitted:
-        return _drop_event(
-            "user_filter", event, is_group=is_group, sender_id=user_id,
-            sender_name="", group_id=group_id,
-        )
+    if is_group:
+        if not config.is_group_user_allowed(group_id, user_id):
+            return _drop_event(
+                "user_filter", event, is_group=True, sender_id=user_id,
+                sender_name="", group_id=group_id,
+            )
+    else:
+        blocked = await _dm_admission_block(event, config, user_id, "", is_friend_fn)
+        if blocked is not None:
+            return blocked
     is_admin = config.is_admin(user_id, group_id if is_group else None)
     if not config.bot_blacklist_enabled or is_admin or bot_blacklist_match_fn is None:
         return None

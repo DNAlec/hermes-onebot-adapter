@@ -5,7 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from onebot_adapter.onebot import parser
-from onebot_adapter.relay.protocol import DroppedEvent
+from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent
 
 
 def assert_dropped(result: object, reason: str) -> DroppedEvent:
@@ -750,8 +750,7 @@ async def test_message_show_group_id_skipped_for_dm():
     from onebot_adapter.config import AdapterConfig
 
     cfg = AdapterConfig(
-        dm_user_filter_mode="blacklist",
-        dm_user_list=[],
+        dm_policy="allow",
         message_show_group_id=True,
     )
     result = await parser.parse_event(
@@ -1020,7 +1019,7 @@ async def test_notice_poke_bot_in_dm():
     cfg = AdapterConfig(
         onebot_ws_token="t", hermes_ws_token="t",
         notify_poke_enabled=True,
-        dm_user_filter_mode="blacklist",
+        dm_policy="allow",
     )
     result = await parser.parse_event(
         _notice_event("notify", sub_type="poke", user_id=100, target_id=999),
@@ -1105,8 +1104,8 @@ async def test_notice_poke_dm_blacklisted():
     cfg = AdapterConfig(
         onebot_ws_token="t", hermes_ws_token="t",
         notify_poke_enabled=True,
-        dm_user_filter_mode="blacklist",
-        dm_user_list=["100"],
+        dm_policy="allow",
+        dm_blacklist=["100"],
     )
     result = await parser.parse_event(
         _notice_event("notify", sub_type="poke", user_id=100, target_id=999),
@@ -1115,6 +1114,27 @@ async def test_notice_poke_dm_blacklisted():
         config=cfg,
     )
     assert_dropped(result, "user_filter")
+
+
+async def test_notice_poke_dm_reject_reply():
+    """开启拒绝回复后，私聊戳一戳被拒会回提示。"""
+    from onebot_adapter.config import AdapterConfig
+
+    cfg = AdapterConfig(
+        onebot_ws_token="t", hermes_ws_token="t",
+        notify_poke_enabled=True,
+        dm_policy="deny",
+        dm_reject_reply_enabled=True,
+    )
+    result = await parser.parse_event(
+        _notice_event("notify", sub_type="poke", user_id=100, target_id=999),
+        self_id="999",
+        group_require_mention=True,
+        config=cfg,
+    )
+    assert isinstance(result, FilteredEvent)
+    assert result.filter_type == "dm_policy"
+    assert result.reject_message == "⛔ 当前私聊策略为：禁止私聊"
 
 
 async def test_notice_poke_per_group_override():
@@ -1272,7 +1292,7 @@ async def test_notice_poke_group_id_zero_is_dm():
     cfg = AdapterConfig(
         onebot_ws_token="t", hermes_ws_token="t",
         notify_poke_enabled=True,
-        dm_user_filter_mode="blacklist",
+        dm_policy="allow",
     )
     result = await parser.parse_event(
         _notice_event("notify", sub_type="poke", user_id=100, target_id=999, group_id=0),
