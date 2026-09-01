@@ -459,7 +459,7 @@ async def test_parser_command_filter_dm_also_applies():
     cfg = AdapterConfig(
         command_filter_enabled=True,
         command_permissions={"kick": COMMAND_PERM_DISABLED},
-        dm_user_filter_mode="blacklist",  # allow all DMs for this test
+        dm_policy="allow",  # allow all DMs for this test
     )
     is_known = MagicMock(return_value=True)
     result = await parser.parse_event(

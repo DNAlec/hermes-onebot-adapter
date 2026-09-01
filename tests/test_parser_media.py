@@ -455,7 +455,7 @@ def _config_with_cache() -> AdapterConfig:
     """Build a minimal AdapterConfig with media_delivery_mode=cache."""
     cfg = AdapterConfig()
     cfg.media_delivery_mode = MEDIA_DELIVERY_CACHE
-    cfg.dm_user_filter_mode = "blacklist"  # allow all DMs
+    cfg.dm_policy = "allow"  # allow all DMs
     return cfg
 
 

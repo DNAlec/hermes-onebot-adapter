@@ -39,6 +39,7 @@ OUTBOUND_LOG_ACTIONS = _MESSAGE_SEND_ACTIONS | _UPLOAD_ACTIONS
 _DROP_REASON_FROM_FILTER = {
     "command": "command",
     "bot_blacklist": "blacklist",
+    "dm_policy": "user_filter",
     "rate_limit": "rate_limit",
     "rate_limit_storage": "rate_limit",
 }

@@ -231,6 +231,17 @@ class OneBotApi:
     async def get_stranger_info(self, user_id: int, no_cache: bool = True) -> dict[str, Any]:
         return (await self.call("get_stranger_info", {"user_id": user_id, "no_cache": no_cache}))["data"]
 
+    async def get_friend_list(self) -> list[Any]:
+        payload = (await self.call("get_friend_list")).get("data")
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("friends", "list"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
     async def get_group_member_info(
         self, group_id: int, user_id: int, no_cache: bool = False,
     ) -> dict[str, Any]:

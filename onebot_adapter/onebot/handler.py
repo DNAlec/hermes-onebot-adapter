@@ -51,6 +51,7 @@ class OneBotHandler:
         name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
         bot_blacklist_match_fn: Any | None = None,
+        friend_cache: Any | None = None,
     ) -> None:
         self.label = label
         self._config = config
@@ -63,6 +64,7 @@ class OneBotHandler:
         self._name_resolver = name_resolver or NameResolver(api)
         self._ws_api_transport = ws_api_transport
         self._bot_blacklist_match_fn = bot_blacklist_match_fn
+        self._friend_cache = friend_cache
 
     def update_config(self, config: AdapterConfig) -> None:
         """Hot-reload config without rebuilding the handler."""
@@ -113,6 +115,8 @@ class OneBotHandler:
         # 所有消息都进 FIFO,不论是否触发 bot)
         if self._seq_map is not None and data.get("post_type") == "message":
             seq_map_add(self._seq_map, data)
+        if self._friend_cache is not None and isinstance(data, dict):
+            self._friend_cache.observe_event(data)
         parsed = await parse_event(
             data,
             self_id=self._config.self_id,
@@ -127,6 +131,7 @@ class OneBotHandler:
             is_known_command_fn=self._is_known_command_fn,
             canonical_command_name_fn=self._canonical_command_name_fn,
             bot_blacklist_match_fn=self._bot_blacklist_match_fn,
+            is_friend_fn=self._friend_cache.is_friend if self._friend_cache is not None else None,
         )
         if parsed is None:
             logger.debug("OneBot %s event ignored (post_type=%s)", self.label, data.get("post_type"))

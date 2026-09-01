@@ -46,6 +46,7 @@ class OneBotForwardClient:
         name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
         bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
+        friend_cache: Any | None = None,
     ) -> None:
         self._config = config
         self._on_connect = on_connect
@@ -68,6 +69,7 @@ class OneBotForwardClient:
             name_resolver=name_resolver,
             ws_api_transport=ws_api_transport,
             bot_blacklist_match_fn=bot_blacklist_match_fn,
+            friend_cache=friend_cache,
         )
         self._event_dispatcher = OneBotEventDispatcher(self._handler, label="forward")
 

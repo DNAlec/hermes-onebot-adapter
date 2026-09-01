@@ -95,7 +95,7 @@ async def test_forward_client_parses_message():
             onebot_ws_token="testtoken",
             self_id="999",
             group_require_mention=True,
-            dm_user_filter_mode="blacklist",
+            dm_policy="allow",
         )
         events: list = []
         client = OneBotForwardClient(
@@ -283,7 +283,7 @@ async def test_forward_client_filters_non_message_events():
             onebot_ws_token="testtoken",
 
             self_id="999",
-            dm_user_filter_mode="blacklist",
+            dm_policy="allow",
         )
         events: list = []
         client = OneBotForwardClient(
@@ -317,7 +317,7 @@ async def test_forward_client_notice_poke_delivered():
             hermes_ws_token="t",
 
             self_id="999",
-            dm_user_filter_mode="blacklist",
+            dm_policy="allow",
             notify_poke_enabled=True,
         )
         events: list = []
@@ -361,7 +361,7 @@ async def test_forward_client_notice_disabled_not_delivered():
             hermes_ws_token="t",
 
             self_id="999",
-            dm_user_filter_mode="blacklist",
+            dm_policy="allow",
             notify_poke_enabled=False,
         )
         events: list = []

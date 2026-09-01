@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from onebot_adapter.config import AdapterConfig, GroupConfig
 from onebot_adapter.onebot.parser import parse_event
-from onebot_adapter.relay.protocol import DroppedEvent
+from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent
 
 
 def _msg_event(
@@ -86,26 +86,54 @@ def test_is_group_user_allowed_unconfigured_group_defaults_blacklist_empty():
     assert cfg.is_group_user_allowed("999", "100") is True
 
 
-def test_is_dm_allowed_whitelist_empty_rejects_all():
+def test_is_dm_allowed_default_deny_rejects_all():
     cfg = AdapterConfig()
+    assert cfg.dm_policy == "deny"
     assert cfg.is_dm_allowed("100") is False
+    assert cfg.is_dm_allowed("100", is_friend=True) is False
 
 
-def test_is_dm_allowed_whitelist_allows_listed():
-    cfg = AdapterConfig(dm_user_filter_mode="whitelist", dm_user_list=["100"])
+def test_is_dm_allowed_whitelist_bypasses_deny_and_friends():
+    cfg = AdapterConfig(dm_policy="deny", dm_whitelist=["100"])
     assert cfg.is_dm_allowed("100") is True
     assert cfg.is_dm_allowed("200") is False
+    friends = AdapterConfig(dm_policy="friends", dm_whitelist=["100"])
+    assert friends.is_dm_allowed("100", is_friend=False) is True
+    assert friends.dm_needs_friend_lookup("100") is False
+    assert friends.dm_needs_friend_lookup("200") is True
 
 
-def test_is_dm_allowed_blacklist_empty_allows_all():
-    cfg = AdapterConfig(dm_user_filter_mode="blacklist", dm_user_list=[])
+def test_is_dm_allowed_allow_mode_blocks_blacklist_only():
+    cfg = AdapterConfig(dm_policy="allow")
     assert cfg.is_dm_allowed("100") is True
+    blocked = AdapterConfig(dm_policy="allow", dm_blacklist=["100"])
+    assert blocked.is_dm_allowed("100") is False
+    assert blocked.is_dm_allowed("200") is True
 
 
-def test_is_dm_allowed_blacklist_blocks_listed():
-    cfg = AdapterConfig(dm_user_filter_mode="blacklist", dm_user_list=["100"])
+def test_is_dm_allowed_friends_mode_uses_friend_flag():
+    cfg = AdapterConfig(dm_policy="friends")
     assert cfg.is_dm_allowed("100") is False
-    assert cfg.is_dm_allowed("200") is True
+    assert cfg.is_dm_allowed("100", is_friend=True) is True
+
+
+def test_is_dm_allowed_blacklist_wins_over_whitelist():
+    cfg = AdapterConfig(
+        dm_policy="deny", dm_whitelist=["100"], dm_blacklist=["100"],
+    )
+    assert cfg.is_dm_allowed("100") is False
+    assert cfg.dm_needs_friend_lookup("100") is False
+
+
+def test_dm_reject_reason_labels():
+    deny = AdapterConfig(dm_policy="deny")
+    assert deny.dm_reject_reason("100") == "禁止私聊"
+    assert deny.render_dm_reject_message("禁止私聊") == "⛔ 当前私聊策略为：禁止私聊"
+    listed = AdapterConfig(dm_policy="allow", dm_blacklist=["100"])
+    assert listed.dm_reject_reason("100") == "禁止私聊"
+    friends = AdapterConfig(dm_policy="friends")
+    assert friends.dm_reject_reason("100") == "仅限好友"
+    assert friends.dm_reject_reason("100", is_friend=True) is None
 
 
 def test_is_admin_global():
@@ -359,8 +387,8 @@ async def test_parser_group_not_admin():
     assert event.is_admin is False
 
 
-async def test_parser_dm_whitelist_default_rejects():
-    cfg = AdapterConfig()  # default: whitelist, empty list → reject all
+async def test_parser_dm_default_deny_rejects():
+    cfg = AdapterConfig()  # default: deny all except whitelist
     result = await parse_event(
         _msg_event("hi", user_id=200),
         self_id="999", group_require_mention=False,
@@ -370,28 +398,30 @@ async def test_parser_dm_whitelist_default_rejects():
     assert result.reason == "user_filter"
 
 
-async def test_parser_dm_whitelist_allows_listed():
-    cfg = AdapterConfig(dm_user_filter_mode="whitelist", dm_user_list=["100"])
+async def test_parser_dm_whitelist_allows_when_denied():
+    cfg = AdapterConfig(dm_policy="deny", dm_whitelist=["100"])
     result = await parse_event(
         _msg_event("hi", user_id=100),
         self_id="999", group_require_mention=False,
         config=cfg,
     )
     assert result is not None
+    assert not isinstance(result, DroppedEvent)
 
 
-async def test_parser_dm_blacklist_allows_unlisted():
-    cfg = AdapterConfig(dm_user_filter_mode="blacklist", dm_user_list=["100"])
+async def test_parser_dm_allow_unlisted():
+    cfg = AdapterConfig(dm_policy="allow", dm_blacklist=["100"])
     result = await parse_event(
         _msg_event("hi", user_id=200),
         self_id="999", group_require_mention=False,
         config=cfg,
     )
     assert result is not None
+    assert not isinstance(result, DroppedEvent)
 
 
-async def test_parser_dm_blacklist_blocks_listed():
-    cfg = AdapterConfig(dm_user_filter_mode="blacklist", dm_user_list=["100"])
+async def test_parser_dm_blacklist_blocks_in_allow_mode():
+    cfg = AdapterConfig(dm_policy="allow", dm_blacklist=["100"])
     result = await parse_event(
         _msg_event("hi", user_id=100),
         self_id="999", group_require_mention=False,
@@ -399,6 +429,107 @@ async def test_parser_dm_blacklist_blocks_listed():
     )
     assert isinstance(result, DroppedEvent)
     assert result.reason == "user_filter"
+
+
+async def test_parser_dm_friends_mode_allows_friends_only():
+    from unittest.mock import AsyncMock
+
+    cfg = AdapterConfig(dm_policy="friends")
+    is_friend = AsyncMock(side_effect=lambda uid: uid == "100")
+    allowed = await parse_event(
+        _msg_event("hi", user_id=100),
+        self_id="999", group_require_mention=False,
+        config=cfg, is_friend_fn=is_friend,
+    )
+    denied = await parse_event(
+        _msg_event("hi", user_id=200),
+        self_id="999", group_require_mention=False,
+        config=cfg, is_friend_fn=is_friend,
+    )
+    assert allowed is not None
+    assert not isinstance(allowed, DroppedEvent)
+    assert isinstance(denied, DroppedEvent)
+    assert denied.reason == "user_filter"
+    is_friend.assert_awaited()
+
+
+async def test_parser_dm_whitelist_skips_friend_lookup():
+    from unittest.mock import AsyncMock
+
+    cfg = AdapterConfig(dm_policy="friends", dm_whitelist=["100"])
+    is_friend = AsyncMock(return_value=False)
+    result = await parse_event(
+        _msg_event("hi", user_id=100),
+        self_id="999", group_require_mention=False,
+        config=cfg, is_friend_fn=is_friend,
+    )
+    assert result is not None
+    assert not isinstance(result, DroppedEvent)
+    is_friend.assert_not_called()
+
+
+async def test_parser_dm_friends_without_lookup_fn_fail_closed():
+    cfg = AdapterConfig(dm_policy="friends")
+    result = await parse_event(
+        _msg_event("hi", user_id=100),
+        self_id="999", group_require_mention=False,
+        config=cfg,
+    )
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
+
+
+async def test_parser_dm_reject_reply_deny_and_blacklist():
+    deny = AdapterConfig(dm_policy="deny", dm_reject_reply_enabled=True)
+    denied = await parse_event(
+        _msg_event("hi", user_id=100),
+        self_id="999", group_require_mention=False,
+        config=deny,
+    )
+    assert isinstance(denied, FilteredEvent)
+    assert denied.filter_type == "dm_policy"
+    assert denied.reject_message == "⛔ 当前私聊策略为：禁止私聊"
+    assert denied.reply_to_message_id == "1"
+
+    listed = AdapterConfig(
+        dm_policy="allow", dm_blacklist=["100"], dm_reject_reply_enabled=True,
+    )
+    blocked = await parse_event(
+        _msg_event("hi", user_id=100),
+        self_id="999", group_require_mention=False,
+        config=listed,
+    )
+    assert isinstance(blocked, FilteredEvent)
+    assert blocked.reject_message == "⛔ 当前私聊策略为：禁止私聊"
+
+
+async def test_parser_dm_reject_reply_friends_mode():
+    from unittest.mock import AsyncMock
+
+    cfg = AdapterConfig(dm_policy="friends", dm_reject_reply_enabled=True)
+    is_friend = AsyncMock(return_value=False)
+    result = await parse_event(
+        _msg_event("hi", user_id=100),
+        self_id="999", group_require_mention=False,
+        config=cfg, is_friend_fn=is_friend,
+    )
+    assert isinstance(result, FilteredEvent)
+    assert result.reject_message == "⛔ 当前私聊策略为：仅限好友"
+
+
+async def test_parser_dm_reject_reply_custom_template():
+    cfg = AdapterConfig(
+        dm_policy="deny",
+        dm_reject_reply_enabled=True,
+        dm_reject_message="拒绝：{reason}",
+    )
+    result = await parse_event(
+        _msg_event("hi", user_id=100),
+        self_id="999", group_require_mention=False,
+        config=cfg,
+    )
+    assert isinstance(result, FilteredEvent)
+    assert result.reject_message == "拒绝：禁止私聊"
 
 
 async def test_parser_group_require_mention_override():

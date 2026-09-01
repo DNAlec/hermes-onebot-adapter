@@ -40,7 +40,8 @@ function ensureOutboundFilterFields() {
     "outbound_filter_patterns",
     "group_trigger_keywords",
     "global_admins",
-    "dm_user_list",
+    "dm_whitelist",
+    "dm_blacklist",
   ] as const;
   for (const key of listFields) {
     if (!Array.isArray(cfg.value[key])) {
@@ -49,6 +50,15 @@ function ensureOutboundFilterFields() {
   }
   if (typeof cfg.value.outbound_filter_enabled !== "boolean") {
     cfg.value.outbound_filter_enabled = false;
+  }
+  if (!cfg.value.dm_policy) {
+    cfg.value.dm_policy = "deny";
+  }
+  if (typeof cfg.value.dm_reject_reply_enabled !== "boolean") {
+    cfg.value.dm_reject_reply_enabled = false;
+  }
+  if (!cfg.value.dm_reject_message) {
+    cfg.value.dm_reject_message = "⛔ 当前私聊策略为：{reason}";
   }
 }
 
@@ -162,8 +172,11 @@ async function saveGlobal() {
       group_keyword_first_only: c.group_keyword_first_only,
       group_strip_first_mention: c.group_strip_first_mention,
       global_admins: c.global_admins,
-      dm_user_filter_mode: c.dm_user_filter_mode,
-      dm_user_list: c.dm_user_list,
+      dm_policy: c.dm_policy,
+      dm_whitelist: c.dm_whitelist,
+      dm_blacklist: c.dm_blacklist,
+      dm_reject_reply_enabled: c.dm_reject_reply_enabled,
+      dm_reject_message: c.dm_reject_message,
       message_show_group_id: c.message_show_group_id,
       reaction_emoji_enabled: c.reaction_emoji_enabled,
       reaction_emoji_id: c.reaction_emoji_id,
@@ -309,7 +322,8 @@ async function removeGroup(gid: string) {
 }
 
 const globalAdminInput = ref("");
-const dmUserInput = ref("");
+const dmWhitelistInput = ref("");
+const dmBlacklistInput = ref("");
 const groupAdminInput = ref("");
 const groupUserInput = ref("");
 const triggerKeywordsInput = ref("");
@@ -838,24 +852,54 @@ function resetHint() {
     <!-- 私聊设置 -->
     <div v-if="cfg" class="section">
       <h3>私聊设置</h3>
-      <div class="grid2">
-        <label>
-          私聊过滤模式
-          <select v-model="cfg.dm_user_filter_mode">
-            <option value="whitelist">白名单（仅名单内可私聊，空=拒绝所有人）</option>
-            <option value="blacklist">黑名单（名单内禁用，空=允许所有人）</option>
-          </select>
-        </label>
-        <label>
-          私聊名单
-          <div class="tag-input-container">
-            <span v-for="(u, i) in cfg.dm_user_list" :key="i" class="tag">
-              {{ u }}<button @click="removeTag(cfg.dm_user_list || [], i)">×</button>
-            </span>
-            <input v-model="dmUserInput" placeholder="回车添加QQ号" @keydown.enter.prevent="addTag(cfg.dm_user_list || [], dmUserInput); dmUserInput=''" />
-          </div>
-        </label>
-      </div>
+      <p class="hint" style="margin-bottom:0.75rem;">
+        模式决定默认谁可以私聊；黑白名单始终生效，与模式无关。
+        黑名单用户一律禁止私聊；白名单用户一律允许私聊（即使禁止私聊或不是好友），但无法覆盖 bot 动态黑名单。
+        同一用户同时在黑白名单时，黑名单优先。
+      </p>
+      <label>
+        私聊模式
+        <select v-model="cfg.dm_policy">
+          <option value="allow">允许私聊</option>
+          <option value="deny">禁止私聊</option>
+          <option value="friends">仅限好友</option>
+        </select>
+      </label>
+      <label>
+        私聊白名单
+        <div class="tag-input-container">
+          <span v-for="(u, i) in cfg.dm_whitelist" :key="'w'+i" class="tag">
+            {{ u }}<button @click="removeTag(cfg.dm_whitelist || [], i)">×</button>
+          </span>
+          <input v-model="dmWhitelistInput" placeholder="回车添加QQ号" @keydown.enter.prevent="addTag(cfg.dm_whitelist || [], dmWhitelistInput); dmWhitelistInput=''" />
+        </div>
+        <span class="hint">无论模式/是否好友均可私聊；不能覆盖 bot 动态黑名单</span>
+      </label>
+      <label>
+        私聊黑名单
+        <div class="tag-input-container">
+          <span v-for="(u, i) in cfg.dm_blacklist" :key="'b'+i" class="tag">
+            {{ u }}<button @click="removeTag(cfg.dm_blacklist || [], i)">×</button>
+          </span>
+          <input v-model="dmBlacklistInput" placeholder="回车添加QQ号" @keydown.enter.prevent="addTag(cfg.dm_blacklist || [], dmBlacklistInput); dmBlacklistInput=''" />
+        </div>
+        <span class="hint">无论何种模式都禁止私聊</span>
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.dm_reject_reply_enabled" />
+        <span>私聊被拒时回复提示（关闭则静默丢弃）</span>
+      </label>
+      <label>
+        拒绝回复内容
+        <input
+          v-model="cfg.dm_reject_message"
+          :disabled="!cfg.dm_reject_reply_enabled"
+          placeholder="⛔ 当前私聊策略为：{reason}"
+        />
+        <span class="hint">
+          支持 <code v-pre>{reason}</code>。禁止私聊模式和私聊黑名单都显示「禁止私聊」，仅限好友模式对非好友显示「仅限好友」。
+        </span>
+      </label>
     </div>
 
     <!-- 全局提示词 -->

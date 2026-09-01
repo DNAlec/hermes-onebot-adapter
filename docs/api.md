@@ -187,8 +187,11 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "group_keyword_first_only": false,
   "group_strip_first_mention": true,
   "global_admins": [],
-  "dm_user_filter_mode": "whitelist",
-  "dm_user_list": [],
+  "dm_policy": "deny",
+  "dm_whitelist": [],
+  "dm_blacklist": [],
+  "dm_reject_reply_enabled": false,
+  "dm_reject_message": "⛔ 当前私聊策略为：{reason}",
   "groups": {},
   "global_channel_prompt": "...",
   "hermes_ws_port": 18810,
@@ -1118,6 +1121,8 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 
 ### Config 字段
 
+1.7.0 起私聊用 `dm_policy` / `dm_whitelist` / `dm_blacklist` / `dm_reject_reply_enabled` / `dm_reject_message`。读取旧配置时 `dm_user_filter_mode` + `dm_user_list` 会自动迁移（`whitelist` → `deny` + 白名单，`blacklist` → `allow` + 黑名单）；PATCH 若同时带新旧字段，以新字段为准。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `onebot_mode` | string | `"reverse"` | OneBot 连接模式：`reverse` / `forward` |
@@ -1132,8 +1137,11 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `group_keyword_first_only` | bool | `false` | True=关键词须在开头 |
 | `group_strip_first_mention` | bool | `true` | True=消息以@bot开头时移除该段(非首@bot保留) |
 | `global_admins` | string[] | `[]` | 全局管理员 QQ 号列表 |
-| `dm_user_filter_mode` | string | `"whitelist"` | 私聊过滤：`whitelist` / `blacklist` |
-| `dm_user_list` | string[] | `[]` | 私聊用户过滤列表 |
+| `dm_policy` | string | `"deny"` | 私聊模式：`allow`（允许私聊）/ `deny`（禁止私聊）/ `friends`（仅限好友）。黑白名单始终生效 |
+| `dm_whitelist` | string[] | `[]` | 常驻私聊白名单：无论模式/是否好友均可私聊，但不能覆盖 bot 动态黑名单 |
+| `dm_blacklist` | string[] | `[]` | 常驻私聊黑名单：无论何种模式都禁止私聊；与白名单冲突时黑名单优先 |
+| `dm_reject_reply_enabled` | bool | `false` | 私聊被拒时是否回复提示；关闭则静默丢弃 |
+| `dm_reject_message` | string | `"⛔ 当前私聊策略为：{reason}"` | 私聊被拒回复模板；`{reason}` 为「禁止私聊」（deny/黑名单）或「仅限好友」 |
 | `groups` | object | `{}` | 群组配置，key 为群号字符串 |
 | `global_channel_prompt` | string | 默认提示词 | 全局提示词；保存时物化写入 Hermes config.yaml 的 `platforms.onebot.channel_prompts`，需重启 Hermes 网关生效 |
 | `hermes_ws_port` | int | `18810` | Hermes 插件 WS 端口 |
