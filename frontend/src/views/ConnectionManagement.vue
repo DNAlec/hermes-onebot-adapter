@@ -75,6 +75,7 @@ async function save() {
       onebot_ws_token: c.onebot_ws_token,
       self_id: c.self_id,
       hermes_install_dir: c.hermes_install_dir,
+      hermes_install_allowed_roots: c.hermes_install_allowed_roots,
       hermes_ws_port: c.hermes_ws_port,
       hermes_ws_path: c.hermes_ws_path,
       hermes_ws_token: c.hermes_ws_token,
@@ -283,7 +284,18 @@ function copyAdapterUrl() {
               {{ checkingDir ? '检测中...' : '重新检测' }}
             </button>
           </div>
-          <span class="hint">Hermes Agent 的安装路径</span>
+          <span class="hint">Hermes Agent 的安装路径。默认须落在当前用户 $HOME 下；/opt 等非常规目录请填写下方额外根。</span>
+        </div>
+
+        <div class="subsection">
+          <h4>额外允许的 Hermes 安装根</h4>
+          <textarea
+            :value="(cfg.hermes_install_allowed_roots || []).join('\n')"
+            @input="cfg.hermes_install_allowed_roots = ($event.target as HTMLTextAreaElement).value.split('\n').map(v => v.trim()).filter(Boolean)"
+            rows="2"
+            placeholder="/opt/hermes"
+          />
+          <span class="hint">每行一个绝对路径。不可为 /、盘符根、/etc、/proc、/sys。默认不包含 /tmp 或他人 $HOME。</span>
         </div>
 
         <div class="subsection">

@@ -825,7 +825,7 @@ function resetHint() {
         </select>
         <span class="hint">
           <strong>URL 直传</strong>:媒体 URL 作为文本占位符(如 [图1](https://...))传给 LLM,LLM 按需 fetch。<br>
-          <strong>下载落盘</strong>:插件在 Hermes 进程内调用 cache_image_from_url 等下载到 ~/.hermes/cache/,
+          <strong>下载落盘</strong>:插件在 Hermes 进程内下载到 ~/.hermes/cache/（校验重定向与解析后的 IP，允许回环/局域网），
           填 media_urls 字段供 vision/STT 工具读取。缓存失败则丢弃该媒体,保留空占位符 [图N]。
           file 段无 URL 时一律跳过,LLM 可用 onebot_get_file 工具按需拉取。
         </span>

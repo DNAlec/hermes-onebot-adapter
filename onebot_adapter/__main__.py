@@ -7,7 +7,7 @@ import secrets
 import sys
 
 from onebot_adapter import __version__
-from onebot_adapter.app import run
+from onebot_adapter.app import resolve_bind_hosts, run
 
 
 def _manage_automation_api(args) -> int:
@@ -106,20 +106,20 @@ def _install(args) -> int:
     from onebot_adapter import installer
     from onebot_adapter.config import load_config
 
+    cfg = load_config()
+    extra_roots = list(cfg.hermes_install_allowed_roots)
     adapter_url = args.adapter_url
     adapter_token = args.adapter_token
-
-    if adapter_url is None or adapter_token is None:
-        cfg = load_config()
-        if adapter_url is None:
-            adapter_url = f"ws://127.0.0.1:{cfg.hermes_ws_port}{cfg.hermes_ws_path}"
-        if adapter_token is None:
-            adapter_token = cfg.hermes_ws_token
+    if adapter_url is None:
+        adapter_url = f"ws://127.0.0.1:{cfg.hermes_ws_port}{cfg.hermes_ws_path}"
+    if adapter_token is None:
+        adapter_token = cfg.hermes_ws_token
 
     result = installer.install(
         args.hermes_dir,
         adapter_url=adapter_url,
         adapter_token=adapter_token,
+        extra_roots=extra_roots,
     )
 
     if result.get("error"):
@@ -137,8 +137,15 @@ def _install(args) -> int:
 
 def _uninstall(args) -> int:
     from onebot_adapter import installer
+    from onebot_adapter.config import load_config
 
-    result = installer.uninstall(args.hermes_dir)
+    extra_roots: list[str] = []
+    try:
+        extra_roots = list(load_config().hermes_install_allowed_roots)
+    except Exception:
+        extra_roots = []
+
+    result = installer.uninstall(args.hermes_dir, extra_roots=extra_roots)
 
     if result.get("error"):
         print(f"✗ 卸载失败: {result['error']}")
@@ -154,7 +161,14 @@ def _uninstall(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hermes-onebot-adapter", description="Hermes OneBot Adapter service")
-    parser.add_argument("--host", default="127.0.0.1", help="WebUI/API bind host (default: 127.0.0.1)")
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Fallback bind host for all listeners (default: 127.0.0.1). "
+             "--host 0.0.0.0 still exposes all three ports; prefer --onebot-host 0.0.0.0",
+    )
+    parser.add_argument("--webui-host", default=None, help="WebUI/API bind host (default: --host)")
+    parser.add_argument("--onebot-host", default=None, help="OneBot reverse WS bind host (default: --host)")
+    parser.add_argument("--hermes-host", default=None, help="Hermes plugin WS bind host (default: --host)")
     parser.add_argument("--port", type=int, default=None, help="WebUI/API port (default: from config, 18820)")
     parser.add_argument("--no-webui", action="store_true", help="不启动 WebUI 管理界面")
     parser.add_argument("--version", action="version", version=f"hermes-onebot-adapter {__version__}")
@@ -204,7 +218,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.init_config:
         return _init_config(force=args.force)
 
-    run(host=args.host, port=args.port, no_webui=args.no_webui)
+    onebot_host, hermes_host, webui_host = resolve_bind_hosts(
+        args.host, args.onebot_host, args.hermes_host, args.webui_host,
+    )
+    run(
+        host=args.host,
+        port=args.port,
+        no_webui=args.no_webui,
+        onebot_host=onebot_host,
+        hermes_host=hermes_host,
+        webui_host=webui_host,
+    )
     return 0
 
 

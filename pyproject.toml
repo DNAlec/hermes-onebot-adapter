@@ -55,6 +55,9 @@ include = ["onebot_adapter*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "no_fake_home: do not monkeypatch Path.home to tmp_path in installer tests",
+]
 
 [tool.ruff]
 line-length = 120

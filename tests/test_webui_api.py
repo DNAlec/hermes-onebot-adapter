@@ -1,6 +1,7 @@
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,7 @@ async def tool_policy_client(tmp_path, monkeypatch):
         onebot_ws_token="t1", hermes_ws_token="t2", webui_token=_TOKEN,
         webui_token_lifetime_hours=24, webui_token_epoch=_EPOCH,
         hermes_install_dir=str(hermes_dir),
+        hermes_install_allowed_roots=[str(tmp_path)],
     ))
     service = AdapterService(store)
     server = TestServer(service.build_webui_app())
@@ -71,6 +73,50 @@ async def test_status_endpoint_with_token(client):
     data = await resp.json()
     assert data["adapter_version"]
     assert data["onebot_mode"] == "reverse"
+
+
+async def test_config_rejects_hermes_dir_outside_allowlist(client, tmp_path):
+    resp = await client.patch(
+        "/api/v1/config",
+        json={"hermes_install_dir": "/"},
+        headers=_auth(),
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "outside the allowed Hermes install roots" in body["error"]
+
+    resp = await client.patch(
+        "/api/v1/config",
+        json={"hermes_install_dir": "/etc"},
+        headers=_auth(),
+    )
+    assert resp.status == 400
+
+    resp = await client.patch(
+        "/api/v1/config",
+        json={"hermes_install_dir": str(tmp_path / "not-home")},
+        headers=_auth(),
+    )
+    assert resp.status == 400
+
+    resp = await client.patch(
+        "/api/v1/config",
+        json={
+            "hermes_install_dir": str(tmp_path / ".hermes"),
+            "hermes_install_allowed_roots": [str(tmp_path)],
+        },
+        headers=_auth(),
+    )
+    assert resp.status == 200
+
+    resp = await client.patch(
+        "/api/v1/config",
+        json={"automation_upload_allowed_roots": ["/"]},
+        headers=_auth(),
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "automation_upload_allowed_roots" in body["error"]
 
 
 async def test_config_get_put(client):
@@ -280,7 +326,8 @@ async def test_install_plugin_requires_auth(client):
     assert resp.status == 401
 
 
-async def test_install_plugin_endpoint(client, tmp_path):
+async def test_install_plugin_endpoint(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     resp = await client.post(
         "/api/v1/install_plugin",
         json={"hermes_install_dir": str(tmp_path / "hermes")},
@@ -399,11 +446,12 @@ async def test_tool_policy_put_writes_only_non_default_fields(tool_policy_client
         "onebot_get_login_info": {"registered": False, "permission": "everyone"},
         "onebot_kick_group_member": {"registered": True, "permission": "everyone"},
     }
-    assert hc.read_onebot_tool_policies(str(hermes_dir)) == payload["sparse_policies"]
+    extra = [str(hermes_dir.parent)]
+    assert hc.read_onebot_tool_policies(str(hermes_dir), extra_roots=extra) == payload["sparse_policies"]
     assert payload["policies"]["onebot_get_login_info"]["registered"] is False
     assert payload["policies"]["onebot_kick_group_member"]["permission"] == "everyone"
 
-    config = hc.read_config(str(hermes_dir))
+    config = hc.read_config(str(hermes_dir), extra_roots=extra)
     assert config["provider"] == "openai"
     assert config["plugins"]["entries"]["onebot"]["path"] == "/plugin.py"
 
@@ -426,18 +474,19 @@ async def test_tool_policy_put_rejects_invalid_policies(tool_policy_client, poli
     )
     assert response.status == 400
     assert error_text in (await response.json())["error"]
-    assert hc.read_onebot_tool_policies(str(hermes_dir)) == {}
+    assert hc.read_onebot_tool_policies(str(hermes_dir), extra_roots=[str(hermes_dir.parent)]) == {}
 
 
 async def test_tool_policy_reset_removes_only_policy_subtree(tool_policy_client):
     client, hermes_dir = tool_policy_client
+    extra = [str(hermes_dir.parent)]
     hc.write_onebot_tool_policies(
-        str(hermes_dir), {"onebot_get_login_info": {"registered": False}}
+        str(hermes_dir), {"onebot_get_login_info": {"registered": False}}, extra_roots=extra,
     )
     response = await client.post("/api/v1/onebot_tool_policies/reset", headers=_auth())
     assert response.status == 200
     assert (await response.json())["sparse_policies"] == {}
-    config = hc.read_config(str(hermes_dir))
+    config = hc.read_config(str(hermes_dir), extra_roots=extra)
     assert "tool_policies" not in config["plugins"]["entries"]["onebot"]
     assert config["plugins"]["entries"]["onebot"]["path"] == "/plugin.py"
     assert config["provider"] == "openai"

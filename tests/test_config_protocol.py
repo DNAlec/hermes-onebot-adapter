@@ -100,6 +100,42 @@ def test_dm_reject_message_must_not_be_empty():
     assert any("dm_reject_message" in e for e in errors)
 
 
+def test_config_hermes_allowlist_and_upload_roots(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    ok = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2",
+        hermes_install_dir=str(tmp_path / ".hermes"),
+    )
+    assert not any("hermes_install" in e for e in ok.validate())
+    empty = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2")
+    assert not any("hermes_install_dir" in e for e in empty.validate())
+    outside = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", hermes_install_dir="/tmp/not-home",
+    )
+    assert any("outside the allowed Hermes install roots" in e for e in outside.validate())
+    extra_ok = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2",
+        hermes_install_dir=str(tmp_path / "opt" / "hermes"),
+        hermes_install_allowed_roots=[str(tmp_path / "opt")],
+    )
+    # tmp_path/opt is already under home=tmp_path; also test slash extra root
+    assert extra_ok.validate() == [] or not any("outside" in e for e in extra_ok.validate())
+    slash_extra = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", hermes_install_allowed_roots=["/"],
+    )
+    assert any("hermes_install_allowed_roots" in e for e in slash_extra.validate())
+    slash_upload = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", automation_upload_allowed_roots=["/"],
+    )
+    assert any("automation_upload_allowed_roots" in e for e in slash_upload.validate())
+    tmp_upload = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", automation_upload_allowed_roots=["/tmp"],
+    )
+    assert any("automation_upload_allowed_roots" in e for e in tmp_upload.validate())
+
+
 def test_config_media_delivery_mode_invalid():
     cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", media_delivery_mode="bogus")
     errors = cfg.validate()
@@ -265,6 +301,32 @@ def test_ensure_tokens_generates_only_missing(tmp_path):
 
 
 # ── save_config comment injection ────────────────────────────────────────
+
+
+def test_save_config_writes_0600(tmp_path):
+    from onebot_adapter.config import save_config
+
+    p = tmp_path / "cfg.json"
+    save_config(AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2"), p)
+    assert (p.stat().st_mode & 0o777) == 0o600
+    save_config(AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", self_id="1"), p)
+    backups = list(tmp_path.glob("cfg.json.bak.*"))
+    assert backups
+    assert (backups[0].stat().st_mode & 0o777) == 0o600
+
+
+def test_ensure_config_file_permissions_tightens_existing(tmp_path):
+    from onebot_adapter.config import ensure_config_file_permissions, save_config
+
+    p = tmp_path / "cfg.json"
+    save_config(AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2"), p)
+    save_config(AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", self_id="1"), p)
+    p.chmod(0o644)
+    bak = next(tmp_path.glob("cfg.json.bak.*"))
+    bak.chmod(0o644)
+    ensure_config_file_permissions(p)
+    assert (p.stat().st_mode & 0o777) == 0o600
+    assert (bak.stat().st_mode & 0o777) == 0o600
 
 
 def test_save_config_includes_comments(tmp_path):

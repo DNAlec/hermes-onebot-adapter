@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 
-from onebot_adapter._async_utils import bearer_token, log_task_exception
+from onebot_adapter._async_utils import bearer_token, log_task_exception, token_matches, ws_presented_token
 
 
 def test_bearer_token_valid():
@@ -21,6 +22,31 @@ def test_bearer_token_no_prefix():
 
 def test_bearer_token_with_trailing_whitespace():
     assert bearer_token("Bearer  abc  ") == "abc"
+
+
+def test_token_matches_rejects_empty():
+    assert token_matches("", "secret") is False
+    assert token_matches("secret", "") is False
+    assert token_matches("", "") is False
+    assert token_matches("secret", "secret") is True
+    assert token_matches("secret", "other") is False
+
+
+def test_ws_presented_token_prefers_header():
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer header-tok"},
+        query={"token": "query-tok", "access_token": "access-tok"},
+    )
+    assert ws_presented_token(request, query_keys=("access_token", "token")) == "header-tok"
+
+
+def test_ws_presented_token_falls_back_to_query_order():
+    request = SimpleNamespace(
+        headers={},
+        query={"token": "query-tok", "access_token": "access-tok"},
+    )
+    assert ws_presented_token(request, query_keys=("access_token", "token")) == "access-tok"
+    assert ws_presented_token(request, query_keys=("token",)) == "query-tok"
 
 
 def test_bearer_token_none():
