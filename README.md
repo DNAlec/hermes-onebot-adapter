@@ -58,14 +58,15 @@ hermes-onebot-adapter --init-config   # 生成默认配置后退出
 pipx upgrade hermes-onebot-adapter
 ```
 
-**1.7.0** 私聊准入只改适配器服务，不必重装插件；旧 `dm_user_filter_mode` / `dm_user_list` 会自动迁移。配置热加载后立即生效。
-
-涉及排队 idle 的 **1.6.1** 仍需把插件一并更新（只升级服务不够）：
+**1.8.0** 含路径白名单、分端口绑定和插件 cache 媒体校验，**必须重装插件并重启 Hermes 网关**（只升级服务不够）。重装不会覆盖 WebUI「工具管理」里已保存的工具集。
 
 ```bash
+pipx upgrade hermes-onebot-adapter
 hermes-onebot-adapter install --hermes-dir ~/.hermes
 hermes gateway restart
 ```
+
+远程 NapCat 请用 `--onebot-host 0.0.0.0`，不要再用 `--host 0.0.0.0`（会把 WebUI 和 Hermes WS 一起暴露）。Hermes 装在 `/opt` 时先在配置里写入 `hermes_install_allowed_roots`。完整升级注意见 [CHANGELOG](CHANGELOG.md)。
 
 升级不会覆盖现有适配器配置。安装器会更新 `<hermes>/plugins/onebot/` 中的插件文件；重启后可在 WebUI 仪表盘确认适配器与插件版本一致。若群聊消息一直排队、`/stop` 提示没有活跃任务，发 `/clean` 可清空队列并释放 busy，不必重启适配器。
 
@@ -74,7 +75,7 @@ hermes gateway restart
 1. **启动适配器服务** — `hermes-onebot-adapter`
 2. **打开 WebUI** — 浏览器访问 `http://localhost:18820`，登录后进入管理界面
 3. **配置 OneBot 连接** — 在 WebUI 的"连接管理"页选择连接模式（反向 WS / 正向 WS），填写 WS 地址和 token
-4. **安装 Hermes 插件** — 在 WebUI 的"连接管理"页填写 Hermes 安装目录（默认 `~/.hermes`），点击"安装插件到 Hermes"
+4. **安装 Hermes 插件** — 在 WebUI 的「连接管理」页填写 Hermes 安装目录（默认须在当前用户 `$HOME` 下；`/opt` 等非常规路径先填「额外允许的 Hermes 安装根」），点击「安装插件到 Hermes」
 5. **启用插件** — `hermes plugins enable onebot-platform`
 6. **重启 Hermes 网关** — `hermes gateway restart`
 
@@ -84,7 +85,7 @@ hermes gateway restart
 |------|------|
 | 复制插件文件 | 5 个文件 → `<hermes>/plugins/onebot/` |
 | 写入环境变量 | `ONEBOT_ADAPTER_URL` + `ONEBOT_ADAPTER_TOKEN` → `<hermes>/.env` |
-| 初始化工具集 | 写入 `platform_toolsets.onebot` → `<hermes>/config.yaml` |
+| 初始化工具集 | 仅当 `platform_toolsets.onebot` 不存在时写入默认值；重装保留已有配置 |
 
 以上均需**启用插件并重启 Hermes 网关**后生效。
 
@@ -98,8 +99,9 @@ hermes-onebot-adapter install --hermes-dir ~/.hermes
 
 ```bash
 # 启动服务
-hermes-onebot-adapter                         # 默认 127.0.0.1
-hermes-onebot-adapter --host 0.0.0.0          # 监听所有网络接口
+hermes-onebot-adapter                         # 默认三个口都绑 127.0.0.1
+hermes-onebot-adapter --onebot-host 0.0.0.0   # 仅暴露 OneBot 反向 WS（远程 NapCat）
+hermes-onebot-adapter --host 0.0.0.0          # 三个口都暴露，不推荐（无 TLS）
 hermes-onebot-adapter --port 18820            # 指定 WebUI 端口
 hermes-onebot-adapter --no-webui              # 不启动 WebUI (仅 WS 服务)
 
@@ -114,7 +116,7 @@ hermes-onebot-adapter --disable-api            # 关闭自动化 API
 
 # 插件安装 (默认从 config.json 读取 URL 和 token)
 hermes-onebot-adapter install                          # 安装到 ~/.hermes
-hermes-onebot-adapter install --hermes-dir /opt/hermes # 指定安装目录
+hermes-onebot-adapter install --hermes-dir /opt/hermes # 须先在 config.json 写入 hermes_install_allowed_roots
 hermes-onebot-adapter install --adapter-url ws://host:18810/hermes --adapter-token xxx  # 手动指定连接参数
 hermes-onebot-adapter uninstall                        # 卸载
 hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
@@ -144,9 +146,9 @@ ONEBOT_AUTOMATION_API_KEY=hoa_xxx
 
 | 端口  | 用途 |
 |------|------|
-| 18800 | OneBot WS 服务端 `/onebot`（反向 WS 模式，OneBot 连接此端口；正向 WS 模式不使用） |
-| 18810 | Hermes 插件 WS 服务端 `/hermes?token=`（插件连接适配器的端口） |
-| 18820 | WebUI + REST API + 健康检查 (`/api/v1/health`)（详见 [API 文档](docs/api.md)） |
+| 18800 | OneBot WS 服务端 `/onebot`（反向 WS 模式，OneBot 连接此端口；正向 WS 模式不使用）。远程 NapCat 用 `--onebot-host 0.0.0.0` |
+| 18810 | Hermes 插件 WS 服务端 `/hermes`（`Authorization: Bearer` 优先，仍接受 `?token=`；默认只绑回环） |
+| 18820 | WebUI + REST API + 健康检查 (`/api/v1/health`)（详见 [API 文档](docs/api.md)；默认只绑回环） |
 
 ## 环境变量
 
@@ -174,10 +176,13 @@ ONEBOT_AUTOMATION_API_KEY=hoa_xxx
 
 ### 反向 WS（推荐）
 
-OneBot 主动连接适配器服务。在 OneBot WebUI 中配置反向 WS 地址：
+OneBot 主动连接适配器服务。在 OneBot / NapCat 面板中配置反向 WS 地址（token 与适配器 `onebot_ws_token` 一致）：
+
 ```
-ws://127.0.0.1:18800/onebot
+ws://127.0.0.1:18800/onebot?access_token=<onebot_ws_token>
 ```
+
+也接受 `?token=` 或请求头 `Authorization: Bearer`（header 优先）。同一条 WS 既推事件也接受 API 调用。远程 NapCat 把适配器绑到 `--onebot-host 0.0.0.0`，URL 里的主机改成适配器可达地址。
 
 ### 正向 WS
 
@@ -193,7 +198,7 @@ ws://127.0.0.1:3001
 | 页面 | 功能 |
 |------|------|
 | 仪表盘 | 服务/插件状态、版本检查、使用统计图表（趋势/活跃群/活跃用户） |
-| 连接管理 | 配置 OneBot 连接模式和 WS 地址；安装/卸载 Hermes 插件 |
+| 连接管理 | 配置 OneBot 连接模式和 WS 地址；Hermes 安装目录与额外允许根；安装/卸载插件 |
 | 聊天配置 | 全局群聊触发、私聊模式与常驻黑白名单、私聊被拒回复、出站正则过滤、入站限流、Bot 动态黑名单、会话隔离与群聊排队、媒体投递、notice 事件、贴表情回应；同页管理群组（每群启用/成员过滤及覆盖项） |
 | 指令过滤 | 管理 `/` 指令的权限（所有人 / 管理员 / 禁用） |
 | 工具管理 | 启停 OneBot 平台的 Hermes 工具集 |
@@ -203,7 +208,7 @@ ws://127.0.0.1:3001
 
 ## 工具集管理
 
-安装插件时会自动写入默认工具集配置到 `<hermes>/config.yaml`。之后可通过 WebUI 的"工具管理"页面自主启停工具集。
+首次安装插件时，若 `<hermes>/config.yaml` 里还没有 `platform_toolsets.onebot`，会写入默认工具集。之后用 WebUI「工具管理」启停；**再点安装不会覆盖已保存的选择**。
 
 工具集修改后写入 Hermes 的 `config.yaml`，**需重启 Hermes 网关生效**。适配器只负责写配置文件，不触发热重载。
 
@@ -327,7 +332,7 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 | 模式 | 行为 |
 |------|------|
-| `cache`（默认） | 文本里放空占位符（`[图1]`），插件把媒体下载到 `~/.hermes/cache/`，填入 `MessageEvent.media_urls`；缓存失败则跳过该媒体、保留占位符 |
+| `cache`（默认） | 文本里放空占位符（`[图1]`），插件把媒体下载到 `~/.hermes/cache/`（校验重定向与解析后的 IP，允许回环/局域网），填入 `MessageEvent.media_urls`；缓存失败则跳过该媒体、保留占位符 |
 | `passthrough` | 文本里内联 URL 占位符（`[图1](https://...)`），`media_items` 为空，由 LLM 按需拉取 |
 
 没有 URL 的 file 段一律跳过，LLM 用 `onebot_get_file` 按 `file_id` 获取。适配器本身不再下载或转码语音。

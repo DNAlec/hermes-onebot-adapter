@@ -18,6 +18,7 @@ import aiohttp.web
 
 from onebot_adapter import __version__
 from onebot_adapter.config import AdapterConfig, ConfigStore, GroupConfig, save_config
+from onebot_adapter.installer import HermesDirNotAllowed
 from onebot_adapter.rate_limit import RateLimitStorageUnavailable
 from onebot_adapter.webui.tool_api import TOOL_MAP, TOOL_MODELS, add_tool_routes, key_matches
 
@@ -363,7 +364,18 @@ def _hermes_dir_status(store: ConfigStore):
         from onebot_adapter.installer import _resolve_hermes_dir
 
         cfg = store.config
-        hermes_dir = _resolve_hermes_dir(cfg.hermes_install_dir or None)
+        extra_roots = list(cfg.hermes_install_allowed_roots)
+        try:
+            from onebot_adapter.installer import validate_hermes_dir
+            hermes_dir = _resolve_hermes_dir(cfg.hermes_install_dir or None)
+            err = validate_hermes_dir(hermes_dir, extra_roots)
+            if err:
+                return aiohttp.web.json_response(
+                    {"hermes_dir": str(hermes_dir), "exists": False, "error": err},
+                    status=400,
+                )
+        except Exception as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         return aiohttp.web.json_response(
             {
                 "hermes_dir": str(hermes_dir),
@@ -372,6 +384,27 @@ def _hermes_dir_status(store: ConfigStore):
         )
 
     return handler
+
+
+def _hermes_roots(cfg: AdapterConfig) -> list[str]:
+    return list(cfg.hermes_install_allowed_roots)
+
+
+def _hermes_config_or_error(cfg: AdapterConfig) -> tuple[Path | None, aiohttp.web.Response | None]:
+    from onebot_adapter.hermes_config import resolve_hermes_config_path
+
+    try:
+        path = resolve_hermes_config_path(
+            cfg.hermes_install_dir or None, extra_roots=_hermes_roots(cfg),
+        )
+    except HermesDirNotAllowed as exc:
+        return None, aiohttp.web.json_response({"error": str(exc)}, status=400)
+    if path is None:
+        return None, aiohttp.web.json_response(
+            {"error": "hermes_install_dir 未配置或目录不存在,请先在插件管理页配置"},
+            status=400,
+        )
+    return path, None
 
 
 def _public_config(cfg: AdapterConfig) -> dict[str, Any]:
@@ -731,11 +764,18 @@ def _install_plugin(store: ConfigStore, state: dict[str, Any]):
                 str(target),
                 adapter_url=adapter_url,
                 adapter_token=adapter_token,
+                extra_roots=cfg.hermes_install_allowed_roots,
             )
+            if result.get("error"):
+                status = 400 if "outside allowed Hermes roots" in str(result["error"]) else 500
+                return aiohttp.web.json_response(result, status=status)
             # Persist the install dir so subsequent toolset reads / uninstalls
             # use the same path without the user re-entering it in the config page.
             if install_dir and str(target) != cfg.hermes_install_dir:
                 new_cfg = store.config.with_overrides(hermes_install_dir=str(target))
+                errors = new_cfg.validate()
+                if errors:
+                    return aiohttp.web.json_response({"error": "; ".join(errors)}, status=400)
                 save_config(
                     new_cfg,
                     source="webui",
@@ -766,11 +806,19 @@ def _uninstall_plugin(store: ConfigStore, state: dict[str, Any]):
         from onebot_adapter import installer
 
         try:
-            result = await asyncio.to_thread(installer.uninstall, str(target))
+            result = await asyncio.to_thread(
+                installer.uninstall, str(target), extra_roots=store.config.hermes_install_allowed_roots,
+            )
+            if result.get("error"):
+                status = 400 if "outside allowed Hermes roots" in str(result["error"]) else 500
+                return aiohttp.web.json_response(result, status=status)
             # Persist the resolved install dir so the config reflects where
             # the plugin was managed, matching _install_plugin's behavior.
             if install_dir and str(target) != store.config.hermes_install_dir:
                 new_cfg = store.config.with_overrides(hermes_install_dir=str(target))
+                errors = new_cfg.validate()
+                if errors:
+                    return aiohttp.web.json_response({"error": "; ".join(errors)}, status=400)
                 save_config(
                     new_cfg,
                     source="webui",
@@ -1062,21 +1110,28 @@ def _get_hermes_tools(store: ConfigStore):
         from onebot_adapter.hermes_config import (
             list_available_toolsets,
             read_current_enabled,
-            resolve_hermes_config_path,
         )
 
         cfg = store.config
-        config_path = resolve_hermes_config_path(cfg.hermes_install_dir or None)
-        if config_path is None:
-            return aiohttp.web.json_response(
-                {"error": "hermes_install_dir 未配置或目录不存在,请先在插件管理页配置"},
-                status=400,
+        _path, err_resp = _hermes_config_or_error(cfg)
+        if err_resp is not None:
+            return err_resp
+        try:
+            available = await asyncio.to_thread(
+                list_available_toolsets,
+                cfg.hermes_install_dir or None,
+                extra_roots=_hermes_roots(cfg),
             )
-        available = await asyncio.to_thread(list_available_toolsets, cfg.hermes_install_dir or None)
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
         try:
-            current = await asyncio.to_thread(read_current_enabled, cfg.hermes_install_dir or None)
+            current = await asyncio.to_thread(
+                read_current_enabled,
+                cfg.hermes_install_dir or None,
+                extra_roots=_hermes_roots(cfg),
+            )
         except Exception as exc:
             logger.warning("read_current_enabled failed: %s", exc)
             current = []
@@ -1097,17 +1152,13 @@ def _put_hermes_tools(store: ConfigStore):
             PLATFORM,
             PLUGIN_TOOLSET_KEY,
             list_available_toolsets,
-            resolve_hermes_config_path,
             write_platform_toolsets,
         )
 
         cfg = store.config
-        config_path = resolve_hermes_config_path(cfg.hermes_install_dir or None)
-        if config_path is None:
-            return aiohttp.web.json_response(
-                {"error": "hermes_install_dir 未配置或目录不存在,请先在插件管理页配置"},
-                status=400,
-            )
+        _path, err_resp = _hermes_config_or_error(cfg)
+        if err_resp is not None:
+            return err_resp
         try:
             data = await request.json()
         except Exception:
@@ -1124,7 +1175,14 @@ def _put_hermes_tools(store: ConfigStore):
             )
 
         # 校验:每个 key 必须在 configurable ∪ plugin_keys ∪ mcp_names 中
-        available = await asyncio.to_thread(list_available_toolsets, cfg.hermes_install_dir or None)
+        try:
+            available = await asyncio.to_thread(
+                list_available_toolsets,
+                cfg.hermes_install_dir or None,
+                extra_roots=_hermes_roots(cfg),
+            )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         if "error" in available:
             return aiohttp.web.json_response(available, status=500)
         valid_keys: set[str] = set()
@@ -1147,7 +1205,14 @@ def _put_hermes_tools(store: ConfigStore):
             final = sorted(set(final) | {NO_MCP_SENTINEL})
 
         try:
-            await asyncio.to_thread(write_platform_toolsets, cfg.hermes_install_dir or None, final)
+            await asyncio.to_thread(
+                write_platform_toolsets,
+                cfg.hermes_install_dir or None,
+                final,
+                extra_roots=_hermes_roots(cfg),
+            )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except FileNotFoundError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
@@ -1164,17 +1229,20 @@ def _put_hermes_tools(store: ConfigStore):
 
 def _reset_hermes_tools(store: ConfigStore):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        from onebot_adapter.hermes_config import reset_platform_toolsets, resolve_hermes_config_path
+        from onebot_adapter.hermes_config import reset_platform_toolsets
 
         cfg = store.config
-        config_path = resolve_hermes_config_path(cfg.hermes_install_dir or None)
-        if config_path is None:
-            return aiohttp.web.json_response(
-                {"error": "hermes_install_dir 未配置或目录不存在,请先在插件管理页配置"},
-                status=400,
-            )
+        _path, err_resp = _hermes_config_or_error(cfg)
+        if err_resp is not None:
+            return err_resp
         try:
-            await asyncio.to_thread(reset_platform_toolsets, cfg.hermes_install_dir or None)
+            await asyncio.to_thread(
+                reset_platform_toolsets,
+                cfg.hermes_install_dir or None,
+                extra_roots=_hermes_roots(cfg),
+            )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             logger.exception("reset platform_toolsets failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1262,18 +1330,24 @@ def _tool_policy_response(catalog: list[dict[str, Any]], stored: dict[str, dict[
 
 def _get_onebot_tool_policies(store: ConfigStore):
     async def handler(_: aiohttp.web.Request) -> aiohttp.web.Response:
-        from onebot_adapter.hermes_config import read_onebot_tool_policies, resolve_hermes_config_path
+        from onebot_adapter.hermes_config import read_onebot_tool_policies
 
-        install_dir = store.config.hermes_install_dir or None
-        if resolve_hermes_config_path(install_dir) is None:
-            return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
+        cfg = store.config
+        _path, err_resp = _hermes_config_or_error(cfg)
+        if err_resp is not None:
+            return err_resp
+        install_dir = cfg.hermes_install_dir or None
         try:
             return aiohttp.web.json_response(
                 _tool_policy_response(
                     _onebot_tool_catalog(),
-                    await asyncio.to_thread(read_onebot_tool_policies, install_dir),
+                    await asyncio.to_thread(
+                        read_onebot_tool_policies, install_dir, extra_roots=_hermes_roots(cfg),
+                    ),
                 )
             )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             logger.exception("read OneBot tool policies failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1283,11 +1357,13 @@ def _get_onebot_tool_policies(store: ConfigStore):
 
 def _put_onebot_tool_policies(store: ConfigStore):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        from onebot_adapter.hermes_config import resolve_hermes_config_path, write_onebot_tool_policies
+        from onebot_adapter.hermes_config import write_onebot_tool_policies
 
-        install_dir = store.config.hermes_install_dir or None
-        if resolve_hermes_config_path(install_dir) is None:
-            return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
+        cfg = store.config
+        _path, err_resp = _hermes_config_or_error(cfg)
+        if err_resp is not None:
+            return err_resp
+        install_dir = cfg.hermes_install_dir or None
         try:
             data = await request.json()
         except Exception:
@@ -1339,7 +1415,11 @@ def _put_onebot_tool_policies(store: ConfigStore):
                 sparse[name] = {"registered": registered, "permission": permission}
 
         try:
-            await asyncio.to_thread(write_onebot_tool_policies, install_dir, sparse)
+            await asyncio.to_thread(
+                write_onebot_tool_policies, install_dir, sparse, extra_roots=_hermes_roots(store.config),
+            )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             logger.exception("write OneBot tool policies failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1354,14 +1434,20 @@ def _put_onebot_tool_policies(store: ConfigStore):
 
 def _reset_onebot_tool_policies(store: ConfigStore):
     async def handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        from onebot_adapter.hermes_config import reset_onebot_tool_policies, resolve_hermes_config_path
+        from onebot_adapter.hermes_config import reset_onebot_tool_policies
 
-        install_dir = store.config.hermes_install_dir or None
-        if resolve_hermes_config_path(install_dir) is None:
-            return aiohttp.web.json_response({"error": "hermes_install_dir 未配置或目录不存在"}, status=400)
+        cfg = store.config
+        _path, err_resp = _hermes_config_or_error(cfg)
+        if err_resp is not None:
+            return err_resp
+        install_dir = cfg.hermes_install_dir or None
         try:
             catalog = _onebot_tool_catalog()
-            await asyncio.to_thread(reset_onebot_tool_policies, install_dir)
+            await asyncio.to_thread(
+                reset_onebot_tool_policies, install_dir, extra_roots=_hermes_roots(cfg),
+            )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             logger.exception("reset OneBot tool policies failed")
             return aiohttp.web.json_response({"error": str(exc)}, status=500)
@@ -1394,8 +1480,12 @@ def _get_hermes_mode(store: ConfigStore, state: dict[str, Any]):
 
         try:
             file_value = await asyncio.to_thread(
-                read_group_sessions_per_user, cfg.hermes_install_dir or None
+                read_group_sessions_per_user,
+                cfg.hermes_install_dir or None,
+                extra_roots=_hermes_roots(cfg),
             )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             return aiohttp.web.json_response(
                 {"error": f"读取 Hermes config.yaml 失败: {exc}"}, status=500,
@@ -1426,8 +1516,13 @@ def _put_hermes_mode(store: ConfigStore):
 
         try:
             await asyncio.to_thread(
-                write_group_sessions_per_user, cfg.hermes_install_dir or None, value
+                write_group_sessions_per_user,
+                cfg.hermes_install_dir or None,
+                value,
+                extra_roots=_hermes_roots(cfg),
             )
+        except HermesDirNotAllowed as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except FileNotFoundError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
@@ -1518,6 +1613,7 @@ code{background:#f4f4f4;padding:.1rem .3rem;border-radius:4px}
 </ul></div>
 <div class="card"><strong>WebSocket</strong><ul>
 <li>OneBot 反向WS: <code>ws://&lt;host&gt;:18800/onebot</code></li>
-<li>Hermes 插件: <code>ws://&lt;host&gt;:18810/hermes?token=&lt;hermes_ws_token&gt;</code></li>
+<li>Hermes 插件: <code>ws://&lt;host&gt;:18810/hermes</code>
+（Authorization Bearer 优先，仍接受 <code>?token=</code>）</li>
 </ul></div>
 </body></html>"""

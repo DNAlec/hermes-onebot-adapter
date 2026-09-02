@@ -1,7 +1,16 @@
 """Tests for the plugin installer (install + uninstall + .env auto-write)."""
 from pathlib import Path
 
+import pytest
+
 from onebot_adapter import installer
+
+
+@pytest.fixture(autouse=True)
+def _fake_home(tmp_path, request, monkeypatch):
+    if request.node.get_closest_marker("no_fake_home"):
+        return
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
 
 def test_install_copies_files(tmp_path):
@@ -39,6 +48,27 @@ def test_install_cleans_pycache(tmp_path):
     (pycache / "old.cpython-311.pyc").write_bytes(b"\x00")
     installer.install(str(tmp_path / "hermes"))
     assert not pycache.exists()
+
+
+def test_install_succeeds_when_pycache_is_not_removable(tmp_path, monkeypatch):
+    dest_dir = tmp_path / "hermes" / "plugins" / "onebot"
+    pycache = dest_dir / "__pycache__"
+    pycache.mkdir(parents=True)
+    (pycache / "old.cpython-311.pyc").write_bytes(b"\x00")
+
+    import shutil
+
+    real_rmtree = shutil.rmtree
+
+    def _rmtree(path, *args, **kwargs):
+        if Path(path).name == "__pycache__":
+            raise PermissionError("[Errno 13] Permission denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", _rmtree)
+    result = installer.install(str(tmp_path / "hermes"))
+    assert "error" not in result
+    assert "adapter.py" in result["copied"]
 
 
 def test_install_default_hermes_dir(tmp_path, monkeypatch):
@@ -201,11 +231,78 @@ def test_install_rejects_system_path():
     """install() should refuse to write to system paths like /etc."""
     result = installer.install("/etc/hermes-test")
     assert "error" in result
-    assert "$HOME" in result["error"] or "outside" in result["error"]
+    assert "outside allowed Hermes roots" in result["error"]
 
 
 def test_uninstall_rejects_system_path():
     """uninstall() should refuse to operate on system paths."""
     result = installer.uninstall("/usr/local/hermes-test")
     assert "error" in result
-    assert "$HOME" in result["error"] or "outside" in result["error"]
+    assert "outside allowed Hermes roots" in result["error"]
+
+
+@pytest.mark.no_fake_home
+def test_install_rejects_tmp_and_home_prefix():
+    result = installer.install("/tmp/hermes-onebot-not-allowed")
+    assert "error" in result
+    assert "outside allowed Hermes roots" in result["error"]
+    result = installer.install("/home/other-user-hermes")
+    assert "error" in result
+    assert "outside allowed Hermes roots" in result["error"]
+
+
+@pytest.mark.no_fake_home
+def test_install_extra_root_allows_opt_style_path(tmp_path):
+    dest = tmp_path / "opt" / "hermes"
+    denied = installer.install(str(dest))
+    assert "error" in denied
+    allowed = installer.install(str(dest), extra_roots=[str(tmp_path / "opt")])
+    assert "error" not in allowed
+    assert (dest / "plugins" / "onebot").exists()
+
+
+def test_is_allowed_hermes_dir_home_and_extra(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    assert installer.is_allowed_hermes_dir(tmp_path / "home" / ".hermes")
+    assert not installer.is_allowed_hermes_dir(tmp_path / "opt" / "hermes")
+    assert installer.is_allowed_hermes_dir(
+        tmp_path / "opt" / "hermes", extra_roots=[str(tmp_path / "opt")],
+    )
+    assert not installer.is_allowed_hermes_dir(Path("/tmp"))
+    assert not installer.is_allowed_hermes_dir(Path("/"))
+    assert not installer.is_allowed_hermes_dir(Path("relative-hermes"))
+
+
+def test_uninstall_continues_when_plugin_dir_not_fully_removable(tmp_path, monkeypatch):
+    hermes = tmp_path / "hermes"
+    installer.install(str(hermes))
+    dest = hermes / "plugins" / "onebot"
+    assert dest.exists()
+
+    import shutil
+
+    real_rmtree = shutil.rmtree
+
+    def _rmtree(path, *args, **kwargs):
+        if Path(path) == dest:
+            raise PermissionError("[Errno 13] Permission denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", _rmtree)
+    result = installer.uninstall(str(hermes))
+    assert "error" not in result
+    assert result["removed"] is False
+    assert "could not be deleted" in result["note"]
+
+
+def test_validate_extra_and_upload_roots():
+    assert installer.validate_hermes_extra_root("/") is not None
+    assert installer.validate_hermes_extra_root("/etc") is not None
+    assert installer.validate_hermes_extra_root("relative") is not None
+    assert installer.validate_hermes_extra_root("/opt/hermes") is None
+    assert installer.validate_upload_root("/") is not None
+    assert installer.validate_upload_root("/tmp") is not None
+    assert installer.validate_upload_root("/etc/passwd") is not None
+    assert installer.validate_upload_root("/tmp/hermes-onebot-adapter-uploads") is None
+    assert installer.validate_upload_root("relative") is not None

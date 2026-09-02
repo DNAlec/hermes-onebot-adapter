@@ -5,9 +5,11 @@ Also writes ONEBOT_ADAPTER_URL and ONEBOT_ADAPTER_TOKEN into the Hermes
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
-import shutil
+import stat
+from collections.abc import Sequence
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -22,24 +24,120 @@ _PLUGIN_FILES = ("__init__.py", "adapter.py", "markdown.py", "onebot_tools.py", 
 _ENV_VAR_URL = "ONEBOT_ADAPTER_URL"
 _ENV_VAR_TOKEN = "ONEBOT_ADAPTER_TOKEN"
 
+HERMES_DIR_OUTSIDE_MSG = "hermes_install_dir is outside the allowed Hermes install roots"
+_FORBIDDEN_SYSTEM_NAMES = ("etc", "proc", "sys")
+DEFAULT_AUTOMATION_UPLOAD_ROOT = "/tmp/hermes-onebot-adapter-uploads"
 
-def _is_safe_install_path(target: Path) -> bool:
-    """Return True if *target* is safe to use as an install target.
 
-    Only allow writes under the user's home directory, /home, or /tmp.
-    Rejects system paths (/, /etc, /usr, etc.) to prevent accidental
-    writes via the CLI or WebUI.  Symlink-based attacks on /tmp are
-    mitigated by the per-file ``is_symlink()`` guard in :func:`install`.
+class HermesDirNotAllowed(ValueError):
+    """Raised when a Hermes install path is outside the allowlist."""
+
+
+def _is_fs_root(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    return resolved.parent == resolved
+
+
+def _is_forbidden_system_path(resolved: Path) -> bool:
+    """True for filesystem roots and /etc, /proc, /sys (and their children)."""
+    if _is_fs_root(resolved):
+        return True
+    parts = resolved.parts
+    if len(parts) >= 2 and parts[0] == "/" and parts[1] in _FORBIDDEN_SYSTEM_NAMES:
+        return True
+    return False
+
+
+def _expand_absolute(raw: str) -> Path | None:
+    expanded = Path(raw).expanduser()
+    if not expanded.is_absolute():
+        return None
+    return expanded
+
+
+def validate_hermes_extra_root(root: str) -> str | None:
+    """Return an error string if *root* is not a usable extra Hermes root."""
+    expanded = _expand_absolute(root)
+    if expanded is None:
+        return f"hermes_install_allowed_roots entry must be an absolute path: {root}"
+    resolved = expanded.resolve(strict=False)
+    if _is_forbidden_system_path(resolved):
+        return f"hermes_install_allowed_roots entry is a forbidden system path: {root}"
+    return None
+
+
+def validate_upload_root(root: str) -> str | None:
+    """Return an error string if *root* is not a usable automation upload root."""
+    expanded = _expand_absolute(root)
+    if expanded is None:
+        return "automation_upload_allowed_roots entries must be absolute paths"
+    resolved = expanded.resolve(strict=False)
+    if _is_forbidden_system_path(resolved):
+        return f"automation_upload_allowed_roots must not include system roots: {root}"
+    if resolved == Path("/tmp"):
+        return "automation_upload_allowed_roots must not be the whole /tmp directory"
+    return None
+
+
+def _iter_allowed_hermes_roots(extra_roots: Sequence[str] | None) -> list[Path]:
+    roots: list[Path] = []
+    home = Path.home().expanduser().resolve(strict=False)
+    # HOME=/ would otherwise allow the entire filesystem.
+    if not _is_fs_root(home):
+        roots.append(home)
+    for raw in extra_roots or ():
+        if validate_hermes_extra_root(raw) is not None:
+            continue
+        expanded = _expand_absolute(raw)
+        if expanded is None:
+            continue
+        roots.append(expanded.resolve(strict=False))
+    return roots
+
+
+def is_allowed_hermes_dir(target: Path, extra_roots: Sequence[str] | None = None) -> bool:
+    """True if *target* resolves under $HOME or an extra allowed root.
+
+    ``/home`` (other users) and ``/tmp`` are not allowed by default.
+    Extra roots that themselves fail :func:`validate_hermes_extra_root` are ignored.
+    Relative paths are rejected so they cannot sneak in via the process cwd.
     """
-    allowed_roots = {Path.home(), Path("/home"), Path("/tmp")}
-    resolved = target.resolve(strict=False)
-    for root in allowed_roots:
+    expanded = target.expanduser()
+    if not expanded.is_absolute():
+        return False
+    resolved = expanded.resolve(strict=False)
+    for root in _iter_allowed_hermes_roots(extra_roots):
         try:
-            resolved.relative_to(root.resolve(strict=False))
+            resolved.relative_to(root)
             return True
         except ValueError:
-            pass
+            continue
     return False
+
+
+def validate_hermes_dir(target: Path | str, extra_roots: Sequence[str] | None = None) -> str | None:
+    """Return :data:`HERMES_DIR_OUTSIDE_MSG` when *target* is not allowed."""
+    path = target if isinstance(target, Path) else Path(target)
+    if is_allowed_hermes_dir(path, extra_roots):
+        return None
+    return HERMES_DIR_OUTSIDE_MSG
+
+
+def venv_python_is_inside_hermes(venv_python: str, hermes_dir: Path) -> bool:
+    """True if the venv interpreter's parent directory stays inside *hermes_dir*.
+
+    The interpreter file itself is often a symlink to a system Python; we
+    resolve only the parent so a normal venv is accepted, but a ``venv/``
+    directory that is a symlink pointing outside the Hermes tree is not.
+    """
+    py = Path(venv_python)
+    try:
+        parent = py.parent.resolve(strict=False)
+        root = hermes_dir.expanduser().resolve(strict=False)
+        parent.relative_to(root)
+        return True
+    except (ValueError, OSError):
+        return False
 
 
 def _resolve_hermes_dir(install_dir: str | None) -> Path:
@@ -96,9 +194,8 @@ def _persist_env(env_path: Path, env: dict[str, str]) -> None:
         else:
             lines.append(f"{k}={v}")
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.replace(tmp, env_path)
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    _atomic_write_nofollow(env_path, payload)
 
 
 def _write_env(env_path: Path, updates: dict[str, str]) -> dict[str, str]:
@@ -115,6 +212,72 @@ def _write_env(env_path: Path, updates: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _atomic_write_nofollow(dest: Path, data: bytes) -> None:
+    """Write *data* to *dest* without following a pre-planted symlink."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, 0o644)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    except Exception:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    os.close(fd)
+    os.replace(tmp, dest)
+
+
+def _lstat_not_symlink(path: Path, *, what: str) -> str | None:
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"cannot stat {what}: {exc}"
+    if stat.S_ISLNK(st.st_mode):
+        return f"{what} is a symlink, refusing to overwrite: {path}"
+    return None
+
+
+def _ensure_real_dir(path: Path) -> str | None:
+    err = _lstat_not_symlink(path, what="install target")
+    if err:
+        return err
+    path.mkdir(parents=True, exist_ok=True)
+    err = _lstat_not_symlink(path, what="install target")
+    if err:
+        return err
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        return f"cannot stat install target: {exc}"
+    if not stat.S_ISDIR(st.st_mode):
+        return f"install target is not a directory: {path}"
+    return None
+
+
+def _rmtree_if_not_symlink(path: Path, *, ignore_errors: bool = False) -> str | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    err = _lstat_not_symlink(path, what="install target")
+    if err:
+        return err
+    import shutil
+
+    try:
+        shutil.rmtree(path, ignore_errors=ignore_errors)
+    except OSError as exc:
+        if ignore_errors:
+            logger.warning("could not remove %s: %s", path, exc)
+            return None
+        return f"cannot remove {path}: {exc}"
+    return None
+
+
 # ── Install ──────────────────────────────────────────────────────────────
 
 
@@ -122,13 +285,14 @@ def install(
     install_dir: str | None = None,
     adapter_url: str = "",
     adapter_token: str = "",
+    extra_roots: Sequence[str] | None = None,
 ) -> dict:
     hermes_dir = _resolve_hermes_dir(install_dir)
-    if not _is_safe_install_path(hermes_dir):
+    if not is_allowed_hermes_dir(hermes_dir, extra_roots):
         return {
             "adapter_version": __version__,
             "hermes_dir": str(hermes_dir),
-            "error": f"install_dir resolved to {hermes_dir}, which is outside $HOME",
+            "error": f"install_dir resolved to {hermes_dir}, which is outside allowed Hermes roots",
         }
     dest = hermes_dir / "plugins" / "onebot"
     result: dict = {
@@ -144,13 +308,12 @@ def install(
         result["error"] = f"plugin source not found: {PLUGIN_SRC}"
         return result
 
-    # Copy plugin files
-    dest.mkdir(parents=True, exist_ok=True)
-    # Refuse to write through a pre-planted symlink — a symlinked dest or
-    # dest/<file> could redirect writes to arbitrary files (TOCTOU race).
-    if dest.is_symlink():
-        result["error"] = f"install target is a symlink, refusing to overwrite: {dest}"
-        return result
+    plugins_dir = dest.parent
+    for directory in (hermes_dir, plugins_dir, dest):
+        err = _ensure_real_dir(directory)
+        if err:
+            result["error"] = err
+            return result
     # Use round-trip YAML to preserve string quoting (e.g. version: "0.0.0"
     # stays quoted so it isn't parsed as float 0.0).
     _yaml = YAML(typ="rt")
@@ -158,37 +321,29 @@ def install(
         src_file = PLUGIN_SRC / fname
         if not src_file.exists():
             continue
+        out_path = dest / fname
         if fname == "plugin.yaml":
             data = _yaml.load(src_file.read_text(encoding="utf-8"))
             if data is None:
                 data = CommentedMap()
             data["version"] = __version__
-            out_path = dest / fname
-            if out_path.is_symlink():
-                result["error"] = f"output path is a symlink, refusing to overwrite: {out_path}"
-                return result
-            _yaml.dump(data, out_path)
+            buf = io.StringIO()
+            _yaml.dump(data, buf)
+            _atomic_write_nofollow(out_path, buf.getvalue().encode("utf-8"))
         else:
-            out_path = dest / fname
-            if out_path.is_symlink():
-                result["error"] = f"output path is a symlink, refusing to overwrite: {out_path}"
-                return result
-            shutil.copy2(src_file, out_path)
+            _atomic_write_nofollow(out_path, src_file.read_bytes())
         result["copied"].append(fname)
 
     sanitize_src = Path(__file__).parent / "logging_utils.py"
     sanitize_dest = dest / "log_sanitize.py"
     if sanitize_src.exists():
-        if sanitize_dest.is_symlink():
-            result["error"] = f"output path is a symlink, refusing to overwrite: {sanitize_dest}"
-            return result
-        shutil.copy2(sanitize_src, sanitize_dest)
+        _atomic_write_nofollow(sanitize_dest, sanitize_src.read_bytes())
         result["copied"].append("log_sanitize.py")
 
-    # Clean stale .pyc
     pycache = dest / "__pycache__"
-    if pycache.exists():
-        shutil.rmtree(pycache, ignore_errors=True)
+    # Stale bytecode is best-effort. Hermes may have the dir open or own
+    # files the adapter cannot delete; that must not abort a successful copy.
+    _rmtree_if_not_symlink(pycache, ignore_errors=True)
 
     # Write env vars
     env_updates: dict[str, str] = {}
@@ -212,18 +367,20 @@ def install(
     )
     logger.info("Plugin installed to %s (%d files)", dest, len(result["copied"]))
 
-    # 初始化 OneBot 平台默认工具集配置(写入 platform_toolsets.onebot +
-    # known_plugin_toolsets.onebot)。失败不阻断安装,WebUI 工具管理页可补救。
+    # 仅在尚未配置时写入默认工具集。重装插件不得覆盖 WebUI 里已保存的选择。
     try:
-        from onebot_adapter.hermes_config import default_onebot_toolsets, write_platform_toolsets
+        from onebot_adapter.hermes_config import ensure_default_platform_toolsets
 
-        defaults = default_onebot_toolsets(install_dir)
-        write_platform_toolsets(install_dir, defaults)
-        result["note"] += (
-            " 已为 OneBot 平台启用默认工具集;请运行 hermes plugins enable onebot-platform"
-            " 并重启 Hermes 网关后生效。"
-        )
-        logger.info("platform_toolsets.onebot initialized: %s", defaults)
+        created = ensure_default_platform_toolsets(install_dir, extra_roots=extra_roots)
+        if created:
+            result["note"] += (
+                " 已为 OneBot 平台启用默认工具集;请运行 hermes plugins enable onebot-platform"
+                " 并重启 Hermes 网关后生效。"
+            )
+            logger.info("platform_toolsets.onebot initialized with defaults")
+        else:
+            result["note"] += " 已保留现有 OneBot 工具集配置。"
+            logger.info("platform_toolsets.onebot already present, not overwritten")
     except Exception as exc:
         logger.warning("could not init platform_toolsets.onebot: %s", exc)
         result["note"] += " (工具集默认配置写入失败,请用 WebUI 工具管理页手动配置)"
@@ -234,13 +391,13 @@ def install(
 # ── Uninstall ────────────────────────────────────────────────────────────
 
 
-def uninstall(install_dir: str | None = None) -> dict:
+def uninstall(install_dir: str | None = None, extra_roots: Sequence[str] | None = None) -> dict:
     hermes_dir = _resolve_hermes_dir(install_dir)
-    if not _is_safe_install_path(hermes_dir):
+    if not is_allowed_hermes_dir(hermes_dir, extra_roots):
         return {
             "adapter_version": __version__,
             "hermes_dir": str(hermes_dir),
-            "error": f"install_dir resolved to {hermes_dir}, which is outside $HOME",
+            "error": f"install_dir resolved to {hermes_dir}, which is outside allowed Hermes roots",
         }
     dest = hermes_dir / "plugins" / "onebot"
     env_path = _env_path(hermes_dir)
@@ -253,11 +410,18 @@ def uninstall(install_dir: str | None = None) -> dict:
         "env_cleaned": False,
     }
 
-    # Remove plugin directory
-    if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
-        result["removed"] = True
-        logger.info("Plugin directory removed: %s", dest)
+    if dest.exists() or dest.is_symlink():
+        err = _lstat_not_symlink(dest, what="install target")
+        if err:
+            result["error"] = err
+            return result
+        # Root-owned __pycache__ (gateway once ran as root) must not abort uninstall.
+        _rmtree_if_not_symlink(dest, ignore_errors=True)
+        result["removed"] = not dest.exists() and not dest.is_symlink()
+        if result["removed"]:
+            logger.info("Plugin directory removed: %s", dest)
+        else:
+            logger.warning("plugin directory not fully removed: %s", dest)
     else:
         logger.info("Plugin directory not found: %s", dest)
 
@@ -276,9 +440,14 @@ def uninstall(install_dir: str | None = None) -> dict:
         result["env_cleaned"] = True
         logger.info("Env vars removed from %s", env_path)
 
+    leftover = dest.exists() or dest.is_symlink()
     result["note"] = (
         f"Plugin removed from {dest}. "
         f"{'Env vars cleaned. ' if removed_any else ''}"
         "Restart the Hermes gateway."
     )
+    if leftover:
+        result["note"] += (
+            " Some files could not be deleted (often root-owned __pycache__); remove them manually."
+        )
     return result

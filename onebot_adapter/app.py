@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import ipaddress
 import logging
 import math
 import os
@@ -745,7 +746,15 @@ class AdapterService:
                     raise
                 logger.debug("%s port %d busy, trying %d", label, port + attempt, port + attempt + 1)
 
-    async def serve(self, host: str = "127.0.0.1", no_webui: bool = False) -> None:
+    async def serve(
+        self,
+        host: str = "127.0.0.1",
+        no_webui: bool = False,
+        *,
+        onebot_host: str | None = None,
+        hermes_host: str | None = None,
+        webui_host: str | None = None,
+    ) -> None:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
             headers={"User-Agent": f"hermes-onebot-adapter/{__version__}"},
@@ -809,13 +818,16 @@ class AdapterService:
         for runner in self._runners:
             await runner.setup()
 
+        onebot_bind = onebot_host or host
+        hermes_bind = hermes_host or host
+        webui_bind = webui_host or host
         bindings: list[aiohttp.web.TCPSite] = []
         runner_label_port = [
-            (onebot_runner, "OneBot WS", host, cfg.onebot_reverse_ws_port, "onebot_reverse_ws_port"),
-            (hermes_runner, "Hermes WS", host, cfg.hermes_ws_port, "hermes_ws_port"),
+            (onebot_runner, "OneBot WS", onebot_bind, cfg.onebot_reverse_ws_port, "onebot_reverse_ws_port"),
+            (hermes_runner, "Hermes WS", hermes_bind, cfg.hermes_ws_port, "hermes_ws_port"),
         ]
         if not no_webui:
-            runner_label_port.append((webui_runner, "WebUI", host, cfg.webui_port, "webui_port"))
+            runner_label_port.append((webui_runner, "WebUI", webui_bind, cfg.webui_port, "webui_port"))
         remapped: dict[str, int] = {}
         for runner, label, hst, port, cfg_key in runner_label_port:
             site = await self._try_port(runner, hst, port, label, 50)
@@ -838,8 +850,21 @@ class AdapterService:
             else:
                 self.store.update(new_cfg)
         cfg = self.store.config
+        if not is_loopback_bind(hermes_bind):
+            logger.warning(
+                "Hermes WS is bound to %s (not loopback). "
+                "Prefer --hermes-host 127.0.0.1 unless the plugin is remote.",
+                hermes_bind,
+            )
         if not no_webui:
-            logger.info("WebUI ready at http://%s:%d", host, cfg.webui_port)
+            logger.info("WebUI ready at http://%s:%d", webui_bind, cfg.webui_port)
+            if not is_loopback_bind(webui_bind):
+                logger.warning(
+                    "WebUI is bound to %s (not loopback). "
+                    "Prefer --webui-host 127.0.0.1 --hermes-host 127.0.0.1; "
+                    "use --onebot-host 0.0.0.0 for remote NapCat.",
+                    webui_bind,
+                )
 
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -853,7 +878,40 @@ class AdapterService:
             await self._on_hermes_cleanup(hermes_app)
 
 
-def run(host: str = "127.0.0.1", port: int | None = None, no_webui: bool = False) -> None:
+def is_loopback_bind(host: str) -> bool:
+    """True for 127.0.0.1, ::1, localhost, and other loopback addresses."""
+    raw = (host or "").strip().lower().strip("[]")
+    if raw in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(raw).is_loopback
+    except ValueError:
+        return False
+
+
+def resolve_bind_hosts(
+    host: str,
+    onebot_host: str | None,
+    hermes_host: str | None,
+    webui_host: str | None,
+) -> tuple[str, str, str]:
+    """Resolve per-listener hosts. Unspecified values fall back to *host*."""
+    return (
+        host if onebot_host is None else onebot_host,
+        host if hermes_host is None else hermes_host,
+        host if webui_host is None else webui_host,
+    )
+
+
+def run(
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    no_webui: bool = False,
+    *,
+    onebot_host: str | None = None,
+    hermes_host: str | None = None,
+    webui_host: str | None = None,
+) -> None:
     # Bootstrap console logging before configuration I/O so load/generation
     # failures do not disappear before the configured handlers exist.
     logging.basicConfig(
@@ -868,6 +926,8 @@ def run(host: str = "127.0.0.1", port: int | None = None, no_webui: bool = False
         raise SystemExit(str(exc)) from exc
     webui_token_was_empty = not old_cfg.webui_token
     cfg = ensure_tokens(old_cfg)
+    from onebot_adapter.config import ensure_config_file_permissions
+    ensure_config_file_permissions()
     try:
         errors = cfg.validate()
     except Exception as exc:
@@ -888,6 +948,12 @@ def run(host: str = "127.0.0.1", port: int | None = None, no_webui: bool = False
         )
     service = AdapterService(store)
     try:
-        asyncio.run(service.serve(host=host, no_webui=no_webui))
+        asyncio.run(service.serve(
+            host=host,
+            no_webui=no_webui,
+            onebot_host=onebot_host,
+            hermes_host=hermes_host,
+            webui_host=webui_host,
+        ))
     except KeyboardInterrupt:
         pass

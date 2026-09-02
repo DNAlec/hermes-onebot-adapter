@@ -13,6 +13,12 @@ from onebot_adapter import hermes_config as hc
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _tmp_is_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermes yaml tests use tmp_path; allow it by treating tmp_path as $HOME."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+
 @pytest.fixture
 def hermes_dir(tmp_path: Path) -> Path:
     """创建一个最小 hermes 目录,含 config.yaml。"""
@@ -503,6 +509,18 @@ def test_find_venv_detects_agent_dir_directly(tmp_path: Path):
     assert agent == agent_dir
 
 
+def test_list_available_toolsets_skips_subprocess_for_disallowed_dir(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("subprocess.run must not run for a disallowed Hermes dir")
+
+    monkeypatch.setattr(hc.subprocess, "run", _boom)
+    with pytest.raises(hc.HermesDirNotAllowed):
+        hc.list_available_toolsets("/tmp/evil-hermes")
+
+
 def test_find_venv_returns_none_when_no_venv(tmp_path: Path):
     """无 venv 目录时返回 None。"""
     hermes_dir = tmp_path / "hermes"
@@ -682,6 +700,28 @@ def test_install_initializes_platform_toolsets(tmp_path: Path):
     # known_plugin_toolsets 也应写入
     assert "known_plugin_toolsets" in data
     assert "onebot" in data["known_plugin_toolsets"]
+
+
+def test_reinstall_preserves_existing_platform_toolsets(tmp_path: Path):
+    from onebot_adapter import installer
+
+    hermes = tmp_path / "hermes"
+    installer.install(str(hermes))
+    hc.write_platform_toolsets(str(hermes), ["web", "onebot", "custom_keep"])
+    installer.install(str(hermes))
+    current = hc.read_current_enabled(str(hermes))
+    assert current == ["custom_keep", "onebot", "web"]
+    data = hc.read_config(str(hermes))
+    assert "onebot" in data["known_plugin_toolsets"]["onebot"]
+
+
+def test_ensure_default_skips_when_onebot_key_exists_even_if_empty(tmp_path: Path):
+    hermes = tmp_path / "hermes"
+    hermes.mkdir()
+    (hermes / "config.yaml").write_text("platform_toolsets:\n  onebot: []\n", encoding="utf-8")
+    created = hc.ensure_default_platform_toolsets(str(hermes))
+    assert created is False
+    assert hc.read_current_enabled(str(hermes)) == []
 
 
 def test_install_default_toolsets_contains_core_and_plugin(tmp_path: Path):

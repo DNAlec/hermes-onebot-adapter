@@ -18,13 +18,19 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
 
-from onebot_adapter.installer import _resolve_hermes_dir
+from onebot_adapter.installer import (
+    HermesDirNotAllowed,
+    _resolve_hermes_dir,
+    validate_hermes_dir,
+    venv_python_is_inside_hermes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +42,28 @@ NO_MCP_SENTINEL = "no_mcp"
 # ── 路径解析 ──────────────────────────────────────────────────────────────
 
 
-def resolve_hermes_config_path(hermes_install_dir: str | None) -> Path | None:
+def _checked_hermes_dir(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> Path:
+    target = _resolve_hermes_dir(hermes_install_dir)
+    err = validate_hermes_dir(target, extra_roots)
+    if err:
+        raise HermesDirNotAllowed(err)
+    return target
+
+
+def resolve_hermes_config_path(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> Path | None:
     """返回 ``<hermes_dir>/config.yaml`` 的路径;目录不存在返回 None。
 
     目录存在但 config.yaml 不存在时,返回路径对象(调用方据此决定是新建还是报错)。
+    Raises :class:`HermesDirNotAllowed` when the resolved directory is outside
+    the Hermes install allowlist.
     """
-    hermes_dir = _resolve_hermes_dir(hermes_install_dir)
+    hermes_dir = _checked_hermes_dir(hermes_install_dir, extra_roots)
     if not hermes_dir.exists():
         return None
     return hermes_dir / "config.yaml"
@@ -87,7 +109,7 @@ def _locked(config_path: Path):
         fh.close()
 
 
-def read_config(hermes_install_dir: str | None) -> Any:
+def read_config(hermes_install_dir: str | None, extra_roots: Sequence[str] | None = None) -> Any:
     """Round-trip load Hermes config.yaml;不存在返回空 dict-like。
 
     返回 ruamel.yaml 的 CommentedMap(支持注释保留);文件不存在时返回空 CommentedMap。
@@ -96,7 +118,7 @@ def read_config(hermes_install_dir: str | None) -> Any:
     基于空数据覆盖用户的(可恢复的)损坏 YAML。
     """
     yaml = _yaml()
-    config_path = resolve_hermes_config_path(hermes_install_dir)
+    config_path = resolve_hermes_config_path(hermes_install_dir, extra_roots=extra_roots)
     if config_path is None or not config_path.exists():
         from ruamel.yaml.comments import CommentedMap
 
@@ -121,6 +143,7 @@ def _read_modify_write(
     hermes_install_dir: str | None,
     *,
     modify: Any,
+    extra_roots: Sequence[str] | None = None,
 ) -> None:
     """在文件锁保护下完成读取-修改-写入,避免 TOCTOU 丢失更新。
 
@@ -130,7 +153,7 @@ def _read_modify_write(
 
     当目录不存在时抛 ``FileNotFoundError``;解析失败抛 ``HermesConfigParseError``。
     """
-    config_path = resolve_hermes_config_path(hermes_install_dir)
+    config_path = resolve_hermes_config_path(hermes_install_dir, extra_roots=extra_roots)
     if config_path is None:
         raise FileNotFoundError(
             f"Hermes 安装目录未配置或不存在: {hermes_install_dir!r}; "
@@ -161,7 +184,11 @@ def _read_modify_write(
         _atomic_write(config_path, buf.getvalue())
 
 
-def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str]) -> None:
+def write_platform_toolsets(
+    hermes_install_dir: str | None,
+    toolsets: list[str],
+    extra_roots: Sequence[str] | None = None,
+) -> None:
     """写入 ``platform_toolsets.onebot`` 和 ``known_plugin_toolsets.onebot``。
 
     - ``platform_toolsets.onebot`` = sorted(set(toolsets))
@@ -191,17 +218,65 @@ def write_platform_toolsets(hermes_install_dir: str | None, toolsets: list[str])
             existing.append(PLUGIN_TOOLSET_KEY)
         known[PLATFORM] = sorted(set(existing))
 
-    _read_modify_write(hermes_install_dir, modify=_modify)
+    _read_modify_write(hermes_install_dir, modify=_modify, extra_roots=extra_roots)
 
 
-def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
+def _ensure_known_plugin_toolset(data: Any) -> None:
+    from ruamel.yaml.comments import CommentedMap
+
+    known = data.get("known_plugin_toolsets")
+    if known is None:
+        known = CommentedMap()
+        data["known_plugin_toolsets"] = known
+    existing = list(known.get(PLATFORM, []) or [])
+    if PLUGIN_TOOLSET_KEY not in existing:
+        existing.append(PLUGIN_TOOLSET_KEY)
+        known[PLATFORM] = sorted(set(existing))
+
+
+def ensure_default_platform_toolsets(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> bool:
+    """Write default ``platform_toolsets.onebot`` only when the key is absent.
+
+    Re-running the plugin installer must not wipe WebUI tool-management
+    choices. Returns True when defaults were created, False when an existing
+    list (including empty) was left unchanged. Always ensures
+    ``known_plugin_toolsets.onebot`` contains ``"onebot"``.
+    """
+    created = False
+
+    def _modify(data: Any) -> None:
+        nonlocal created
+        from ruamel.yaml.comments import CommentedMap
+
+        platform_toolsets = data.get("platform_toolsets")
+        if platform_toolsets is None:
+            platform_toolsets = CommentedMap()
+            data["platform_toolsets"] = platform_toolsets
+        if PLATFORM not in platform_toolsets:
+            platform_toolsets[PLATFORM] = sorted(
+                set(default_onebot_toolsets(hermes_install_dir, extra_roots=extra_roots))
+            )
+            created = True
+        _ensure_known_plugin_toolset(data)
+
+    _read_modify_write(hermes_install_dir, modify=_modify, extra_roots=extra_roots)
+    return created
+
+
+def reset_platform_toolsets(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> None:
     """删除 ``platform_toolsets.onebot`` 条目(其它平台保留)。
 
     不删 ``known_plugin_toolsets`` —— 删除 known 会让 Hermes 把 onebot 当"新插件"
     默认启用,与 reset 的"回到未配置状态"语义不符。整个 read-modify-write 在文件锁
     保护下完成。
     """
-    config_path = resolve_hermes_config_path(hermes_install_dir)
+    config_path = resolve_hermes_config_path(hermes_install_dir, extra_roots=extra_roots)
     if config_path is None or not config_path.exists():
         return
 
@@ -210,20 +285,23 @@ def reset_platform_toolsets(hermes_install_dir: str | None) -> None:
         if platform_toolsets is not None and PLATFORM in platform_toolsets:
             del platform_toolsets[PLATFORM]
 
-    _read_modify_write(hermes_install_dir, modify=_modify)
+    _read_modify_write(hermes_install_dir, modify=_modify, extra_roots=extra_roots)
 
 
 # ── OneBot per-tool policies ──────────────────────────────────────────────
 
 
-def read_onebot_tool_policies(hermes_install_dir: str | None) -> dict[str, dict[str, Any]]:
+def read_onebot_tool_policies(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Read sparse ``plugins.entries.onebot.tool_policies`` overrides.
 
     Missing sections return an empty mapping. Malformed YAML still raises
     :class:`HermesConfigParseError`; malformed policy values are ignored so a
     damaged optional subtree cannot break the management page.
     """
-    data = read_config(hermes_install_dir)
+    data = read_config(hermes_install_dir, extra_roots=extra_roots)
     plugins = data.get("plugins") if hasattr(data, "get") else None
     entries = plugins.get("entries") if hasattr(plugins, "get") else None
     onebot = entries.get(PLATFORM) if hasattr(entries, "get") else None
@@ -242,6 +320,7 @@ def read_onebot_tool_policies(hermes_install_dir: str | None) -> dict[str, dict[
 def write_onebot_tool_policies(
     hermes_install_dir: str | None,
     policies: dict[str, dict[str, Any]],
+    extra_roots: Sequence[str] | None = None,
 ) -> None:
     """Replace the sparse OneBot tool policy map while preserving all other config."""
 
@@ -272,12 +351,15 @@ def write_onebot_tool_policies(
             str(name): CommentedMap(dict(policy)) for name, policy in policies.items()
         })
 
-    _read_modify_write(hermes_install_dir, modify=_modify)
+    _read_modify_write(hermes_install_dir, modify=_modify, extra_roots=extra_roots)
 
 
-def reset_onebot_tool_policies(hermes_install_dir: str | None) -> None:
+def reset_onebot_tool_policies(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> None:
     """Remove only ``plugins.entries.onebot.tool_policies`` if it exists."""
-    config_path = resolve_hermes_config_path(hermes_install_dir)
+    config_path = resolve_hermes_config_path(hermes_install_dir, extra_roots=extra_roots)
     if config_path is None or not config_path.exists():
         return
 
@@ -288,13 +370,16 @@ def reset_onebot_tool_policies(hermes_install_dir: str | None) -> None:
         if hasattr(onebot, "__contains__") and "tool_policies" in onebot:
             del onebot["tool_policies"]
 
-    _read_modify_write(hermes_install_dir, modify=_modify)
+    _read_modify_write(hermes_install_dir, modify=_modify, extra_roots=extra_roots)
 
 
 # ── 顶层 group_sessions_per_user 读写(供 WebUI 管理)────────────────────
 
 
-def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
+def read_group_sessions_per_user(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> bool | None:
     """读取 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
 
     返回 ``True`` / ``False``;字段不存在或文件/目录不存在时返回 ``None``
@@ -302,11 +387,11 @@ def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
     YAML 解析失败时也返回 ``None`` 并记 warning,不抛异常,与
     ``_read_mcp_servers`` 的错误处理策略一致。
     """
-    config_path = resolve_hermes_config_path(hermes_install_dir)
+    config_path = resolve_hermes_config_path(hermes_install_dir, extra_roots=extra_roots)
     if config_path is None or not config_path.exists():
         return None
     try:
-        data = read_config(hermes_install_dir)
+        data = read_config(hermes_install_dir, extra_roots=extra_roots)
     except HermesConfigParseError as exc:
         logger.warning("read_group_sessions_per_user: config parse failed: %s", exc)
         return None
@@ -320,7 +405,11 @@ def read_group_sessions_per_user(hermes_install_dir: str | None) -> bool | None:
     return bool(value) if value is not None else None
 
 
-def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -> None:
+def write_group_sessions_per_user(
+    hermes_install_dir: str | None,
+    value: bool,
+    extra_roots: Sequence[str] | None = None,
+) -> None:
     """写入 Hermes ``config.yaml`` 顶层 ``group_sessions_per_user`` 字段。
 
     保留其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁保护下完成。
@@ -330,10 +419,14 @@ def write_group_sessions_per_user(hermes_install_dir: str | None, value: bool) -
     def _modify(data: Any) -> None:
         data["group_sessions_per_user"] = bool(value)
 
-    _read_modify_write(hermes_install_dir, modify=_modify)
+    _read_modify_write(hermes_install_dir, modify=_modify, extra_roots=extra_roots)
 
 
-def write_channel_prompts(hermes_install_dir: str | None, prompts: dict[str, str]) -> None:
+def write_channel_prompts(
+    hermes_install_dir: str | None,
+    prompts: dict[str, str],
+    extra_roots: Sequence[str] | None = None,
+) -> None:
     """写入 ``platforms.onebot.channel_prompts``。
 
     保留其它顶层 key、注释和顺序。整个 read-modify-write 在文件锁保护下完成。
@@ -351,10 +444,14 @@ def write_channel_prompts(hermes_install_dir: str | None, prompts: dict[str, str
             platforms[PLATFORM] = onebot_cfg
         onebot_cfg["channel_prompts"] = {str(k): str(v) for k, v in prompts.items()}
 
-    _read_modify_write(hermes_install_dir, modify=_modify)
+    _read_modify_write(hermes_install_dir, modify=_modify, extra_roots=extra_roots)
 
 
-def materialize_channel_prompts(config: Any, hermes_install_dir: str | None) -> None:
+def materialize_channel_prompts(
+    config: Any,
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> None:
     """把适配器 config 的 global_channel_prompt + 每群 custom_prompt 物化写入 Hermes config.yaml。
 
     遍历 ``config.groups``:
@@ -364,7 +461,9 @@ def materialize_channel_prompts(config: Any, hermes_install_dir: str | None) -> 
     一次性写入 ``platforms.onebot.channel_prompts``。Hermes config.yaml
     不存在时跳过(插件连接时再重试,保证提示词最新)。
     """
-    config_path = resolve_hermes_config_path(hermes_install_dir)
+    if extra_roots is None:
+        extra_roots = getattr(config, "hermes_install_allowed_roots", None)
+    config_path = resolve_hermes_config_path(hermes_install_dir, extra_roots=extra_roots)
     if config_path is None or not config_path.exists():
         logger.debug("materialize_channel_prompts: Hermes config.yaml 不存在,跳过")
         return
@@ -384,7 +483,7 @@ def materialize_channel_prompts(config: Any, hermes_install_dir: str | None) -> 
         prompts[gid_str] = custom if custom else global_prompt
 
     try:
-        write_channel_prompts(hermes_install_dir, prompts)
+        write_channel_prompts(hermes_install_dir, prompts, extra_roots=extra_roots)
         logger.info(
             "materialize_channel_prompts: wrote %d group prompt(s) to Hermes config.yaml",
             len(prompts),
@@ -456,11 +555,20 @@ _DEFAULT_TOOLSETS_SCRIPT = (
 )
 
 
-def _run_hermes_subprocess(venv_python: str, agent_dir: Path, script: str) -> dict | None:
+def _run_hermes_subprocess(
+    venv_python: str,
+    agent_dir: Path,
+    script: str,
+    *,
+    hermes_dir: Path | None = None,
+) -> dict | None:
     """用 Hermes venv 的 Python 执行脚本,返回解析后的 JSON dict。
 
     失败(启动失败/非零退出/JSON 解析失败)返回 ``None`` 并记录日志。
     """
+    if hermes_dir is not None and not venv_python_is_inside_hermes(venv_python, hermes_dir):
+        logger.warning("hermes subprocess refused: venv python is outside the Hermes dir")
+        return None
     try:
         proc = subprocess.run(
             [venv_python, "-c", script],
@@ -485,11 +593,14 @@ def _run_hermes_subprocess(venv_python: str, agent_dir: Path, script: str) -> di
         return None
 
 
-def _read_mcp_servers(hermes_install_dir: str | None) -> list[dict]:
+def _read_mcp_servers(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> list[dict]:
     """从 config.yaml 读取 MCP 服务器列表(不依赖 Hermes Python 模块)。"""
     mcp_servers: list[dict] = []
     try:
-        data = read_config(hermes_install_dir)
+        data = read_config(hermes_install_dir, extra_roots=extra_roots)
         mcp_cfg = data.get("mcp_servers") or {}
         if hasattr(mcp_cfg, "items"):
             for name, srv_cfg in mcp_cfg.items():
@@ -523,7 +634,10 @@ def _augment_toolset_descriptions(configurable: list[dict]) -> None:
             item["description"] = _CLARIFY_PLATFORM_WARNING
 
 
-def list_available_toolsets(hermes_install_dir: str | None) -> dict:
+def list_available_toolsets(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> dict:
     """返回 OneBot 平台可配置的工具集 + MCP 服务器清单。
 
     返回结构::
@@ -542,16 +656,18 @@ def list_available_toolsets(hermes_install_dir: str | None) -> dict:
     venv 不存在时 fallback 到 ``sys.path`` 方案。两者都失败时返回
     ``{"error": "...", "detail": "..."}``。
     """
-    hermes_dir = _resolve_hermes_dir(hermes_install_dir)
+    hermes_dir = _checked_hermes_dir(hermes_install_dir, extra_roots)
 
     # ── 主路径:子进程(用 Hermes 自己的 venv Python)──────────────────────
     venv = _find_venv(hermes_dir)
     if venv is not None:
         venv_python, agent_dir = venv
-        result = _run_hermes_subprocess(venv_python, agent_dir, _LIST_TOOLSETS_SCRIPT)
+        result = _run_hermes_subprocess(
+            venv_python, agent_dir, _LIST_TOOLSETS_SCRIPT, hermes_dir=hermes_dir,
+        )
         if result is not None and "configurable" in result:
             _augment_toolset_descriptions(result["configurable"])
-            result["mcp_servers"] = _read_mcp_servers(hermes_install_dir)
+            result["mcp_servers"] = _read_mcp_servers(hermes_install_dir, extra_roots=extra_roots)
             return result
         # 子进程失败 → 继续 fallback 到 sys.path
 
@@ -590,7 +706,10 @@ def list_available_toolsets(hermes_install_dir: str | None) -> dict:
             return {"error": "failed to list toolsets", "detail": str(exc)}
 
         _augment_toolset_descriptions(configurable)
-        return {"configurable": configurable, "mcp_servers": _read_mcp_servers(hermes_install_dir)}
+        return {
+            "configurable": configurable,
+            "mcp_servers": _read_mcp_servers(hermes_install_dir, extra_roots=extra_roots),
+        }
     finally:
         for p in added:
             try:
@@ -616,7 +735,10 @@ _FALLBACK_DEFAULT_OFF = {
 }
 
 
-def default_onebot_toolsets(hermes_install_dir: str | None) -> list[str]:
+def default_onebot_toolsets(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> list[str]:
     """计算首次安装时为 OneBot 平台启用的默认工具集列表。
 
     优先用 Hermes venv Python 跑子进程获取 ``CONFIGURABLE_TOOLSETS`` +
@@ -625,13 +747,15 @@ def default_onebot_toolsets(hermes_install_dir: str | None) -> list[str]:
 
     不含 MCP 服务器条目(让其走"全局 MCP 默认全启"路径)。
     """
-    hermes_dir = _resolve_hermes_dir(hermes_install_dir)
+    hermes_dir = _checked_hermes_dir(hermes_install_dir, extra_roots)
 
     # ── 主路径:子进程 ──────────────────────────────────────────────────
     venv = _find_venv(hermes_dir)
     if venv is not None:
         venv_python, agent_dir = venv
-        result = _run_hermes_subprocess(venv_python, agent_dir, _DEFAULT_TOOLSETS_SCRIPT)
+        result = _run_hermes_subprocess(
+            venv_python, agent_dir, _DEFAULT_TOOLSETS_SCRIPT, hermes_dir=hermes_dir,
+        )
         if result is not None and "keys" in result:
             configurable_keys = set(result["keys"])
             default_off = set(result.get("default_off", []))
@@ -672,10 +796,13 @@ def default_onebot_toolsets(hermes_install_dir: str | None) -> list[str]:
 # ── 当前启用状态(读取现有配置)──────────────────────────────────────
 
 
-def read_current_enabled(hermes_install_dir: str | None) -> list[str]:
+def read_current_enabled(
+    hermes_install_dir: str | None,
+    extra_roots: Sequence[str] | None = None,
+) -> list[str]:
     """读取 ``platform_toolsets.onebot``;不存在或解析失败返回空列表。"""
     try:
-        data = read_config(hermes_install_dir)
+        data = read_config(hermes_install_dir, extra_roots=extra_roots)
     except HermesConfigParseError as exc:
         logger.warning("read_current_enabled: config parse failed: %s", exc)
         return []

@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-02
+
+### 新增
+- `hermes_install_allowed_roots`（默认 `[]`）：给 `/opt/hermes` 等非常规安装追加允许根；不可为 `/`、盘符根、`/etc`、`/proc`、`/sys`
+- CLI `--webui-host` / `--onebot-host` / `--hermes-host`：三个端口可分别绑定；未指定时回落到 `--host`（默认仍 `127.0.0.1`）
+- OneBot 反向 WS 接受 OneBot 11 标准 query `access_token`（仍接受 `token`；`Authorization: Bearer` 优先）
+
+### 变更
+- Hermes 安装目录默认只允许当前用户 `$HOME`（含 `~/.hermes`、仍落在 `$HOME` 下的 `$HERMES_HOME`），不再放行整个 `/home` 或 `/tmp`
+- `automation_upload_allowed_roots` 必须是绝对路径；拒绝 `/`、盘符根、`/etc`、`/proc`、`/sys` 和整个 `/tmp`。默认专用目录 `/tmp/hermes-onebot-adapter-uploads` 仍可用
+- 远程 NapCat 推荐 `hermes-onebot-adapter --onebot-host 0.0.0.0`。`--host 0.0.0.0` 仍会暴露三个口（无 TLS），不推荐；WebUI / Hermes 绑到非回环时打 WARNING
+- 重装插件不再覆盖 WebUI「工具管理」已保存的 `platform_toolsets.onebot`（含空列表）；仅在该键不存在时写入默认工具集
+- 启动日志每个端口只打一次 listening；WebUI ready 与非回环 WARNING 仍保留
+
+### 修复
+- `PATCH /api/v1/config`、工具集读写和 `venv/bin/python` 子进程都校验 Hermes 安装白名单；越界返回 `hermes_install_dir is outside the allowed Hermes install roots`
+- 安装/卸载用 `O_NOFOLLOW` 写文件；卸载前 `lstat` 拒绝 symlink；`__pycache__` 若属 root 删不掉时不阻断安装/卸载
+- WebSocket token 恒定时间比较；错的 query 不再盖掉对的 Bearer
+- `config.json` 及其 `.bak.*` 写成 `0600`；启动时若 group/other 可读则收紧一次
+- 插件 cache 模式拉媒体：最多 3 跳重定向，每跳解析 A/AAAA 且全部地址过策略；连接钉死已校验 IP，不再跟 aiohttp 二次 DNS；图/语音不再走 Hermes `cache_*_from_url`
+
+### 升级说明
+- **必须**重新安装随包 Hermes 插件并重启网关，媒体下载校验才会生效：
+  ```bash
+  pipx upgrade hermes-onebot-adapter
+  hermes-onebot-adapter install --hermes-dir ~/.hermes
+  hermes gateway restart
+  ```
+  重装不会重置工具管理里已保存的工具集
+- systemd / 远程 NapCat 把 `--host 0.0.0.0` 改成 `--onebot-host 0.0.0.0`（WebUI 仍需局域网访问时再加 `--webui-host 0.0.0.0`）
+- Hermes 装在 `/tmp`、他人 `$HOME`、或 `/opt` 且未写 extra roots 的，**启动会失败**（WebUI 也起不来）：把目录迁到 `$HOME` 下，或手改 `config.json` 的 `hermes_install_allowed_roots` 后再启动
+- `automation_upload_allowed_roots` 若已是 `["/"]` 或 `["/tmp"]`，同样无法启动，须手改配置
+- `config.json` 权限会在下次保存或启动时收到 `0600`
+- 若 `~/.hermes/plugins/onebot/__pycache__` 属 root，建议 `sudo rm -rf` 后再装插件，以免网关读到旧字节码
+
+### 文档
+- README / REST API / WebUI 连接页补充安装白名单、分端口 bind、反向 WS `access_token`、重装保留工具集与升级步骤
+
 ## [1.7.0] - 2026-09-01
 
 ### 新增
@@ -263,7 +301,8 @@
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
 
-[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.5.0...v1.6.0

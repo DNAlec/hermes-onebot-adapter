@@ -14,17 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import ipaddress
 import json
 import logging
 import os
 import random
 import re
+import socket
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
+from aiohttp.abc import AbstractResolver
 
 from .markdown import strip_markdown
 
@@ -173,75 +177,88 @@ def _ext_from_url(url: str, fallback: str = "") -> str:
 
 
 _DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB hard cap on media downloads
+_DOWNLOAD_MAX_REDIRECTS = 3
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_LINK_LOCAL_V4 = ipaddress.ip_network("169.254.0.0/16")
+_LINK_LOCAL_V6 = ipaddress.ip_network("fe80::/10")
 
 
-async def _cache_url_or_bytes(url: str, ext: str, from_url, from_bytes) -> str:
-    """Try the host URL helper first; fall back to a private-LAN download."""
-    if from_url is not None:
-        try:
-            return await from_url(url, ext=ext)
-        except Exception:
-            if from_bytes is None:
-                raise
+async def _cache_url_or_bytes(url: str, ext: str, from_bytes) -> str:
+    """Download via the OneBot SSRF-gated client, then cache from bytes.
+
+    Host ``cache_*_from_url`` helpers are not used: they follow redirects with
+    a separate policy and would skip the connect-time IP pin below.
+    """
     if from_bytes is None:
-        raise RuntimeError("no cache helper available")
+        raise RuntimeError("no cache-from-bytes helper available")
     data = await _download_url_bytes(url, allow_private=True)
     return from_bytes(data, ext)
+
+
+async def _read_limited_body(response: aiohttp.ClientResponse) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length and int(content_length) > _DOWNLOAD_MAX_BYTES:
+        raise ValueError(
+            f"Response too large: Content-Length={content_length} "
+            f"(limit={_DOWNLOAD_MAX_BYTES})"
+        )
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > _DOWNLOAD_MAX_BYTES:
+            raise ValueError(
+                f"Response exceeded size limit {total}/{_DOWNLOAD_MAX_BYTES} bytes"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _download_url_bytes(url: str, *, allow_private: bool = False) -> bytes:
     """Download bytes from a URL with SSRF protection + size limit.
 
-    Uses aiohttp with a 30s timeout and follows redirects.  Raises
-    ValueError if the URL targets a private/internal network (delegates to
-    the host's ``is_safe_url`` check when available, else a minimal guard).
-    Raises ``ValueError`` if the response exceeds ``_DOWNLOAD_MAX_BYTES``
-    to prevent OOM from malicious or misconfigured media URLs.
-
-    *allow_private* permits loopback/RFC1918 hosts used by NapCat's local
-    file server. Link-local / metadata addresses stay blocked.
+    *allow_private* permits loopback/RFC1918/ULA hosts used by NapCat's local
+    file server. Redirects are followed manually (max 3 hops); every hop is
+    re-checked after DNS resolution. Link-local / metadata addresses stay blocked.
     """
-    if allow_private:
-        _onebot_media_url_guard(url)
-    else:
-        # Try the host's SSRF guard first — it knows the full private-range list.
-        try:
-            from tools.url_safety import is_safe_url  # type: ignore[import-untyped]
-            if not is_safe_url(url):
-                raise ValueError(f"Blocked unsafe URL (SSRF protection): {url[:80]}")
-        except ImportError:
-            _basic_ssrf_guard(url)
-
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+        "Accept": "*/*",
+    }
     timeout = aiohttp.ClientTimeout(total=30.0)
+    if allow_private:
+        current = url
+        for hop in range(_DOWNLOAD_MAX_REDIRECTS + 1):
+            addrs = _onebot_media_url_guard(current)
+            connector = aiohttp.TCPConnector(
+                resolver=_PinnedResolver(addrs),
+                family=socket.AF_UNSPEC,
+            )
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                async with session.get(current, headers=headers, allow_redirects=False) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ValueError("Blocked redirect with empty Location")
+                        current = urljoin(current, location)
+                        if hop >= _DOWNLOAD_MAX_REDIRECTS:
+                            raise ValueError("Blocked media download: too many redirects")
+                        continue
+                    response.raise_for_status()
+                    return await _read_limited_body(response)
+        raise ValueError("Blocked media download: too many redirects")
+
+    try:
+        from tools.url_safety import is_safe_url  # type: ignore[import-untyped]
+        if not is_safe_url(url):
+            raise ValueError("Blocked unsafe URL (SSRF protection)")
+    except ImportError:
+        _basic_ssrf_guard(url)
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
-                "Accept": "*/*",
-            },
-            allow_redirects=True,
-        ) as response:
+        async with session.get(url, headers=headers, allow_redirects=True) as response:
             response.raise_for_status()
-            # Reject oversized responses early via Content-Length when available
-            content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > _DOWNLOAD_MAX_BYTES:
-                raise ValueError(
-                    f"Response too large: Content-Length={content_length} "
-                    f"(limit={_DOWNLOAD_MAX_BYTES})"
-                )
-            # Stream-read with a running total to guard against missing or
-            # spoofed Content-Length headers.
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.content.iter_chunked(64 * 1024):
-                total += len(chunk)
-                if total > _DOWNLOAD_MAX_BYTES:
-                    raise ValueError(
-                        f"Response exceeded size limit {total}/{_DOWNLOAD_MAX_BYTES} bytes"
-                    )
-                chunks.append(chunk)
-            return b"".join(chunks)
+            return await _read_limited_body(response)
 
 
 def _basic_ssrf_guard(url: str) -> None:
@@ -259,26 +276,16 @@ def _basic_ssrf_guard(url: str) -> None:
       - carrier-grade NAT (100.64/10)
       - unspecified (0.0.0.0, ::)
     """
-    from urllib.parse import urlparse
-
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"Blocked non-HTTP URL: {url[:80]}")
+        raise ValueError("Blocked non-HTTP URL")
     host = parsed.hostname or ""
     if host in ("localhost",):
-        raise ValueError(f"Blocked localhost URL (SSRF protection): {url[:80]}")
-    # Strip IPv6 brackets for ipaddress parsing
+        raise ValueError("Blocked localhost URL (SSRF protection)")
     ip_str = host.strip("[]")
-    import ipaddress
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        # Not an IP literal (hostname).  The host's full guard (is_safe_url)
-        # would handle DNS rebinding and redirect chains, but it's not
-        # available in this fallback path.  Log a warning so that standalone
-        # deployments using the fallback guard are aware hostname-based SSRF
-        # is not blocked here — the adapter's media download is opt-in
-        # (media_delivery_mode == "cache") which limits exposure.
         logger.debug("SSRF fallback guard: hostname %r not checked (host guard unavailable)", host)
         return
     if (
@@ -288,31 +295,106 @@ def _basic_ssrf_guard(url: str) -> None:
         or ip.is_unspecified
         or ip.is_reserved
     ):
-        raise ValueError(f"Blocked private/internal IP (SSRF protection): {url[:80]}")
-    # Carrier-grade NAT (100.64.0.0/10) — not in ipaddress.is_private
+        raise ValueError("Blocked private/internal IP (SSRF protection)")
     if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
-        raise ValueError(f"Blocked CGN IP (SSRF protection): {url[:80]}")
+        raise ValueError("Blocked CGN IP (SSRF protection)")
 
 
-def _onebot_media_url_guard(url: str) -> None:
-    """Allow NapCat loopback/LAN file URLs while still blocking metadata IPs."""
-    from urllib.parse import urlparse
+class _PinnedResolver(AbstractResolver):
+    """Return only pre-validated addresses so aiohttp cannot re-resolve DNS."""
 
+    def __init__(self, addresses: list[tuple[str, int]]) -> None:
+        self._addresses = addresses
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: socket.AddressFamily = socket.AF_INET,
+    ) -> list:
+        results = []
+        requested = int(family)
+        for ip, fam in self._addresses:
+            if requested not in (0, int(socket.AF_UNSPEC)) and fam != requested:
+                continue
+            results.append({
+                "hostname": host,
+                "host": ip,
+                "port": port,
+                "family": fam,
+                "proto": 0,
+                "flags": 0,
+            })
+        if not results:
+            raise OSError("no pinned addresses for media download")
+        return results
+
+    async def close(self) -> None:
+        return None
+
+
+def _unwrap_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return ip.ipv4_mapped
+        if ip.sixtofour is not None:
+            return ip.sixtofour
+    return ip
+
+
+def _onebot_media_ip_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    ip = _unwrap_ip(ip)
+    if ip.is_loopback:
+        return True
+    if ip.is_unspecified or ip.is_multicast or ip.is_reserved or ip.is_link_local:
+        return False
+    if ip.version == 4 and (ip in _LINK_LOCAL_V4 or ip in _CGNAT_NETWORK):
+        return False
+    if ip.version == 6 and ip in _LINK_LOCAL_V6:
+        return False
+    return True
+
+
+def _onebot_media_url_guard(url: str) -> list[tuple[str, int]]:
+    """Allow NapCat loopback/LAN file URLs while still blocking metadata IPs.
+
+    Resolves A/AAAA for hostnames. Every resolved address must pass the policy.
+    Returns ``(ip, address_family)`` pairs for connect-time DNS pinning.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"Blocked non-HTTP URL: {url[:80]}")
+        raise ValueError("Blocked non-HTTP URL")
     host = (parsed.hostname or "").strip("[]")
-    if not host or host == "localhost":
-        return
-    import ipaddress
+    if not host:
+        raise ValueError("Blocked URL with empty host")
+    if "%" in host:
+        host = host.split("%", 1)[0]
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return
-    if ip.is_link_local or ip.is_unspecified or ip.is_reserved:
-        raise ValueError(f"Blocked link-local/metadata IP: {url[:80]}")
-    if ip.version == 4 and ip in ipaddress.ip_network("169.254.0.0/16"):
-        raise ValueError(f"Blocked link-local IP: {url[:80]}")
+        infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("Blocked URL (DNS resolution failed)") from exc
+    if not infos:
+        raise ValueError("Blocked URL (DNS resolution failed)")
+    addrs: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for info in infos:
+        ip_str = info[4][0]
+        if "%" in ip_str:
+            ip_str = ip_str.split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError as exc:
+            raise ValueError("Blocked URL (unparseable resolved address)") from exc
+        if not _onebot_media_ip_allowed(ip):
+            raise ValueError("Blocked link-local/metadata IP")
+        key = (ip_str, int(info[0]))
+        if key not in seen:
+            seen.add(key)
+            addrs.append(key)
+    if not addrs:
+        raise ValueError("Blocked URL (DNS resolution failed)")
+    return addrs
 
 
 def _read_plugin_version() -> str:
@@ -932,11 +1014,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         Called only when ``media_delivery_mode == "cache"``.  Each entry in
         *raw_items* is a dict from ``NormalizedEvent.media_items`` (kind, url,
-        mime, name, file_id, index).  Uses the host's ``cache_image_from_url`` /
-        ``cache_audio_from_url`` helpers (which include SSRF protection and
-        retries) for images and audio; for videos and files, downloads bytes
-        via httpx (SSRF-gated) then calls ``cache_video_from_bytes`` /
-        ``cache_document_from_bytes``.
+        mime, name, file_id, index).  Downloads every URL through the OneBot
+        SSRF-gated client (manual redirects, DNS pin) then ``cache_*_from_bytes``.
 
         On any failure (download error, cache error, missing URL) the media
         is skipped — the LLM still sees its ``[图N]`` placeholder in ``text``
@@ -944,7 +1023,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         a URL are always skipped (the LLM can use the ``onebot_get_file``
         tool to fetch them by ``file_id`` on demand).
         """
-        if not _BASE_AVAILABLE or cache_image_from_url is None:
+        if not _BASE_AVAILABLE or cache_image_from_bytes is None:
             logger.warning(
                 "OneBot: cache mode requested but gateway.platforms.base cache "
                 "helpers unavailable; skipping media download"
@@ -966,15 +1045,11 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             try:
                 if kind == "image":
                     ext = _ext_from_url(url, ".jpg")
-                    path = await _cache_url_or_bytes(
-                        url, ext, cache_image_from_url, cache_image_from_bytes,
-                    )
+                    path = await _cache_url_or_bytes(url, ext, cache_image_from_bytes)
                     mime = f"image/{ext.lstrip('.')}" if ext else "image/jpeg"
                 elif kind == "record":
                     ext = _ext_from_url(url, ".ogg")
-                    path = await _cache_url_or_bytes(
-                        url, ext, cache_audio_from_url, cache_audio_from_bytes,
-                    )
+                    path = await _cache_url_or_bytes(url, ext, cache_audio_from_bytes)
                     mime = f"audio/{ext.lstrip('.')}" if ext else "audio/ogg"
                 elif kind == "video":
                     ext = _ext_from_url(url, ".mp4")

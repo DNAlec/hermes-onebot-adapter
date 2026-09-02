@@ -1,7 +1,7 @@
 """WebSocket server endpoint the Hermes plugin connects to.
 
-The plugin authenticates with a bearer token (query param ``token`` or
-``Authorization`` header). Inbound OneBot events are pushed here; plugin
+The plugin authenticates with a bearer token (``Authorization`` header,
+falling back to query param ``token``). Inbound OneBot events are pushed here; plugin
 send / api-call requests are dispatched to the OneBot API.
 
 All frames on this WS are JSON text frames — no binary frames. Media is
@@ -25,8 +25,8 @@ from typing import Any
 import aiohttp
 import aiohttp.web
 
-from onebot_adapter._async_utils import bearer_token
 from onebot_adapter._async_utils import log_task_exception as _log_task_exception
+from onebot_adapter._async_utils import token_matches, ws_presented_token
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.logging_utils import safe_json
 from onebot_adapter.onebot import api as ob
@@ -452,8 +452,8 @@ class HermesRelayServer:
                 self._clients.discard(ws)
 
     async def _handler(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
-        token = request.query.get("token") or bearer_token(request.headers.get("Authorization", ""))
-        if not self._config.hermes_ws_token or token != self._config.hermes_ws_token:
+        token = ws_presented_token(request, query_keys=("token",))
+        if not token_matches(token, self._config.hermes_ws_token):
             logger.warning("Hermes WS unauthorized remote=%s", request.remote)
             return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         ws = aiohttp.web.WebSocketResponse()

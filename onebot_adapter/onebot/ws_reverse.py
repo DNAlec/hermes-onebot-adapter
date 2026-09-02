@@ -8,7 +8,7 @@ from typing import Any
 import aiohttp
 import aiohttp.web
 
-from onebot_adapter._async_utils import bearer_token
+from onebot_adapter._async_utils import token_matches, ws_presented_token
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot.handler import OneBotEventDispatcher, OneBotHandler
 from onebot_adapter.onebot.name_resolver import NameResolver
@@ -68,8 +68,8 @@ class OneBotReverseServer:
         app.router.add_get(self._config.onebot_reverse_ws_path, self._handler_endpoint)
 
     async def _handler_endpoint(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
-        token = request.query.get("token") or bearer_token(request.headers.get("Authorization", ""))
-        if not self._config.onebot_ws_token or token != self._config.onebot_ws_token:
+        token = ws_presented_token(request, query_keys=("access_token", "token"))
+        if not token_matches(token, self._config.onebot_ws_token):
             logger.warning("OneBot reverse WS unauthorized remote=%s", request.remote)
             return aiohttp.web.json_response({"error": "unauthorized"}, status=401)
         ws = aiohttp.web.WebSocketResponse()

@@ -198,6 +198,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "hermes_ws_path": "/hermes",
   "hermes_ws_token": "...",
   "hermes_install_dir": "",
+  "hermes_install_allowed_roots": [],
   "webui_port": 18820,
   "webui_token_lifetime_hours": 168,
   "webui_trust_proxy_headers": false,
@@ -277,6 +278,8 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 
 写入 `webui_token` 时长度必须至少 8 个字符，否则同样返回 `400`：`{"error": "webui_token must be at least 8 characters"}`。`webui_token_epoch` 不可由客户端设置；修改 `webui_token_lifetime_hours` 时服务端会自动递增纪元，使已签发 session 立即失效。
 
+`hermes_install_dir` 必须落在当前用户 `$HOME` 或 `hermes_install_allowed_roots` 内，否则 `400`：`{"error": "hermes_install_dir is outside the allowed Hermes install roots"}`。`hermes_install_allowed_roots` 与 `automation_upload_allowed_roots` 的非法根（`/`、盘符根、`/etc`、`/proc`、`/sys`，以及整个 `/tmp` 作为上传根）同样 `400`。已写入磁盘的非法值会在**启动时 fail-fast**，须手改 `config.json`。
+
 ---
 
 ### 5. Hermes 安装目录状态
@@ -290,6 +293,8 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "exists": true
 }
 ```
+
+响应 `400` — 解析后的目录越出允许根：`{"hermes_dir": "...", "exists": false, "error": "hermes_install_dir is outside the allowed Hermes install roots"}`
 
 ---
 
@@ -315,7 +320,7 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
     "ONEBOT_ADAPTER_URL": "ws://127.0.0.1:18810/hermes",
     "ONEBOT_ADAPTER_TOKEN": "..."
   },
-  "note": "Plugin installed to ... Restart the Hermes gateway for changes to take effect. 已为 OneBot 平台启用默认工具集;请运行 hermes plugins enable onebot-platform 并重启 Hermes 网关后生效。"
+  "note": "Plugin installed to ... Restart the Hermes gateway for changes to take effect. 已保留现有 OneBot 工具集配置。"
 }
 ```
 
@@ -327,16 +332,18 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 | `source` | string | 插件源目录（随包发行） |
 | `copied` | string[] | 实际复制的文件名列表 |
 | `env_vars` | object | 写入 Hermes `.env` 的环境变量（`ONEBOT_ADAPTER_URL` / `ONEBOT_ADAPTER_TOKEN`） |
-| `note` | string | 安装结果提示（含工具集初始化结果） |
+| `note` | string | 安装结果提示。首次安装会写默认工具集；已有 `platform_toolsets.onebot` 时提示已保留 |
 
-响应 `200`（安装路径不安全时）：
+响应 `400` — 目录越出允许的 Hermes 安装根：
 ```json
 {
   "adapter_version": "x.y.z",
-  "hermes_dir": "/etc",
-  "error": "install_dir resolved to /etc, which is outside $HOME"
+  "hermes_dir": "/tmp/evil",
+  "error": "install_dir resolved to /tmp/evil, which is outside allowed Hermes roots"
 }
 ```
+
+首次安装且尚无 `platform_toolsets.onebot` 时，`note` 会写明已启用默认工具集。重装不会覆盖 WebUI「工具管理」里已保存的列表。
 
 ---
 
@@ -1147,7 +1154,8 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `hermes_ws_port` | int | `18810` | Hermes 插件 WS 端口 |
 | `hermes_ws_path` | string | `"/hermes"` | Hermes 插件 WS 路径 |
 | `hermes_ws_token` | string | 自动生成 | Hermes WS 鉴权 token |
-| `hermes_install_dir` | string | `""` | Hermes 安装目录（插件安装/工具集读写/会话隔离模式写入的目标路径） |
+| `hermes_install_dir` | string | `""` | Hermes 安装目录（插件安装/工具集读写/会话隔离模式写入的目标路径）。空= `~/.hermes` 或仍落在 `$HOME` 下的 `$HERMES_HOME`；须在允许根内 |
+| `hermes_install_allowed_roots` | string[] | `[]` | 额外允许的 Hermes 安装根（如 `/opt/hermes`）；不可为 `/`、盘符根、`/etc`、`/proc`、`/sys` |
 | `webui_port` | int | `18820` | WebUI 端口 |
 | `webui_token` | string | 自动生成 | WebUI 登录原始 token（仅用于 `/api/v1/auth/login`，不可直接调其他 API；`GET /api/v1/config` 不返回此字段） |
 | `webui_token_lifetime_hours` | int | `168` | 登录有效期（小时），最小 1，默认 7 天；修改后所有已登录会话立即失效 |
@@ -1156,7 +1164,7 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `automation_api_enabled` | bool | `false` | 自动化工具 API 总开关；关闭时 `/api/v1/tools*` 返回 403 |
 | `automation_api_key_hash` | string | `""` | 自动化 key 的 SHA-256 摘要；仅配置文件内部使用，不通过管理 API 返回或接受客户端修改 |
 | `automation_api_key_configured` | bool | 派生值 | `GET /api/v1/config` 返回的只读状态，表示是否已配置 key |
-| `automation_upload_allowed_roots` | string[] | `["/tmp/hermes-onebot-adapter-uploads"]` | HTTP 工具可引用的本地文件根目录；校验解析后的真实路径 |
+| `automation_upload_allowed_roots` | string[] | `["/tmp/hermes-onebot-adapter-uploads"]` | HTTP 工具可引用的本地文件根目录；须为绝对路径，不可为 `/`、盘符根、`/etc`、`/proc`、`/sys` 或整个 `/tmp` |
 | `log_level` | string | `"INFO"` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` |
 | `log_message_preview` | int | `100` | 消息正文日志截断长度 |
 | `log_file_enabled` | bool | `true` | 是否启用文件日志 |

@@ -131,6 +131,7 @@ export interface Config {
   hermes_ws_path: string;
   hermes_ws_token: string;
   hermes_install_dir: string;
+  hermes_install_allowed_roots: string[];
   webui_port: number;
   webui_token?: string;
   webui_token_lifetime_hours: number;

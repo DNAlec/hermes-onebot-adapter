@@ -112,21 +112,28 @@ async def test_reverse_missing_token_rejected():
 
 
 async def test_reverse_header_overrides_wrong_query():
-    """A correct Authorization header should pass even if the query token is
-    wrong, since the handler reads query first then falls back to header."""
+    """A correct Authorization header should pass even if the query token is wrong."""
     app = _make_reverse_app(_cfg(onebot_ws_token="sekret"))
     server = TestServer(app)
     await server.start_server()
     try:
         async with TestClient(server) as client:
-            # query is wrong but header is right; current logic is
-            # `query or _bearer(header)` -> query truthy wins -> would fail.
-            # This documents the OR-fallback semantics: the FIRST present
-            # value (query, then header) is the one checked.
-            with pytest.raises(aiohttp.WSServerHandshakeError):
-                await client.ws_connect(
-                    "/onebot?token=wrong", headers={"Authorization": "Bearer sekret"}
-                )
+            async with client.ws_connect(
+                "/onebot?token=wrong", headers={"Authorization": "Bearer sekret"}
+            ) as ws:
+                assert not ws.closed
+    finally:
+        await server.close()
+
+
+async def test_reverse_access_token_query_accepted():
+    app = _make_reverse_app(_cfg(onebot_ws_token="sekret"))
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with TestClient(server) as client:
+            async with client.ws_connect("/onebot?access_token=sekret") as ws:
+                assert not ws.closed
     finally:
         await server.close()
 

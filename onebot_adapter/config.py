@@ -208,6 +208,7 @@ class AdapterConfig:
     hermes_ws_path: str = "/hermes"
     hermes_ws_token: str = ""
     hermes_install_dir: str = ""
+    hermes_install_allowed_roots: list[str] = field(default_factory=list)
     webui_port: int = 18820
     webui_token: str = ""  # WebUI 登录鉴权 token,自动生成,请勿清空
     webui_token_lifetime_hours: int = 168  # 登录有效期(小时),最小 1;默认 168(7 天)
@@ -634,6 +635,37 @@ def _validate_rate_limits(cfg: AdapterConfig, errors: list[str]) -> None:
         )
 
 
+def _validate_path_allowlists(cfg: AdapterConfig, errors: list[str]) -> None:
+    from onebot_adapter.installer import (
+        validate_hermes_dir,
+        validate_hermes_extra_root,
+        validate_upload_root,
+    )
+
+    if not isinstance(cfg.hermes_install_allowed_roots, list) or not all(
+        isinstance(root, str) and root.strip() for root in cfg.hermes_install_allowed_roots
+    ):
+        errors.append("hermes_install_allowed_roots must be a list of non-empty paths")
+    else:
+        for root in cfg.hermes_install_allowed_roots:
+            extra_err = validate_hermes_extra_root(root)
+            if extra_err:
+                errors.append(extra_err)
+    if isinstance(cfg.hermes_install_dir, str) and cfg.hermes_install_dir.strip():
+        hermes_err = validate_hermes_dir(cfg.hermes_install_dir, cfg.hermes_install_allowed_roots)
+        if hermes_err:
+            errors.append(hermes_err)
+    if not isinstance(cfg.automation_upload_allowed_roots, list) or not all(
+        isinstance(root, str) and root.strip() for root in cfg.automation_upload_allowed_roots
+    ):
+        errors.append("automation_upload_allowed_roots must be a list of non-empty paths")
+    else:
+        for root in cfg.automation_upload_allowed_roots:
+            upload_err = validate_upload_root(root)
+            if upload_err:
+                errors.append(upload_err)
+
+
 def _validate_security_and_delivery(cfg: AdapterConfig, errors: list[str]) -> None:
     if not isinstance(cfg.bot_blacklist_enabled, bool):
         errors.append("bot_blacklist_enabled must be bool")
@@ -647,10 +679,7 @@ def _validate_security_and_delivery(cfg: AdapterConfig, errors: list[str]) -> No
         errors.append(f"media_delivery_mode must be one of {sorted(_VALID_MEDIA_DELIVERY_MODES)}")
     if cfg.webui_token_lifetime_hours < 1:
         errors.append("webui_token_lifetime_hours must be at least 1")
-    if not isinstance(cfg.automation_upload_allowed_roots, list) or not all(
-        isinstance(root, str) and root.strip() for root in cfg.automation_upload_allowed_roots
-    ):
-        errors.append("automation_upload_allowed_roots must be a list of non-empty paths")
+    _validate_path_allowlists(cfg, errors)
     if not cfg.reaction_emoji_id:
         errors.append("reaction_emoji_id must not be empty")
     if cfg.dm_policy not in _VALID_DM_POLICIES:
@@ -784,7 +813,12 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
                                      "直连开启会被伪造 IP 绕过登录限流)",
         "automation_api_enabled": "自动化工具 API 总开关;默认关闭",
         "automation_api_key_hash": "自动化 API key 的 SHA-256 摘要;原始 key 不落盘",
-        "automation_upload_allowed_roots": "自动化 API 可引用的本地文件根目录列表",
+        "hermes_install_dir": "Hermes 安装目录;留空使用 ~/.hermes 或 $HERMES_HOME(须落在 $HOME 下);"
+                             "非常规路径请写入 hermes_install_allowed_roots",
+        "hermes_install_allowed_roots": "额外允许的 Hermes 安装根(如 /opt/hermes);默认仅 $HOME;"
+                                        "不可为 /、盘符根、/etc、/proc、/sys",
+        "automation_upload_allowed_roots": "自动化 API 可引用的本地文件根目录列表;"
+                                           "须为绝对路径,不可为 /、盘符根、/etc、/proc、/sys 或整个 /tmp",
         "dm_policy": "可选值: allow(允许私聊) | deny(禁止私聊,默认) | friends(仅限好友);"
                      "黑白名单始终生效:黑名单一律禁止,白名单一律允许(无法覆盖bot动态黑名单)",
         "dm_whitelist": "常驻私聊白名单QQ号;无论模式/是否好友均可私聊,但不能覆盖bot动态黑名单",
@@ -957,6 +991,44 @@ def _rotate_backups(target: Path, max_backups: int = _MAX_BACKUPS) -> None:
             logger.warning("could not remove old backup %s: %s", old, exc)
 
 
+def _chmod_secret_file(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        logger.warning("could not chmod 0600 %s: %s", path, exc)
+
+
+def _ensure_dir_private(path: Path) -> None:
+    try:
+        st = path.stat()
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            return
+        if st.st_mode & 0o077:
+            os.chmod(path, 0o700)
+    except OSError as exc:
+        logger.warning("could not chmod 0700 %s: %s", path, exc)
+
+
+def ensure_config_file_permissions(path: Path | None = None) -> None:
+    """Tighten config.json / backups if group or other can read them."""
+    target = path or config_path()
+    if target.parent.exists():
+        _ensure_dir_private(target.parent)
+    candidates = [target]
+    if target.parent.exists():
+        candidates.extend(sorted(target.parent.glob(f"{target.name}.bak.*")))
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            mode = candidate.stat().st_mode
+        except OSError:
+            continue
+        if mode & 0o077:
+            logger.info("tightening permissions on %s (was %03o)", candidate, mode & 0o777)
+            _chmod_secret_file(candidate)
+
+
 def save_config(
     cfg: AdapterConfig,
     path: Path | None = None,
@@ -969,6 +1041,7 @@ def save_config(
 ) -> None:
     target = path or config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_dir_private(target.parent)
     old_data = _read_existing_config_data(target)
     new_data = cfg.to_dict()
     diff = _audit_diff(old_data, new_data)
@@ -993,6 +1066,7 @@ def save_config(
         candidate_backup = target.with_name(f"{target.name}.bak.{int(time.time())}")
         try:
             shutil.copy2(target, candidate_backup)
+            _chmod_secret_file(candidate_backup)
             backup_path = candidate_backup
             logger.info("config backed up to %s", candidate_backup)
             _rotate_backups(target)
@@ -1002,7 +1076,9 @@ def save_config(
     try:
         data = _inject_comments(new_data)
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _chmod_secret_file(tmp)
         os.replace(tmp, target)
+        _chmod_secret_file(target)
     except Exception as exc:
         event["outcome"] = "failure"
         event["error_type"] = type(exc).__name__
