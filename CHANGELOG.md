@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 文档
+- 新增 Windows / WSL2 部署教程（`docs/wsl.md`）：适配器与 Hermes 装在 WSL，NapCat 留在 Windows 走反向 WS
+
 ## [1.8.0] - 2026-09-02
 
 ### 新增
