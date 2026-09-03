@@ -4,6 +4,7 @@
 
 ### 文档
 - 新增 Windows / WSL2 部署教程（`docs/wsl.md`）：适配器与 Hermes 装在 WSL，NapCat 留在 Windows 走反向 WS
+- README 改为安装/连接入口；WebUI、聊天过滤、运维说明拆到 `docs/webui.md` / `docs/chat.md` / `docs/ops.md`
 
 ## [1.8.0] - 2026-09-02
 
