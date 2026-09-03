@@ -14,6 +14,7 @@ NapCat ──双向 OneBot 11 WS（事件 + API）── 适配器服务 ──W
 更细的 REST API 字段、专项诊断和维护者架构说明见 [文档索引](docs/README.md)。
 
 - [快速开始](#快速开始)
+- [Windows / WSL 部署](#windows--wsl-部署)
 - [配置流程](#配置流程)
 - [CLI 用法](#cli-用法)
 - [自动化工具 API](#自动化工具-api)
@@ -68,6 +69,8 @@ hermes gateway restart
 
 远程 NapCat 请用 `--onebot-host 0.0.0.0`，不要再用 `--host 0.0.0.0`（会把 WebUI 和 Hermes WS 一起暴露）。Hermes 装在 `/opt` 时先在配置里写入 `hermes_install_allowed_roots`。完整升级注意见 [CHANGELOG](CHANGELOG.md)。
 
+Windows 不要用原生 Python 跑本服务。请用 WSL2，步骤见 [Windows / WSL 部署](docs/wsl.md)。
+
 升级不会覆盖现有适配器配置。安装器会更新 `<hermes>/plugins/onebot/` 中的插件文件；重启后可在 WebUI 仪表盘确认适配器与插件版本一致。若群聊消息一直排队、`/stop` 提示没有活跃任务，发 `/clean` 可清空队列并释放 busy，不必重启适配器。
 
 ## 配置流程
@@ -94,6 +97,21 @@ hermes gateway restart
 ```bash
 hermes-onebot-adapter install --hermes-dir ~/.hermes
 ```
+
+## Windows / WSL 部署
+
+适配器按 Linux 部署，原生 Windows 不可用。在 Windows 上把适配器和 Hermes 装进 **WSL2**，NapCat / QQ 留在 Windows，反向 WS 连 `18800`。完整步骤、网络与排障见 [Windows / WSL 部署](docs/wsl.md)。
+
+```bash
+# 在 WSL 里
+pipx install hermes-onebot-adapter
+hermes-onebot-adapter --onebot-host 0.0.0.0
+hermes-onebot-adapter install --hermes-dir ~/.hermes
+hermes plugins enable onebot-platform
+hermes gateway restart
+```
+
+NapCat 反向 WS 填 `ws://127.0.0.1:18800/onebot?access_token=<onebot_ws_token>`（localhost 不通时改用 WSL 的 `hostname -I`）。不要把 Hermes 装到 `/mnt/c`，也不要用 `--host 0.0.0.0`。
 
 ## CLI 用法
 
