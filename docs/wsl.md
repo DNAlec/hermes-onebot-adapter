@@ -117,4 +117,4 @@ WSL 发行版未在跑时适配器和 Hermes 网关都不会在。任选一种�
 | 正向 WS 连不上 Windows NapCat | 改回反向 WS；NAT 下 WSL 的 `127.0.0.1` 不是 Windows 的 localhost |
 | 闪传失败 | 确认 NapCat 跑在 Windows QQ 客户端，而不是 Linux / Docker 版 |
 
-升级与重装插件仍按根目录 [README.md](../README.md) 的通用步骤，全部在 WSL 内执行。
+升级与重装插件仍按根目录 [README.md](../README.md#快速开始) 的通用步骤，全部在 WSL 内执行。功能开关见 [聊天与过滤](chat.md)、[WebUI 与工具](webui.md)。

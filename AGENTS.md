@@ -2,7 +2,7 @@
 
 Compact guide for OpenCode sessions working in this repo. Read this before editing.
 
-User-facing docs and the REST API live under [docs/README.md](docs/README.md). Update [CHANGELOG.md](CHANGELOG.md) before tagging a release. Queue/idle protocol changes require reinstalling the bundled Hermes plugin.
+User-facing install lives in [README.md](README.md); feature docs and the REST API live under [docs/README.md](docs/README.md). Update [CHANGELOG.md](CHANGELOG.md) before tagging a release. Queue/idle protocol changes require reinstalling the bundled Hermes plugin.
 
 ## What this is
 
