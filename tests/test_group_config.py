@@ -305,11 +305,63 @@ async def test_parser_group_user_whitelist_empty_rejects_all():
 
 
 async def test_parser_group_disabled():
-    cfg = AdapterConfig(groups={"42": GroupConfig(group_id="42", enabled=False).to_dict()})
+    """Disabled groups are user_filter even with default require-mention and no @."""
+    cfg = AdapterConfig(
+        group_require_mention=True,
+        groups={"42": GroupConfig(group_id="42", enabled=False).to_dict()},
+    )
+    result = await parse_event(
+        _msg_event("hi", message_type="group", group_id=42, user_id=100),
+        self_id="999", group_require_mention=True, config=cfg,
+    )
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
+
+
+async def test_parser_group_disabled_without_mention_requirement():
+    """Disabled groups stay user_filter when every message would otherwise match."""
+    cfg = AdapterConfig(
+        group_require_mention=False,
+        groups={"42": GroupConfig(group_id="42", enabled=False).to_dict()},
+    )
     result = await parse_event(
         _msg_event("hi", message_type="group", group_id=42),
-        self_id="999", group_require_mention=False,
-        config=cfg,
+        self_id="999", group_require_mention=False, config=cfg,
+    )
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "user_filter"
+
+
+async def test_parser_unmatched_before_user_filter():
+    """Trigger miss in an enabled group is leftover traffic (cascade)."""
+    cfg = AdapterConfig(
+        group_require_mention=True,
+        groups={"42": GroupConfig(
+            group_id="42", group_user_filter_mode="whitelist", group_user_list=[],
+        ).to_dict()},
+    )
+    result = await parse_event(
+        _msg_event("hi", message_type="group", group_id=42, user_id=100),
+        self_id="999", group_require_mention=True, config=cfg,
+    )
+    assert isinstance(result, DroppedEvent)
+    assert result.reason == "trigger"
+
+
+async def test_parser_matched_then_user_filter():
+    cfg = AdapterConfig(
+        group_require_mention=True,
+        groups={"42": GroupConfig(
+            group_id="42", group_user_filter_mode="whitelist", group_user_list=[],
+        ).to_dict()},
+    )
+    segs = [
+        {"type": "at", "data": {"qq": "999"}},
+        {"type": "text", "data": {"text": "hi"}},
+    ]
+    result = await parse_event(
+        _msg_event("hi", message_type="group", group_id=42, user_id=100, segments=segs),
+        self_id="999", group_require_mention=True, config=cfg,
     )
     assert isinstance(result, DroppedEvent)
     assert result.reason == "user_filter"

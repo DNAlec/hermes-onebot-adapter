@@ -26,6 +26,10 @@ from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent, Normalize
 logger = logging.getLogger(__name__)
 PREVIEW_LOGGER_NAME = "onebot_adapter.onebot.message_preview"
 _preview_logger = logging.getLogger(PREVIEW_LOGGER_NAME)
+# Set at import, not lazily on first use: anything inspecting propagation
+# (mirrored handlers assume no root copy; pytest's caplog attaches to
+# non-propagating loggers at phase start) must see the same state always.
+_preview_logger.propagate = False
 _file_logger = logging.getLogger("onebot_adapter.file")
 
 outbound_log_req_id: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -234,6 +238,20 @@ def log_drop_line(
         user_name or "-",
         user_id or "-",
         message_id or "-",
+        extra,
+    )
+
+
+def log_cascaded_event(event: DroppedEvent) -> None:
+    """Log a trigger-miss that was forwarded to a cascade client (no body)."""
+    extra = f" cmd={event.command_name}" if event.command_name else ""
+    logger.debug(
+        "转发 -- reason=%s chat_id=%s user=%s(%s) message_id=%s%s",
+        event.reason,
+        event.chat_id or "-",
+        event.user_name or "-",
+        event.user_id or "-",
+        event.message_id or "-",
         extra,
     )
 

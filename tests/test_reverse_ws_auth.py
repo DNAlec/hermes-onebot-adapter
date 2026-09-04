@@ -13,11 +13,13 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from onebot_adapter.config import AdapterConfig
+from onebot_adapter.onebot.handler import OneBotHandler
 from onebot_adapter.onebot.ws_reverse import OneBotReverseServer
 
 
 def _make_reverse_app(cfg: AdapterConfig) -> aiohttp.web.Application:
-    server = OneBotReverseServer(cfg, api=MagicMock())
+    handler = OneBotHandler(label="reverse", config=cfg, api=MagicMock())
+    server = OneBotReverseServer(cfg, handler)
     app = aiohttp.web.Application()
     server.add_routes(app)
     return app

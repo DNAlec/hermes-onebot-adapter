@@ -75,6 +75,9 @@ export interface Status {
   onebot_ws_port: number;
   hermes_ws_port: number;
   webui_port: number;
+  cascade_ws_enabled: boolean;
+  cascade_ws_port: number;
+  cascade_ws_connected: boolean;
   hermes_group_sessions_per_user: boolean;
 }
 
@@ -131,6 +134,11 @@ export interface Config {
   hermes_ws_path: string;
   hermes_ws_token: string;
   hermes_install_dir: string;
+  cascade_ws_enabled: boolean;
+  cascade_ws_port: number;
+  cascade_ws_path: string;
+  cascade_ws_token: string;
+  cascade_forward_meta: boolean;
   hermes_install_allowed_roots: string[];
   webui_port: number;
   webui_token?: string;

@@ -113,7 +113,7 @@ async def test_parser_blacklist_after_group_trigger_and_before_delivery(tmp_path
         config=cfg, bot_blacklist_match_fn=match,
     )
     assert isinstance(ignored, DroppedEvent)
-    assert ignored.reason == "mention"
+    assert ignored.reason == "trigger"
     blocked = await parse_event(
         _group_event("hello"), self_id="999", group_require_mention=True,
         config=cfg, bot_blacklist_match_fn=match,

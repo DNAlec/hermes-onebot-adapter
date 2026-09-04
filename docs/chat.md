@@ -5,6 +5,7 @@
 - [准入控制](#准入控制)
 - [/指令过滤](#指令过滤)
 - [出站消息过滤](#出站消息过滤)
+- [未匹配转发（Cascade WS）](#未匹配转发cascade-ws)
 - [媒体投递](#媒体投递)
 - [notice 事件](#notice-事件)
 - [群聊消息排队](#群聊消息排队)
@@ -29,6 +30,20 @@
 管理工具（踢人/禁言等）的鉴权由适配器的 `global_admins` / 群配置 `admins` 决定，非管理员调用时适配器直接拒绝。
 
 Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，不与上述准入名单混用。Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具临时拉黑用户（全局管理员和对应群管理员始终豁免），WebUI「聊天配置」页可设置 `bot_blacklist_enabled`/`bot_blacklist_max_duration_seconds`/`bot_blacklist_reject_message`，也可查看及人工解除有效记录。群聊仅在消息本应触发 bot 时检查并回复提示；私聊记录、群记录和全局记录按各自作用域生效。
+
+## 未匹配转发（Cascade WS）
+
+开启 `cascade_ws_enabled` 后，适配器额外监听一条 OneBot 11 反向 WS（默认 `18830` `/onebot`）。群聊入站顺序是 **群是否启用 → 匹配（@bot / 关键词）→ 过滤**（用户名单、黑名单、指令权限、限流等）：
+
+- **群已关闭**：静默丢弃，不转发。
+- **匹配失败**：原始 OneBot JSON 原样发给已连接的下游客户端。没有下游时仍静默丢弃。
+- **匹配成功**：无论之后是否真的进 Hermes，都不转发。拒绝提示仍按现逻辑发送。
+- **私聊**：视为发给本 bot，不转发。
+- 群未要求 @、也没有关键词时，全部群消息视为匹配成功，不会 cascade。
+
+注意：[入站限流](ops.md#入站消息限流)只在消息匹配成功、即将投递 Hermes 时才检查；匹配失败的 cascade 流量不经过限流器，过载时仅受出站队列上限约束（满则丢弃并记 warning）。
+
+下游发到该端口的 text 帧原样写到当前 OneBot 连接；带 `echo` 的 API 响应回到当前这一个下游客户端（新连接会替换旧连接）。API 等待上限与 `file_upload_timeout` 相同。心跳 / lifecycle（含下游连上时补发的 `lifecycle/connect`）由 `cascade_forward_meta` 控制（默认转发）。开启、改端口或路径后需重启适配器。WebUI「连接管理」页可配置。
 
 ## /指令过滤
 

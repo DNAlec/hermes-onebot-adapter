@@ -29,7 +29,13 @@ from typing import TYPE_CHECKING, Any
 from onebot_adapter.config import MEDIA_DELIVERY_CACHE, AdapterConfig
 from onebot_adapter.logging_utils import text_summary
 from onebot_adapter.onebot import segments as seg
-from onebot_adapter.relay.protocol import DroppedEvent, FilteredEvent, MediaItem, NormalizedEvent
+from onebot_adapter.relay.protocol import (
+    DROP_REASON_TRIGGER,
+    DroppedEvent,
+    FilteredEvent,
+    MediaItem,
+    NormalizedEvent,
+)
 
 if TYPE_CHECKING:
     from onebot_adapter.onebot.name_resolver import NameResolver
@@ -364,7 +370,7 @@ async def parse_event(
         * :class:`FilteredEvent` when the message is a /command, blacklist,
           or DM-policy hit that should get a reject reply (not forwarded to Hermes).
         * :class:`DroppedEvent` when a candidate message is silently dropped
-          (``user_filter`` / ``mention`` / ``empty``) — logged at DEBUG without
+          (``user_filter`` / ``trigger`` / ``empty``) — logged at DEBUG without
           the body, not forwarded to Hermes.
         * ``None`` for heartbeats, unhandled/disabled notices, and other
           non-candidate events.
@@ -511,26 +517,43 @@ async def _prepare_message_state(
         )
         if blocked is not None:
             return blocked
-    settings = await _resolved_message_settings(options, is_group, group_id, sender_id)
-    if settings is None:
-        return _drop_event(
-            "user_filter", event, is_group=is_group, sender_id=sender_id,
-            sender_name=sender_name, group_id=group_id,
-        )
-    require_mention, mention_first, keywords, keyword_first, strip_mention, is_admin, is_global_admin, mode = settings
     raw_segments: list[dict] = event.get("message", []) or []
-    if is_group and not _passes_group_trigger(
-        raw_segments,
-        options.self_id,
-        require_mention,
-        mention_first,
-        keywords,
-        keyword_first,
-    ):
-        return _drop_event(
-            "mention", event, is_group=is_group, sender_id=sender_id,
-            sender_name=sender_name, group_id=group_id,
+    strip_mention = options.strip_first_mention
+    if is_group:
+        # Group off is not leftover traffic: check enabled before trigger so a
+        # disabled group never cascades, regardless of @/keyword settings.
+        if options.config is not None and not options.config.get_group_config(group_id).enabled:
+            return _drop_event(
+                "user_filter", event, is_group=is_group, sender_id=sender_id,
+                sender_name=sender_name, group_id=group_id,
+            )
+        require_mention, mention_first, keywords, keyword_first, strip_mention = _trigger_settings(
+            options, group_id,
         )
+        if not _passes_group_trigger(
+            raw_segments,
+            options.self_id,
+            require_mention,
+            mention_first,
+            keywords,
+            keyword_first,
+        ):
+            return _drop_event(
+                DROP_REASON_TRIGGER, event, is_group=is_group, sender_id=sender_id,
+                sender_name=sender_name, group_id=group_id,
+            )
+        if options.config is not None and not options.config.is_group_user_allowed(group_id, sender_id):
+            return _drop_event(
+                "user_filter", event, is_group=is_group, sender_id=sender_id,
+                sender_name=sender_name, group_id=group_id,
+            )
+    config = options.config
+    if config is None:
+        is_admin, is_global_admin, mode = False, False, options.media_delivery_mode
+    else:
+        is_admin = config.is_admin(sender_id, group_id if is_group else None)
+        is_global_admin = sender_id in config.global_admins
+        mode = config.media_delivery_mode
     command_name = _extract_command_name(raw_segments, options.self_id)
     if is_group and options.self_id and (strip_mention or command_name):
         raw_segments = seg.strip_first_bot_mention(raw_segments, options.self_id)
@@ -616,12 +639,10 @@ async def _dm_admission_block(
     )
 
 
-async def _resolved_message_settings(
-    options: _ParseOptions,
-    is_group: bool,
-    group_id: str,
-    sender_id: str,
-) -> tuple[bool, bool, list[str] | None, bool, bool, bool, bool, str] | None:
+def _trigger_settings(
+    options: _ParseOptions, group_id: str,
+) -> tuple[bool, bool, list[str] | None, bool, bool]:
+    """Resolve group @/keyword trigger settings without applying user filters."""
     config = options.config
     if config is None:
         return (
@@ -630,32 +651,13 @@ async def _resolved_message_settings(
             options.trigger_keywords,
             options.keyword_first_only,
             options.strip_first_mention,
-            False,
-            False,
-            options.media_delivery_mode,
-        )
-    if is_group:
-        if not config.is_group_user_allowed(group_id, sender_id) or not config.get_group_config(group_id).enabled:
-            return None
-        return (
-            config.resolve_require_mention(group_id),
-            config.resolve_mention_first_only(group_id),
-            config.resolve_trigger_keywords(group_id),
-            config.resolve_keyword_first_only(group_id),
-            config.resolve_strip_first_mention(group_id),
-            config.is_admin(sender_id, group_id),
-            sender_id in config.global_admins,
-            config.media_delivery_mode,
         )
     return (
-        options.group_require_mention,
-        options.mention_first_only,
-        options.trigger_keywords,
-        options.keyword_first_only,
-        options.strip_first_mention,
-        config.is_admin(sender_id),
-        sender_id in config.global_admins,
-        config.media_delivery_mode,
+        config.resolve_require_mention(group_id),
+        config.resolve_mention_first_only(group_id),
+        config.resolve_trigger_keywords(group_id),
+        config.resolve_keyword_first_only(group_id),
+        config.resolve_strip_first_mention(group_id),
     )
 
 

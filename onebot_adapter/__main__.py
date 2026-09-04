@@ -7,7 +7,8 @@ import secrets
 import sys
 
 from onebot_adapter import __version__
-from onebot_adapter.app import resolve_bind_hosts, run
+from onebot_adapter.app import run
+from onebot_adapter.bind import resolve_bind_hosts
 
 
 def _manage_automation_api(args) -> int:
@@ -164,11 +165,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--host", default="127.0.0.1",
         help="Fallback bind host for all listeners (default: 127.0.0.1). "
-             "--host 0.0.0.0 still exposes all three ports; prefer --onebot-host 0.0.0.0",
+             "--host 0.0.0.0 still exposes every enabled listener; prefer --onebot-host 0.0.0.0",
     )
     parser.add_argument("--webui-host", default=None, help="WebUI/API bind host (default: --host)")
     parser.add_argument("--onebot-host", default=None, help="OneBot reverse WS bind host (default: --host)")
     parser.add_argument("--hermes-host", default=None, help="Hermes plugin WS bind host (default: --host)")
+    parser.add_argument(
+        "--cascade-host", default=None,
+        help="Cascade leftover-event WS bind host (default: --host; does not follow --onebot-host)",
+    )
     parser.add_argument("--port", type=int, default=None, help="WebUI/API port (default: from config, 18820)")
     parser.add_argument("--no-webui", action="store_true", help="不启动 WebUI 管理界面")
     parser.add_argument("--version", action="version", version=f"hermes-onebot-adapter {__version__}")
@@ -218,8 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.init_config:
         return _init_config(force=args.force)
 
-    onebot_host, hermes_host, webui_host = resolve_bind_hosts(
-        args.host, args.onebot_host, args.hermes_host, args.webui_host,
+    onebot_host, hermes_host, webui_host, cascade_host = resolve_bind_hosts(
+        args.host, args.onebot_host, args.hermes_host, args.webui_host, args.cascade_host,
     )
     run(
         host=args.host,
@@ -228,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         onebot_host=onebot_host,
         hermes_host=hermes_host,
         webui_host=webui_host,
+        cascade_host=cascade_host,
     )
     return 0
 

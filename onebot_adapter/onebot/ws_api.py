@@ -6,8 +6,8 @@ OneBot 11 的 WebSocket 连接是双向的：同一条 WS 既推送事件帧（�
 让上层 ``OneBotApi`` 用纯异步 ``call(action, params)`` 接口复用同一条 WS 发送消息。
 
 ws_reverse / ws_forward 在每条 WS 连接建立/断开时调用 ``register(ws)`` /
-``unregister(ws)``；在收到 text 帧时先调用 ``on_text(raw)``——若是响应帧（命中 pending echo）
-则 resolve 对应 future 并返回 True，否则返回 False 交给事件解析路径。
+``unregister(ws)``；在收到 text 帧时先调用 ``on_text(raw)``——若是响应帧（命中
+adapter 或 passthrough waiter）则 consume 并返回 True，否则返回 False 交给事件解析路径。
 
 多条 WS 同时活跃时（reverse 模式下多个 OneBot 实例拨入），``_pick_ws`` 取第一个活跃连接发请求。
 """
@@ -18,6 +18,8 @@ import contextvars
 import json
 import logging
 import uuid
+from collections.abc import Callable, Hashable
+from dataclasses import dataclass
 from typing import Any
 
 from onebot_adapter.logging_utils import safe_json
@@ -32,6 +34,17 @@ _current_request_ws: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "onebot_request_ws", default=None,
 )
 
+_DEFAULT_TIMEOUT = 300.0
+# Match AdapterConfig.file_upload_timeout default; cascade passthrough uses this
+# ceiling so upload/flash actions are not cut short of adapter-side waits.
+_DEFAULT_PASSTHROUGH_TIMEOUT = 600.0
+# Cap concurrent cascade passthrough waiters (adapter request() waiters excluded).
+_DEFAULT_MAX_PASSTHROUGH = 256
+_ECHO_IN_FLIGHT = "echo already in flight"
+_ECHO_UNHASHABLE = "echo must be a hashable JSON value"
+_ECHO_TIMEOUT = "OneBot API timed out"
+_ECHO_TOO_MANY = "too many in-flight passthrough requests"
+
 
 def bind_request_ws(ws: Any) -> contextvars.Token[Any]:
     return _current_request_ws.set(ws)
@@ -40,7 +53,17 @@ def bind_request_ws(ws: Any) -> contextvars.Token[Any]:
 def reset_request_ws(token: contextvars.Token[Any]) -> None:
     _current_request_ws.reset(token)
 
-_DEFAULT_TIMEOUT = 300.0
+
+@dataclass
+class _Waiter:
+    """One in-flight echo. Exactly one of ``future`` / ``on_response`` is set."""
+
+    ws: Any
+    echo: Any = None
+    future: asyncio.Future[dict[str, Any]] | None = None
+    on_response: Callable[[str], None] | None = None
+    owner: Any = None
+    timeout_handle: asyncio.TimerHandle | None = None
 
 
 class WsApiTransport:
@@ -49,12 +72,17 @@ class WsApiTransport:
     线程安全：所有方法应在同一个事件循环里调用（与 aiohttp 一致）。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        passthrough_timeout: float = _DEFAULT_PASSTHROUGH_TIMEOUT,
+        max_passthrough: int = _DEFAULT_MAX_PASSTHROUGH,
+    ) -> None:
         self._active: set[Any] = set()
-        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
-        # Track which ws each echo was sent on so we can reject only that
-        # ws's pending requests when it disconnects (multi-instance mode).
-        self._echo_ws: dict[str, Any] = {}
+        # echo key → waiter (adapter future and cascade passthrough share this table)
+        self._waiters: dict[Hashable, _Waiter] = {}
+        self.passthrough_timeout = passthrough_timeout
+        self.max_passthrough = max_passthrough
 
     @property
     def has_active(self) -> bool:
@@ -73,21 +101,16 @@ class WsApiTransport:
         """
         self._active.discard(ws)
         logger.debug("WsApiTransport: unregistered ws (%d active)", len(self._active))
-        # Reject pending requests issued by this ws
-        to_reject = [echo for echo, w in self._echo_ws.items() if w is ws]
-        for echo in to_reject:
-            fut = self._pending.pop(echo, None)
-            self._echo_ws.pop(echo, None)
-            if fut is not None and not fut.done():
-                fut.set_exception(ConnectionError("OneBot WS connection closed"))
-                logger.debug("WsApiTransport: rejected pending echo=%s (ws closed)", echo)
+        to_fail = [key for key, waiter in self._waiters.items() if waiter.ws is ws]
+        for key in to_fail:
+            self._fail_waiter(key, "OneBot WS connection closed")
         if not self._active:
             self._reject_all_pending("OneBot WS connection closed")
 
     def on_text(self, raw: str) -> bool:
         """处理一条收到的 text 帧。
 
-        若是响应帧（有 ``echo`` 且在 pending 表中）则 resolve 对应 future 并返回 True；
+        若是响应帧（命中 waiter）则 consume 并返回 True；
         否则返回 False（事件帧或未知响应，交给 parser 处理）。
 
         不会抛异常——解析失败视为非响应帧，返回 False。
@@ -98,17 +121,23 @@ class WsApiTransport:
             return False
         if not isinstance(data, dict):
             return False
-        echo = data.get("echo")
-        if not echo or echo not in self._pending:
+        key = echo_key(data.get("echo"))
+        if key is None:
             return False
-        fut = self._pending.pop(echo)
-        self._echo_ws.pop(echo, None)
-        if not fut.done():
-            fut.set_result(data)
-        logger.debug(
-            "WsApiTransport: resolved echo=%s retcode=%s data=%s",
-            echo, data.get("retcode"), safe_json(data.get("data"), 500),
-        )
+        waiter = self._pop_waiter(key)
+        if waiter is None:
+            return False
+        if waiter.future is not None and not waiter.future.done():
+            waiter.future.set_result(data)
+            logger.debug(
+                "WsApiTransport: resolved echo=%s retcode=%s data=%s",
+                key, data.get("retcode"), safe_json(data.get("data"), 500),
+            )
+        if waiter.on_response is not None:
+            try:
+                waiter.on_response(raw)
+            except Exception:
+                logger.exception("WsApiTransport: passthrough callback failed echo=%s", key)
         return True
 
     async def request(
@@ -119,13 +148,19 @@ class WsApiTransport:
         返回完整的响应字典 ``{"retcode", "data", "status", "msg", "echo", ...}``。
         超时抛 ``asyncio.TimeoutError``；无活跃连接抛 ``RuntimeError``；
         WS 断开导致 pending 被取消抛 ``ConnectionError``。
+
+        ``request()`` allocates a fresh uuid4 echo and never reuses an in-flight key.
         """
         ws = self._pick_ws()
         echo = uuid.uuid4().hex
+        while echo in self._waiters:
+            echo = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
-        self._pending[echo] = fut
-        self._echo_ws[echo] = ws
+        wait_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT
+        self._arm_waiter(
+            echo, _Waiter(ws=ws, echo=echo, future=fut), wait_timeout,
+        )
         frame = {"action": action, "params": params or {}, "echo": echo}
         logger.debug(
             "WsApiTransport: sending action=%s echo=%s params=%s",
@@ -134,8 +169,7 @@ class WsApiTransport:
         try:
             await ws.send_json(frame)
         except Exception as exc:
-            self._pending.pop(echo, None)
-            self._echo_ws.pop(echo, None)
+            self._pop_waiter(echo)
             # If unregister() already set a ConnectionError on the future (WS
             # closed between _pick_ws and send_json), re-raise that — it's the
             # more informative and documented error for this condition.
@@ -144,21 +178,76 @@ class WsApiTransport:
                 raise RuntimeError(f"failed to send WS API frame for {action!r}: {exc}") from exc
             raise fut.exception() from exc
 
-        wait_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT
         try:
-            return await asyncio.wait_for(fut, timeout=wait_timeout)
+            return await fut
         except TimeoutError:
-            self._pending.pop(echo, None)
-            self._echo_ws.pop(echo, None)
+            logger.warning(
+                "WsApiTransport: request %s timed out (echo=%s, %.1fs)", action, echo, wait_timeout,
+            )
+            raise
+        except asyncio.CancelledError:
+            self._pop_waiter(echo)
             if not fut.done():
                 fut.cancel()
-            logger.warning("WsApiTransport: request %s timed out (echo=%s, %.1fs)", action, echo, wait_timeout)
             raise
         except Exception:
             # Future 被 _reject_all_pending / unregister 设置了 ConnectionError 等
-            self._pending.pop(echo, None)
-            self._echo_ws.pop(echo, None)
+            self._pop_waiter(echo)
             raise
+
+    async def passthrough(
+        self, raw: str, on_response: Callable[[str], None], *,
+        owner: Any = None, timeout: float | None = None,
+    ) -> None:
+        """Send *raw* unchanged and deliver the matching echo response to *on_response*.
+
+        Occupies the same waiter table as :meth:`request`.  Duplicate or
+        unhashable echos fail immediately via *on_response* and are not sent.
+        At most :attr:`max_passthrough` passthrough waiters may be in flight
+        (adapter ``request()`` waiters do not count).  Default wait is
+        :attr:`passthrough_timeout` (the adapter upload ceiling).
+        """
+        ws = self._pick_ws()
+        echo = echo_of(raw)
+        key = echo_key(echo)
+        if echo is not None and key is None:
+            on_response(failed_response(echo, _ECHO_UNHASHABLE))
+            return
+        if key is not None:
+            if key in self._waiters:
+                on_response(failed_response(echo, _ECHO_IN_FLIGHT))
+                return
+            if self._passthrough_inflight() >= self.max_passthrough:
+                on_response(failed_response(echo, _ECHO_TOO_MANY))
+                return
+            wait_timeout = timeout if timeout is not None else self.passthrough_timeout
+            self._arm_waiter(
+                key,
+                _Waiter(ws=ws, echo=echo, on_response=on_response, owner=owner),
+                wait_timeout,
+            )
+        logger.debug("WsApiTransport: passthrough raw frame %s", safe_json(raw, 500))
+        try:
+            await ws.send_str(raw)
+        except Exception:
+            if key is not None:
+                self._pop_waiter(key)
+            raise
+
+    def drop_owner(self, owner: Any) -> None:
+        """Drop passthrough waiters owned by a disconnecting client.
+
+        ``None`` is a no-op: adapter ``request()`` waiters carry no owner,
+        so matching on None would strand every in-flight request.
+        """
+        if owner is None:
+            return
+        stale = [key for key, waiter in self._waiters.items() if waiter.owner is owner]
+        for key in stale:
+            self._pop_waiter(key)
+
+    def _passthrough_inflight(self) -> int:
+        return sum(1 for waiter in self._waiters.values() if waiter.on_response is not None)
 
     def _pick_ws(self) -> Any:
         if not self._active:
@@ -169,13 +258,86 @@ class WsApiTransport:
         # 无入站绑定（插件/WebUI 主动调用）时取一条活跃连接。
         return next(iter(self._active))
 
-    def _reject_all_pending(self, reason: str) -> None:
-        if not self._pending:
+    def _arm_waiter(self, key: Hashable, waiter: _Waiter, timeout: float) -> None:
+        self._waiters[key] = waiter
+        waiter.timeout_handle = asyncio.get_running_loop().call_later(
+            timeout, self._on_waiter_timeout, key,
+        )
+
+    def _pop_waiter(self, key: Hashable) -> _Waiter | None:
+        waiter = self._waiters.pop(key, None)
+        if waiter is not None and waiter.timeout_handle is not None:
+            waiter.timeout_handle.cancel()
+            waiter.timeout_handle = None
+        return waiter
+
+    def _on_waiter_timeout(self, key: Hashable) -> None:
+        waiter = self._pop_waiter(key)
+        if waiter is None:
             return
-        pending = list(self._pending.items())
-        self._pending.clear()
-        self._echo_ws.clear()
-        for echo, fut in pending:
-            if not fut.done():
-                fut.set_exception(ConnectionError(reason))
-                logger.debug("WsApiTransport: rejected pending echo=%s (%s)", echo, reason)
+        if waiter.future is not None and not waiter.future.done():
+            waiter.future.set_exception(TimeoutError(_ECHO_TIMEOUT))
+            return
+        if waiter.on_response is None:
+            return
+        logger.warning("WsApiTransport: passthrough timed out (echo=%s)", key)
+        try:
+            waiter.on_response(failed_response(waiter.echo, _ECHO_TIMEOUT))
+        except Exception:
+            logger.exception("WsApiTransport: passthrough timeout callback echo=%s", key)
+
+    def _fail_waiter(self, key: Hashable, reason: str) -> None:
+        waiter = self._pop_waiter(key)
+        if waiter is None:
+            return
+        if waiter.future is not None and not waiter.future.done():
+            waiter.future.set_exception(ConnectionError(reason))
+            logger.debug("WsApiTransport: rejected pending echo=%s (%s)", key, reason)
+        if waiter.on_response is not None:
+            try:
+                waiter.on_response(failed_response(waiter.echo, reason))
+            except Exception:
+                logger.exception("WsApiTransport: passthrough fail callback echo=%s", key)
+
+    def _reject_all_pending(self, reason: str) -> None:
+        for key in list(self._waiters):
+            self._fail_waiter(key, reason)
+
+
+def echo_of(raw: str) -> Any | None:
+    """Return the frame's ``echo``, or ``None`` when absent/empty."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    echo = data.get("echo")
+    if echo is None or echo == "":
+        return None
+    return echo
+
+
+def echo_key(echo: Any) -> Hashable | None:
+    """Dict key for *echo*, or ``None`` if absent, empty, or unhashable."""
+    if echo is None or echo == "":
+        return None
+    try:
+        hash(echo)
+    except TypeError:
+        return None
+    return echo
+
+
+def failed_response(echo: Any, message: str) -> str:
+    return json.dumps(
+        {
+            "status": "failed",
+            "retcode": -1,
+            "data": None,
+            "echo": echo,
+            "msg": message,
+            "wording": message,
+        },
+        ensure_ascii=False,
+    )

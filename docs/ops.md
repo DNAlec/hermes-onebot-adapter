@@ -3,6 +3,7 @@
 安装、启动与端口见根目录 [README.md](../README.md)。HTTP 路径与 Config 字段见 [api.md](api.md)。
 
 - [自动化工具 API](#自动化工具-api)
+- [Cascade WS 串联](#cascade-ws-串联)
 - [环境变量](#环境变量)
 - [使用统计](#使用统计)
 - [入站消息限流](#入站消息限流)
@@ -29,6 +30,20 @@ curl -H "Authorization: Bearer hoa_xxx" \
 ```bash
 ONEBOT_AUTOMATION_API_KEY=hoa_xxx
 ```
+
+## Cascade WS 串联
+
+多个 bot 后端可以接在 Hermes 适配器后面：NapCat 只连适配器；未 @ / 未命中关键词的群消息从 Cascade 端口转给下一个客户端（例如另一份适配器的正向 WS，或会主动拨入反向 WS 的框架）。
+
+```
+NapCat ──▶ 本适配器 (18800) ──匹配成功──▶ Hermes
+                 │
+                 └──匹配失败──▶ Cascade (18830) ──▶ 下游 bot
+```
+
+下游按 OneBot 反向 WS 客户端连 `ws://<host>:18830/onebot?access_token=<cascade_ws_token>`。同一时刻只接受一个下游客户端，新连接会替换旧连接。绑定默认跟随 `--host`（不跟随 `--onebot-host`），可用 `--cascade-host` 覆盖。默认关闭，不占端口。
+
+**回环提醒**：用户名单和 bot 动态黑名单只对匹配成功的消息生效。下游 bot 自己或其他 bot 发出的未 @ 消息会被原样转回下游；若 NapCat 开启了上报自身消息，本适配器 bot 的发言同样会被转下去。下游框架需自行忽略自己发出的消息（多数默认会做），否则可能自问自答回环；必要时在下游侧按发送者过滤。
 
 ## 环境变量
 

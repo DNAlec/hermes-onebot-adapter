@@ -8,6 +8,7 @@ from onebot_adapter.onebot.log_format import (
     describe_outbound_send,
     format_recv_line,
     format_send_line,
+    log_cascaded_event,
     log_dropped_event,
     truncate,
 )
@@ -267,7 +268,7 @@ def test_describe_outbound_send_upload_uses_filename_not_path():
 def test_log_dropped_event_has_reason_not_body(caplog):
     with caplog.at_level(logging.DEBUG, logger="onebot_adapter.onebot.log_format"):
         log_dropped_event(DroppedEvent(
-            reason="mention", chat_id="group:42", user_id="100",
+            reason="trigger", chat_id="group:42", user_id="100",
             user_name="Tester", message_id="9",
         ))
         log_dropped_event(FilteredEvent(
@@ -278,6 +279,16 @@ def test_log_dropped_event_has_reason_not_body(caplog):
     records = [r for r in caplog.records if r.name == "onebot_adapter.onebot.log_format"]
     assert all(r.levelno == logging.DEBUG for r in records)
     text = caplog.text
-    assert "reason=mention" in text
+    assert "reason=trigger" in text
     assert "reason=blacklist" in text
     assert "nope secret body" not in text
+
+
+def test_log_cascaded_event_has_reason_not_body(caplog):
+    with caplog.at_level(logging.DEBUG, logger="onebot_adapter.onebot.log_format"):
+        log_cascaded_event(DroppedEvent(
+            reason="trigger", chat_id="group:42", user_id="100",
+            user_name="Tester", message_id="9",
+        ))
+    assert "转发 -- reason=trigger" in caplog.text
+    assert "chat_id=group:42" in caplog.text
