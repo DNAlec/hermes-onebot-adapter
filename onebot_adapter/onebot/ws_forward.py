@@ -15,8 +15,6 @@ import aiohttp
 
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot.handler import OneBotEventDispatcher, OneBotHandler
-from onebot_adapter.onebot.name_resolver import NameResolver
-from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.onebot.ws_api import WsApiTransport
 
 logger = logging.getLogger(__name__)
@@ -34,19 +32,12 @@ class OneBotForwardClient:
     def __init__(
         self,
         config: AdapterConfig,
-        api: Any,
-        on_event: Callable[[Any], Any] | None = None,
+        handler: OneBotHandler,
+        *,
         on_connect: Callable[[], Any] | None = None,
         on_disconnect: Callable[[], Any] | None = None,
         session: aiohttp.ClientSession | None = None,
-        on_filtered: Callable[[Any], Any] | None = None,
-        is_known_command_fn: Callable[[str], bool] | None = None,
-        canonical_command_name_fn: Callable[[str], str] | None = None,
-        seq_map: SeqMap | None = None,
-        name_resolver: NameResolver | None = None,
         ws_api_transport: WsApiTransport | None = None,
-        bot_blacklist_match_fn: Callable[[str, str | None], Any] | None = None,
-        friend_cache: Any | None = None,
     ) -> None:
         self._config = config
         self._on_connect = on_connect
@@ -57,20 +48,7 @@ class OneBotForwardClient:
         self._stop = asyncio.Event()
         self.connected = False
         self._connect_attempts = 0
-        self._handler = OneBotHandler(
-            label="forward",
-            config=config,
-            api=api,
-            on_event=on_event,
-            on_filtered=on_filtered,
-            is_known_command_fn=is_known_command_fn,
-            canonical_command_name_fn=canonical_command_name_fn,
-            seq_map=seq_map,
-            name_resolver=name_resolver,
-            ws_api_transport=ws_api_transport,
-            bot_blacklist_match_fn=bot_blacklist_match_fn,
-            friend_cache=friend_cache,
-        )
+        self._handler = handler
         self._event_dispatcher = OneBotEventDispatcher(self._handler, label="forward")
 
     def update_config(self, config: AdapterConfig) -> None:

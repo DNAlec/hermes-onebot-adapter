@@ -174,6 +174,9 @@ async def test_status_includes_all_ports(client):
     assert data["onebot_ws_port"] == 18800
     assert data["hermes_ws_port"] == 18810
     assert data["webui_port"] == 18820
+    assert data["cascade_ws_enabled"] is False
+    assert data["cascade_ws_port"] == 18830
+    assert data["cascade_ws_connected"] is False
     assert data["adapter_version"]
     assert data["onebot_mode"] == "reverse"
     assert data["self_id"] == "123"

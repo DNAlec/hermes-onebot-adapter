@@ -352,6 +352,9 @@ def _status(store: ConfigStore, state: dict[str, Any]):
                 "onebot_ws_port": cfg.onebot_reverse_ws_port,
                 "hermes_ws_port": cfg.hermes_ws_port,
                 "webui_port": cfg.webui_port,
+                "cascade_ws_enabled": cfg.cascade_ws_enabled,
+                "cascade_ws_port": cfg.cascade_ws_port,
+                "cascade_ws_connected": bool(state.get("cascade_ws_connected")),
                 "hermes_group_sessions_per_user": per_user,
             }
         )

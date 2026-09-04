@@ -14,7 +14,15 @@ import aiohttp.web
 from aiohttp.test_utils import TestServer
 
 from onebot_adapter.config import AdapterConfig
+from onebot_adapter.onebot.handler import OneBotHandler
 from onebot_adapter.onebot.ws_forward import OneBotForwardClient
+
+
+def _client(
+    cfg: AdapterConfig, *, on_event: Any = None, session: aiohttp.ClientSession | None = None,
+) -> OneBotForwardClient:
+    handler = OneBotHandler(label="forward", config=cfg, api=None, on_event=on_event)
+    return OneBotForwardClient(cfg, handler, session=session)
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -75,9 +83,7 @@ async def test_forward_client_connects_to_mock_server():
             group_require_mention=True,
         )
         events: list = []
-        client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e: events.append(e),
-        )
+        client = _client(cfg, on_event=lambda e: events.append(e))
         client.start()
         await asyncio.sleep(0.5)
         assert client.connected is True
@@ -98,9 +104,7 @@ async def test_forward_client_parses_message():
             dm_policy="allow",
         )
         events: list = []
-        client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e: events.append(e),
-        )
+        client = _client(cfg, on_event=lambda e: events.append(e))
         client.start()
         await asyncio.sleep(0.5)
         assert client.connected
@@ -126,7 +130,7 @@ async def test_forward_client_stop_sets_connected_false():
             onebot_ws_token="testtoken",
             self_id="999",
         )
-        client = OneBotForwardClient(cfg, api=None)
+        client = _client(cfg)
         client.start()
         await asyncio.sleep(0.3)
         assert client.connected
@@ -142,7 +146,7 @@ async def test_forward_client_stop_cancels_task():
         onebot_forward_ws_url="ws://127.0.0.1:1/nonexistent",  # won't connect
         self_id="999",
     )
-    client = OneBotForwardClient(cfg, api=None)
+    client = _client(cfg)
     client.start()
     await asyncio.sleep(0.1)
     assert client._task is not None
@@ -164,7 +168,7 @@ async def test_forward_client_reconnects_after_disconnect():
             onebot_ws_token="testtoken",
             self_id="999",
         )
-        client = OneBotForwardClient(cfg, api=None)
+        client = _client(cfg)
         client.start()
         await asyncio.sleep(0.5)
         assert client.connected
@@ -195,7 +199,7 @@ async def test_forward_client_backoff_increases():
         onebot_forward_ws_url="ws://127.0.0.1:1/nonexistent",  # port 1 won't connect
         self_id="999",
     )
-    client = OneBotForwardClient(cfg, api=None)
+    client = _client(cfg)
     client.start()
     await asyncio.sleep(2.5)  # wait for a few failed attempts
     assert client._connect_attempts >= 2
@@ -217,7 +221,7 @@ async def test_forward_client_with_access_token():
             onebot_ws_token="mytoken123",
             self_id="999",
         )
-        client = OneBotForwardClient(cfg, api=None)
+        client = _client(cfg)
         client.start()
         await asyncio.sleep(0.3)
         assert client.connected
@@ -232,7 +236,7 @@ async def test_forward_client_no_url_raises():
         onebot_forward_ws_url="",
         self_id="999",
     )
-    client = OneBotForwardClient(cfg, api=None)
+    client = _client(cfg)
     client.start()
     await asyncio.sleep(1.0)
     # Should keep trying but never connect
@@ -257,7 +261,7 @@ async def test_forward_client_uses_shared_session():
         )
         shared_session = aiohttp.ClientSession()
         try:
-            client = OneBotForwardClient(cfg, api=None, session=shared_session)
+            client = _client(cfg, session=shared_session)
             client.start()
             await asyncio.sleep(0.3)
             assert client.connected
@@ -286,9 +290,7 @@ async def test_forward_client_filters_non_message_events():
             dm_policy="allow",
         )
         events: list = []
-        client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e: events.append(e),
-        )
+        client = _client(cfg, on_event=lambda e: events.append(e))
         client.start()
         await asyncio.sleep(0.5)
         assert len(active_wss) >= 1
@@ -321,9 +323,7 @@ async def test_forward_client_notice_poke_delivered():
             notify_poke_enabled=True,
         )
         events: list = []
-        client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e: events.append(e),
-        )
+        client = _client(cfg, on_event=lambda e: events.append(e))
         client.start()
         await asyncio.sleep(0.5)
         assert len(active_wss) >= 1
@@ -365,9 +365,7 @@ async def test_forward_client_notice_disabled_not_delivered():
             notify_poke_enabled=False,
         )
         events: list = []
-        client = OneBotForwardClient(
-            cfg, api=None, on_event=lambda e: events.append(e),
-        )
+        client = _client(cfg, on_event=lambda e: events.append(e))
         client.start()
         await asyncio.sleep(0.5)
         assert len(active_wss) >= 1

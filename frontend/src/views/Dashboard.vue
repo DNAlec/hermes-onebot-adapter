@@ -215,6 +215,13 @@ onUnmounted(() => {
           <dt>OneBot WS</dt><dd>{{ status.onebot_ws_port }}</dd>
           <dt>Hermes WS</dt><dd>{{ status.hermes_ws_port }}</dd>
           <dt>WebUI</dt><dd>{{ status.webui_port }}</dd>
+          <dt>Cascade WS</dt>
+          <dd>
+            <template v-if="status.cascade_ws_enabled">
+              {{ status.cascade_ws_port }}（{{ status.cascade_ws_connected ? '已连接' : '未连接' }}）
+            </template>
+            <template v-else>未启用</template>
+          </dd>
         </dl>
       </div>
       <div class="card">

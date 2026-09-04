@@ -77,7 +77,7 @@ async def test_parse_group_without_mention_filtered():
         self_id="999",
         group_require_mention=True,
     )
-    assert_dropped(result, "mention")
+    assert_dropped(result, "trigger")
 
 
 async def test_parse_group_mention_not_required():
@@ -196,7 +196,7 @@ async def test_parse_group_reply_without_mention_dropped_first_only():
         mention_first_only=True,
         api=mock_api,
     )
-    assert_dropped(result, "mention")  # dropped: reply skipped, first non-reply is text, not @bot
+    assert_dropped(result, "trigger")  # dropped: reply skipped, first non-reply is text, not @bot
 
 
 async def test_parse_forward_expansion():
@@ -490,7 +490,7 @@ async def test_first_mention_only_filtered_when_not_first():
         group_require_mention=True,
         mention_first_only=True,
     )
-    assert_dropped(result, "mention")
+    assert_dropped(result, "trigger")
 
 
 async def test_keyword_trigger_any_position():
@@ -516,7 +516,7 @@ async def test_keyword_trigger_filtered_when_no_keyword():
         trigger_keywords=["#bot"],
         keyword_first_only=False,
     )
-    assert_dropped(result, "mention")
+    assert_dropped(result, "trigger")
 
 
 async def test_keyword_first_only_triggers_at_start():
@@ -542,7 +542,7 @@ async def test_keyword_first_only_filtered_when_mid():
         trigger_keywords=["#bot"],
         keyword_first_only=True,
     )
-    assert_dropped(result, "mention")
+    assert_dropped(result, "trigger")
 
 
 async def test_mention_or_keyword_both_pass():
@@ -571,7 +571,7 @@ async def test_mention_or_keyword_neither_filtered():
         trigger_keywords=["#bot"],
         keyword_first_only=False,
     )
-    assert_dropped(result, "mention")
+    assert_dropped(result, "trigger")
 
 
 async def test_no_trigger_requirements_passes_all():
@@ -678,7 +678,7 @@ async def test_per_group_mention_first_only_override():
         group_require_mention=True,
         config=cfg,
     )
-    assert_dropped(result, "mention")
+    assert_dropped(result, "trigger")
 
 
 # ── message_show_group_id + chat_name ───────────────────────────────────

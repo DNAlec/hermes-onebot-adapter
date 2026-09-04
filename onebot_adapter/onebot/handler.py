@@ -12,7 +12,8 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.logging_utils import safe_json, text_summary
@@ -29,10 +30,18 @@ _DEFAULT_EVENT_QUEUE_SIZE = 1024
 _DROP_LOG_INTERVAL = 5.0
 
 
+class OnDropped(Protocol):
+    def __call__(self, event: DroppedEvent, raw: str, /) -> Any: ...
+
+
+class OnIgnored(Protocol):
+    def __call__(self, raw: str, data: dict[str, Any], /) -> Any: ...
+
+
 class OneBotHandler:
     """Shared state + pipeline for processing OneBot text frames.
 
-    Both reverse and forward WS transports construct one of these and call
+    Reverse and forward WS transports receive an injected handler and call
     ``handle_text(raw)`` for every inbound text frame.  The handler owns no
     transport-specific state — it only knows how to parse and dispatch.
     """
@@ -43,8 +52,10 @@ class OneBotHandler:
         label: str,
         config: AdapterConfig,
         api: Any,
-        on_event: Any | None = None,
-        on_filtered: Any | None = None,
+        on_event: Callable[..., Any] | None = None,
+        on_filtered: Callable[..., Any] | None = None,
+        on_dropped: OnDropped | None = None,
+        on_ignored: OnIgnored | None = None,
         is_known_command_fn: Any | None = None,
         canonical_command_name_fn: Any | None = None,
         seq_map: SeqMap | None = None,
@@ -58,6 +69,8 @@ class OneBotHandler:
         self._api = api
         self._on_event = on_event
         self._on_filtered = on_filtered
+        self._on_dropped = on_dropped
+        self._on_ignored = on_ignored
         self._is_known_command_fn = is_known_command_fn
         self._canonical_command_name_fn = canonical_command_name_fn
         self._seq_map = seq_map
@@ -74,7 +87,7 @@ class OneBotHandler:
         """Process a single OneBot text frame end-to-end."""
         # 先检查是否是 WS API 的响应帧（命中 echo 的 pending 请求），若是则
         # 由 WsApiTransport resolve 对应 future 并结束，不进 parser 流程。
-        if self._ws_api_transport is not None and self._ws_api_transport.on_text(raw):
+        if self.intercept_api_response(raw):
             return
         await self.handle_event_text(raw)
 
@@ -135,9 +148,11 @@ class OneBotHandler:
         )
         if parsed is None:
             logger.debug("OneBot %s event ignored (post_type=%s)", self.label, data.get("post_type"))
+            await self._invoke(self._on_ignored, raw, data)
             return
         if isinstance(parsed, DroppedEvent):
             log_dropped_event(parsed)
+            await self._invoke(self._on_dropped, parsed, raw)
             return
         # FilteredEvent → reject message via callback, don't forward to Hermes
         if isinstance(parsed, FilteredEvent):
@@ -146,11 +161,7 @@ class OneBotHandler:
                 "OneBot %s event filtered: type=%s chat_id=%s cmd=%s",
                 self.label, parsed.filter_type, parsed.chat_id, parsed.command_name,
             )
-            if self._on_filtered:
-                try:
-                    await self._on_filtered(parsed)
-                except Exception:
-                    logger.exception("OneBot %s: on_filtered callback failed", self.label)
+            await self._invoke(self._on_filtered, parsed)
             return
         event = parsed
         log_recv_line(
@@ -159,11 +170,17 @@ class OneBotHandler:
             self._config.log_file_message_mode,
         )
         logger.debug("OneBot %s parsed text=%s", self.label, text_summary(event.text))
-        if self._on_event:
-            try:
-                await self._on_event(event)
-            except Exception:
-                logger.exception("OneBot %s: on_event callback failed", self.label)
+        await self._invoke(self._on_event, event)
+
+    async def _invoke(self, callback: Any, *args: Any) -> None:
+        if callback is None:
+            return
+        try:
+            result = callback(*args)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("OneBot %s: callback failed", self.label)
 
 
 class OneBotEventDispatcher:

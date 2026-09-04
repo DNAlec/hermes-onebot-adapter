@@ -209,6 +209,12 @@ class AdapterConfig:
     hermes_ws_token: str = ""
     hermes_install_dir: str = ""
     hermes_install_allowed_roots: list[str] = field(default_factory=list)
+    # ── 未匹配群消息串联（Cascade WS）──
+    cascade_ws_enabled: bool = False
+    cascade_ws_port: int = 18830
+    cascade_ws_path: str = "/onebot"
+    cascade_ws_token: str = ""
+    cascade_forward_meta: bool = True  # 向下游转发 meta_event（心跳/lifecycle）
     webui_port: int = 18820
     webui_token: str = ""  # WebUI 登录鉴权 token,自动生成,请勿清空
     webui_token_lifetime_hours: int = 168  # 登录有效期(小时),最小 1;默认 168(7 天)
@@ -572,13 +578,37 @@ def _validate_connection_and_storage(cfg: AdapterConfig, errors: list[str]) -> N
         errors.append(f"onebot_mode must be one of {sorted(_VALID_MODES)}")
     if cfg.onebot_mode == NAPCAT_MODE_FORWARD and not cfg.onebot_forward_ws_url:
         errors.append("onebot_forward_ws_url required when onebot_mode=forward")
-    for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port"):
+    for port_field in ("onebot_reverse_ws_port", "hermes_ws_port", "webui_port", "cascade_ws_port"):
         port_val = getattr(cfg, port_field)
         if not isinstance(port_val, int) or isinstance(port_val, bool) or not 1 <= port_val <= 65535:
             errors.append(f"{port_field} must be an integer in [1, 65535]")
+    ports = {
+        "onebot_reverse_ws_port": cfg.onebot_reverse_ws_port,
+        "hermes_ws_port": cfg.hermes_ws_port,
+        "webui_port": cfg.webui_port,
+    }
+    if cfg.cascade_ws_enabled:
+        ports["cascade_ws_port"] = cfg.cascade_ws_port
+    seen: dict[int, str] = {}
+    for name, port in ports.items():
+        if not isinstance(port, int) or isinstance(port, bool):
+            continue
+        owner = seen.get(port)
+        if owner is not None:
+            errors.append(f"{name} conflicts with {owner} ({port})")
+        else:
+            seen[port] = name
     for token_field in ("onebot_ws_token", "hermes_ws_token"):
         if not getattr(cfg, token_field):
             errors.append(f"{token_field} must not be empty")
+    if not isinstance(cfg.cascade_ws_enabled, bool):
+        errors.append("cascade_ws_enabled must be bool")
+    if not isinstance(cfg.cascade_forward_meta, bool):
+        errors.append("cascade_forward_meta must be bool")
+    if not isinstance(cfg.cascade_ws_path, str) or not cfg.cascade_ws_path.startswith("/"):
+        errors.append("cascade_ws_path must start with '/'")
+    if cfg.cascade_ws_enabled and not cfg.cascade_ws_token:
+        errors.append("cascade_ws_token must not be empty when cascade_ws_enabled is true")
     _validate_logging_and_runtime(cfg, errors)
 
 
@@ -806,6 +836,9 @@ def _inject_comments(d: dict[str, Any]) -> dict[str, Any]:
         "onebot_mode": "可选值: reverse(被动,默认) | forward(主动连接NapCat)",
         "onebot_ws_token": "OneBot↔适配器 WS 鉴权 token,自动生成,请勿清空",
         "hermes_ws_token": "适配器↔Hermes插件 WS 鉴权 token,自动生成,请勿清空",
+        "cascade_ws_enabled": "未匹配群消息串联:开启后监听独立反向 WS,把未 @/未命中关键词的群消息原样转给下游 bot",
+        "cascade_ws_token": "Cascade WS 鉴权 token;开启串联时必填,自动生成,请勿清空",
+        "cascade_forward_meta": "是否向下游转发 meta_event(心跳/lifecycle)及补发 lifecycle/connect;默认开启以免断线",
         "webui_token": "WebUI 登录鉴权 token,自动生成,请勿清空",
         "webui_token_lifetime_hours": "WebUI 登录有效期(小时),最小 1,默认 168(7天);改后已登录会话立即失效",
         "webui_token_epoch": "token 纪元(内部状态,勿手动修改);改 lifetime 时自动递增使旧 session token 失效",
@@ -1132,9 +1165,11 @@ def ensure_tokens(
 ) -> AdapterConfig:
     """Generate and persist tokens for any that are empty.
 
-    Returns *cfg* unchanged when both tokens are already set.  When one or both
-    are empty, new random tokens are generated, saved to *path* (default config
-    location), and the updated config is returned.
+    Fills ``onebot_ws_token``, ``hermes_ws_token``, and ``webui_token`` when
+    blank, and ``cascade_ws_token`` when cascade is enabled and its token is
+    blank. Returns *cfg* unchanged when nothing needs filling; otherwise
+    writes the new values to *path* (default config location) and returns
+    the updated config.
     """
     changes: dict[str, Any] = {}
     if not cfg.onebot_ws_token:
@@ -1143,6 +1178,8 @@ def ensure_tokens(
         changes["hermes_ws_token"] = secrets.token_urlsafe(24)
     if not cfg.webui_token:
         changes["webui_token"] = secrets.token_urlsafe(24)
+    if cfg.cascade_ws_enabled and not cfg.cascade_ws_token:
+        changes["cascade_ws_token"] = secrets.token_urlsafe(24)
     if changes:
         logger.warning(
             "tokens empty (%s), generating new ones; this overwrites %s",

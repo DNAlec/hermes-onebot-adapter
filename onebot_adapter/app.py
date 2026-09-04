@@ -1,15 +1,14 @@
 """Service composition: builds the aiohttp Applications and lifecycle hooks.
 
-Three Applications share service state but bind to separate ports:
-  * onebot_app  -> onebot_reverse_ws_port (OneBot reverse WS endpoint)
-  * hermes_app  -> hermes_ws_port         (Hermes plugin WS endpoint)
-  * webui_app   -> webui_port             (WebUI + REST API + static SPA)
+Up to four Applications share service state but bind to separate ports:
+  * onebot_app   -> onebot_reverse_ws_port (OneBot reverse WS endpoint)
+  * hermes_app   -> hermes_ws_port         (Hermes plugin WS endpoint)
+  * webui_app    -> webui_port             (WebUI + REST API + static SPA)
+  * cascade_app  -> cascade_ws_port        (optional leftover-event reverse WS)
 """
 from __future__ import annotations
 
 import asyncio
-import errno
-import ipaddress
 import logging
 import math
 import os
@@ -23,6 +22,7 @@ import aiohttp
 import aiohttp.web
 
 from onebot_adapter import __version__
+from onebot_adapter.bind import is_loopback_bind, resolve_bind_hosts, try_port
 from onebot_adapter.bot_blacklist import BotBlacklistStore
 from onebot_adapter.config import (
     AdapterConfig,
@@ -36,6 +36,7 @@ from onebot_adapter.config import (
 from onebot_adapter.logging_utils import text_summary
 from onebot_adapter.onebot.api import OneBotApi
 from onebot_adapter.onebot.friend_cache import FriendCache
+from onebot_adapter.onebot.handler import OneBotHandler
 from onebot_adapter.onebot.log_format import (
     detach_preview_logger_handlers,
     log_dropped_event,
@@ -44,6 +45,7 @@ from onebot_adapter.onebot.log_format import (
 from onebot_adapter.onebot.name_resolver import NameResolver
 from onebot_adapter.onebot.seq_map import SeqMap
 from onebot_adapter.onebot.ws_api import WsApiTransport
+from onebot_adapter.onebot.ws_cascade import CascadeWsServer
 from onebot_adapter.onebot.ws_forward import OneBotForwardClient
 from onebot_adapter.onebot.ws_reverse import OneBotReverseServer
 from onebot_adapter.rate_limit import MessageRateLimiter
@@ -116,6 +118,7 @@ class AdapterService:
         self._state: dict[str, Any] = {
             "onebot_connected": False,
             "hermes_plugin_connected": False,
+            "cascade_ws_connected": False,
             "log_buffer": deque(maxlen=500),
             "log_file_enabled": False,
             "log_file_path": None,
@@ -125,6 +128,7 @@ class AdapterService:
         self._ws_api_transport: WsApiTransport | None = None
         self._onebot_reverse: OneBotReverseServer | None = None
         self._onebot_forward: OneBotForwardClient | None = None
+        self._cascade: CascadeWsServer | None = None
         self._relay: HermesRelayServer | None = None
         self._seq_map: SeqMap | None = None
         self._runners: list[aiohttp.web.AppRunner] = []
@@ -145,7 +149,7 @@ class AdapterService:
     def _init_components(self) -> None:
         cfg = self.store.config
         assert self._session is not None
-        self._ws_api_transport = WsApiTransport()
+        self._ws_api_transport = WsApiTransport(passthrough_timeout=cfg.file_upload_timeout)
         self._api = OneBotApi(
             ws_transport=self._ws_api_transport,
             file_upload_timeout=cfg.file_upload_timeout,
@@ -169,42 +173,53 @@ class AdapterService:
             local_api_call=self._handle_local_api_call,
         )
         self._state["relay"] = self._relay
+        self._cascade = CascadeWsServer(
+            cfg,
+            ws_api_transport=self._ws_api_transport,
+            on_connect=self._update_status,
+            on_disconnect=self._update_status,
+        )
+        self._state["cascade"] = self._cascade
         self._onebot_reverse = OneBotReverseServer(
             cfg,
-            self._api,
-            on_event=self._on_onebot_event,
+            self._make_onebot_handler("reverse"),
             on_connect=self._on_onebot_connect,
             on_disconnect=self._update_status,
-            on_filtered=self._on_filtered_command,
-            is_known_command_fn=self._relay.is_known_command,
-            canonical_command_name_fn=self._relay.canonical_command_name,
-            seq_map=self._seq_map,
-            name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
-            bot_blacklist_match_fn=self._match_bot_blacklist,
-            friend_cache=self._friend_cache,
         )
         self._onebot_forward = OneBotForwardClient(
             cfg,
-            self._api,
-            on_event=self._on_onebot_event,
+            self._make_onebot_handler("forward"),
             on_connect=self._on_onebot_connect,
             on_disconnect=self._update_status,
             session=self._session,
-            on_filtered=self._on_filtered_command,
-            is_known_command_fn=self._relay.is_known_command,
-            canonical_command_name_fn=self._relay.canonical_command_name,
-            seq_map=self._seq_map,
-            name_resolver=self._name_resolver,
             ws_api_transport=self._ws_api_transport,
-            bot_blacklist_match_fn=self._match_bot_blacklist,
-            friend_cache=self._friend_cache,
         )
         # Register config-change listener early so hot-reload via the WebUI
         # (which starts first) notifies components immediately — previously
         # this was in _on_hermes_startup, which left a window where a config
         # change before the Hermes WS site started would be silently ignored.
         self.store.on_change(self._on_config_change)
+
+    def _make_onebot_handler(self, label: str) -> OneBotHandler:
+        assert self._cascade is not None
+        assert self._relay is not None
+        return OneBotHandler(
+            label=label,
+            config=self.store.config,
+            api=self._api,
+            on_event=self._on_onebot_event,
+            on_filtered=self._on_filtered_command,
+            on_dropped=self._cascade.observe_dropped,
+            on_ignored=self._cascade.observe_ignored,
+            is_known_command_fn=self._relay.is_known_command,
+            canonical_command_name_fn=self._relay.canonical_command_name,
+            seq_map=self._seq_map,
+            name_resolver=self._name_resolver,
+            ws_api_transport=self._ws_api_transport,
+            bot_blacklist_match_fn=self._match_bot_blacklist,
+            friend_cache=self._friend_cache,
+        )
 
     def _setup_file_logging(self, cfg: AdapterConfig) -> None:
         """Create or replace the file logging handler for persistent logs.
@@ -288,6 +303,25 @@ class AdapterService:
         app.on_cleanup.append(self._on_hermes_cleanup)
         return app
 
+    def build_cascade_app(self) -> aiohttp.web.Application:
+        assert self._cascade is not None
+        app = aiohttp.web.Application()
+        self._cascade.add_routes(app)
+        return app
+
+    def _add_optional_runners(
+        self, cfg: AdapterConfig, *, no_webui: bool,
+    ) -> tuple[aiohttp.web.AppRunner | None, aiohttp.web.AppRunner | None]:
+        webui_runner: aiohttp.web.AppRunner | None = None
+        cascade_runner: aiohttp.web.AppRunner | None = None
+        if not no_webui:
+            webui_runner = aiohttp.web.AppRunner(self.build_webui_app())
+            self._runners.append(webui_runner)
+        if cfg.cascade_ws_enabled:
+            cascade_runner = aiohttp.web.AppRunner(self.build_cascade_app())
+            self._runners.append(cascade_runner)
+        return webui_runner, cascade_runner
+
     def build_webui_app(self) -> aiohttp.web.Application:
         app = aiohttp.web.Application()
         webui_routes.add_routes(app, self.store, self._state)
@@ -322,6 +356,7 @@ class AdapterService:
         """Synchronise WebUI state with live connection status."""
         self._state["onebot_connected"] = self._onebot_connected()
         self._state["hermes_plugin_connected"] = bool(self._relay and self._relay.has_clients)
+        self._state["cascade_ws_connected"] = bool(self._cascade and self._cascade.has_clients)
 
     def _on_plugin_connect(self) -> None:
         """Called when the Hermes plugin connects to the relay WS.
@@ -560,8 +595,10 @@ class AdapterService:
         cfg = self.store.config
         self._applied_config = cfg
         logger.info(
-            "OneBot adapter %s | onebot_mode=%s onebot_port=%d hermes_ws_port=%d webui_port=%d",
+            "OneBot adapter %s | onebot_mode=%s onebot_port=%d hermes_ws_port=%d webui_port=%d "
+            "cascade_enabled=%s cascade_port=%d",
             __version__, cfg.onebot_mode, cfg.onebot_reverse_ws_port, cfg.hermes_ws_port, cfg.webui_port,
+            cfg.cascade_ws_enabled, cfg.cascade_ws_port,
         )
         if cfg.onebot_mode == "forward":
             assert self._onebot_forward is not None
@@ -580,6 +617,8 @@ class AdapterService:
             await self._onebot_forward.stop()
         if self._onebot_reverse:
             await self._onebot_reverse.stop()
+        if self._cascade:
+            await self._cascade.stop()
         if self._relay:
             await self._relay.stop()
         if self._usage_stats:
@@ -636,6 +675,10 @@ class AdapterService:
             self._onebot_reverse.update_config(new)
         if self._onebot_forward:
             self._onebot_forward.update_config(new)
+        if self._cascade:
+            self._cascade.update_config(new)
+        if self._ws_api_transport is not None:
+            self._ws_api_transport.passthrough_timeout = new.file_upload_timeout
         if self._api:
             self._api.update_file_upload_timeout(new.file_upload_timeout)
             self._api.configure_send_logging(config=new, name_resolver=self._name_resolver)
@@ -691,9 +734,12 @@ class AdapterService:
         for old_val, new_val, label in [
             (old.onebot_reverse_ws_path, new.onebot_reverse_ws_path, "onebot_reverse_ws_path"),
             (old.hermes_ws_path, new.hermes_ws_path, "hermes_ws_path"),
+            (old.cascade_ws_path, new.cascade_ws_path, "cascade_ws_path"),
             (old.onebot_reverse_ws_port, new.onebot_reverse_ws_port, "onebot_reverse_ws_port"),
             (old.hermes_ws_port, new.hermes_ws_port, "hermes_ws_port"),
             (old.webui_port, new.webui_port, "webui_port"),
+            (old.cascade_ws_port, new.cascade_ws_port, "cascade_ws_port"),
+            (old.cascade_ws_enabled, new.cascade_ws_enabled, "cascade_ws_enabled"),
         ]:
             if old_val != new_val:
                 logger.warning(
@@ -728,24 +774,6 @@ class AdapterService:
                 await asyncio.sleep(3)
         logger.warning("OneBot self_id probe failed; set it in WebUI")
 
-    @staticmethod
-    async def _try_port(
-        runner: aiohttp.web.AppRunner, host: str, port: int, label: str, max_retries: int = 50,
-    ) -> aiohttp.web.TCPSite:
-        """Bind *runner* to *port*; if busy try the next port up to *max_retries* times."""
-        for attempt in range(max_retries):
-            try:
-                site = aiohttp.web.TCPSite(runner, host, port + attempt)
-                await site.start()
-                logger.info("%s listening on %s:%d", label, host, site.port)
-                return site
-            except OSError as exc:
-                if exc.errno != errno.EADDRINUSE:
-                    raise
-                if attempt == max_retries - 1:
-                    raise
-                logger.debug("%s port %d busy, trying %d", label, port + attempt, port + attempt + 1)
-
     async def serve(
         self,
         host: str = "127.0.0.1",
@@ -754,6 +782,7 @@ class AdapterService:
         onebot_host: str | None = None,
         hermes_host: str | None = None,
         webui_host: str | None = None,
+        cascade_host: str | None = None,
     ) -> None:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
@@ -809,18 +838,14 @@ class AdapterService:
         onebot_runner = aiohttp.web.AppRunner(onebot_app)
         hermes_runner = aiohttp.web.AppRunner(hermes_app)
         self._runners = [onebot_runner, hermes_runner]
-
-        if not no_webui:
-            webui_app = self.build_webui_app()
-            webui_runner = aiohttp.web.AppRunner(webui_app)
-            self._runners.append(webui_runner)
+        webui_runner, cascade_runner = self._add_optional_runners(cfg, no_webui=no_webui)
 
         for runner in self._runners:
             await runner.setup()
 
-        onebot_bind = onebot_host or host
-        hermes_bind = hermes_host or host
-        webui_bind = webui_host or host
+        onebot_bind, hermes_bind, webui_bind, cascade_bind = resolve_bind_hosts(
+            host, onebot_host, hermes_host, webui_host, cascade_host,
+        )
         bindings: list[aiohttp.web.TCPSite] = []
         runner_label_port = [
             (onebot_runner, "OneBot WS", onebot_bind, cfg.onebot_reverse_ws_port, "onebot_reverse_ws_port"),
@@ -828,9 +853,13 @@ class AdapterService:
         ]
         if not no_webui:
             runner_label_port.append((webui_runner, "WebUI", webui_bind, cfg.webui_port, "webui_port"))
+        if cascade_runner is not None:
+            runner_label_port.append(
+                (cascade_runner, "Cascade WS", cascade_bind, cfg.cascade_ws_port, "cascade_ws_port"),
+            )
         remapped: dict[str, int] = {}
         for runner, label, hst, port, cfg_key in runner_label_port:
-            site = await self._try_port(runner, hst, port, label, 50)
+            site = await try_port(runner, hst, port, label, 50)
             bindings.append(site)
             if site.port != port:
                 logger.warning("%s port %d busy, using %d instead", label, port, site.port)
@@ -856,6 +885,13 @@ class AdapterService:
                 "Prefer --hermes-host 127.0.0.1 unless the plugin is remote.",
                 hermes_bind,
             )
+        if cascade_runner is not None and not is_loopback_bind(cascade_bind):
+            logger.warning(
+                "Cascade WS is bound to %s (not loopback). "
+                "Prefer --cascade-host 127.0.0.1 unless the downstream bot is remote; "
+                "this port accepts full-privilege OneBot API calls.",
+                cascade_bind,
+            )
         if not no_webui:
             logger.info("WebUI ready at http://%s:%d", webui_bind, cfg.webui_port)
             if not is_loopback_bind(webui_bind):
@@ -878,31 +914,6 @@ class AdapterService:
             await self._on_hermes_cleanup(hermes_app)
 
 
-def is_loopback_bind(host: str) -> bool:
-    """True for 127.0.0.1, ::1, localhost, and other loopback addresses."""
-    raw = (host or "").strip().lower().strip("[]")
-    if raw in {"127.0.0.1", "::1", "localhost"}:
-        return True
-    try:
-        return ipaddress.ip_address(raw).is_loopback
-    except ValueError:
-        return False
-
-
-def resolve_bind_hosts(
-    host: str,
-    onebot_host: str | None,
-    hermes_host: str | None,
-    webui_host: str | None,
-) -> tuple[str, str, str]:
-    """Resolve per-listener hosts. Unspecified values fall back to *host*."""
-    return (
-        host if onebot_host is None else onebot_host,
-        host if hermes_host is None else hermes_host,
-        host if webui_host is None else webui_host,
-    )
-
-
 def run(
     host: str = "127.0.0.1",
     port: int | None = None,
@@ -911,6 +922,7 @@ def run(
     onebot_host: str | None = None,
     hermes_host: str | None = None,
     webui_host: str | None = None,
+    cascade_host: str | None = None,
 ) -> None:
     # Bootstrap console logging before configuration I/O so load/generation
     # failures do not disappear before the configured handlers exist.
@@ -954,6 +966,7 @@ def run(
             onebot_host=onebot_host,
             hermes_host=hermes_host,
             webui_host=webui_host,
+            cascade_host=cascade_host,
         ))
     except KeyboardInterrupt:
         pass

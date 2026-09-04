@@ -26,6 +26,11 @@ def test_config_defaults_validate(tmp_path):
     assert cfg.dm_blacklist == []
     assert cfg.dm_reject_reply_enabled is False
     assert cfg.dm_reject_message == "⛔ 当前私聊策略为：{reason}"
+    assert cfg.cascade_ws_enabled is False
+    assert cfg.cascade_ws_port == 18830
+    assert cfg.cascade_ws_path == "/onebot"
+    assert cfg.cascade_forward_meta is True
+    assert not cfg.cascade_ws_token
 
 
 def test_config_default_tokens_empty_before_ensure():
@@ -34,6 +39,7 @@ def test_config_default_tokens_empty_before_ensure():
     assert not cfg.onebot_ws_token
     assert any("onebot_ws_token" in e for e in cfg.validate())
     assert any("hermes_ws_token" in e for e in cfg.validate())
+    assert not any("cascade_ws_token" in e for e in cfg.validate())
 
 
 def test_config_forward_requires_url():
@@ -507,6 +513,51 @@ def test_force_init_resets_config_preserves_tokens_and_audits(tmp_path, monkeypa
     assert event["reason"] == "cli.force_reinitialize"
     assert event["source"] == "cli"
     assert event["suspicious_reset"] is True
+
+
+def test_cascade_token_required_only_when_enabled():
+    cfg = AdapterConfig(onebot_ws_token="t1", hermes_ws_token="t2", cascade_ws_enabled=True)
+    errors = cfg.validate()
+    assert any("cascade_ws_token" in e for e in errors)
+    cfg = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2",
+        cascade_ws_enabled=True, cascade_ws_token="sekret",
+    )
+    assert not any("cascade_ws_token" in e for e in cfg.validate())
+
+
+def test_cascade_port_must_be_unique():
+    cfg = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2",
+        cascade_ws_enabled=True, cascade_ws_token="sekret",
+        cascade_ws_port=18800,
+    )
+    errors = cfg.validate()
+    assert any("cascade_ws_port" in e and "onebot_reverse_ws_port" in e for e in errors)
+
+
+def test_cascade_port_may_overlap_when_disabled():
+    cfg = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2",
+        cascade_ws_enabled=False, cascade_ws_port=18800,
+    )
+    assert not any("cascade_ws_port" in e for e in cfg.validate())
+
+
+def test_cascade_path_must_start_with_slash():
+    cfg = AdapterConfig(
+        onebot_ws_token="t1", hermes_ws_token="t2", cascade_ws_path="onebot",
+    )
+    assert any("cascade_ws_path" in e for e in cfg.validate())
+
+
+def test_ensure_tokens_generates_cascade_token_when_enabled(tmp_path):
+    cfg = ensure_tokens(
+        AdapterConfig(cascade_ws_enabled=True),
+        tmp_path / "cfg.json",
+    )
+    assert cfg.cascade_ws_token
+    assert cfg.validate() == []
 
 
 def test_config_validate_rejects_invalid_ports():

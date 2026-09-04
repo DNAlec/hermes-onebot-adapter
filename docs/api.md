@@ -149,6 +149,9 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
   "onebot_ws_port": 18800,
   "hermes_ws_port": 18810,
   "webui_port": 18820,
+  "cascade_ws_enabled": false,
+  "cascade_ws_port": 18830,
+  "cascade_ws_connected": false,
   "hermes_group_sessions_per_user": true
 }
 ```
@@ -163,6 +166,9 @@ WebUI session 可调用以下 key 管理接口（均不接收请求体）：
 | `hermes_plugin_connected` | bool | Hermes 插件是否已连接 |
 | `onebot_mode` | string | OneBot 连接模式：`reverse`（被动等待）/ `forward`（主动连接） |
 | `self_id` | string | 机器人 QQ 号 |
+| `cascade_ws_enabled` | bool | 是否启用未匹配群消息串联端口 |
+| `cascade_ws_port` | int | Cascade WS 监听端口 |
+| `cascade_ws_connected` | bool | 是否有下游客户端连着 Cascade WS |
 | `hermes_group_sessions_per_user` | bool | Hermes 会话隔离模式（插件上报；`true`=每人独立 session，`false`=全群共享 session，触发群聊排队） |
 
 ---
@@ -1154,6 +1160,11 @@ Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具写入
 | `hermes_ws_port` | int | `18810` | Hermes 插件 WS 端口 |
 | `hermes_ws_path` | string | `"/hermes"` | Hermes 插件 WS 路径 |
 | `hermes_ws_token` | string | 自动生成 | Hermes WS 鉴权 token |
+| `cascade_ws_enabled` | bool | `false` | 未匹配群消息串联总开关。关闭时不绑定端口 |
+| `cascade_ws_port` | int | `18830` | Cascade 反向 WS 端口；与其它监听端口冲突则无法保存 |
+| `cascade_ws_path` | string | `"/onebot"` | Cascade WS 路径 |
+| `cascade_ws_token` | string | 开启时自动生成 | Cascade WS 鉴权 token；开启时必填（fail-closed） |
+| `cascade_forward_meta` | bool | `true` | 是否向下游转发 `meta_event`（心跳 / lifecycle），含下游连上且 OneBot 已在线时补发的 `lifecycle/connect` |
 | `hermes_install_dir` | string | `""` | Hermes 安装目录（插件安装/工具集读写/会话隔离模式写入的目标路径）。空= `~/.hermes` 或仍落在 `$HOME` 下的 `$HERMES_HOME`；须在允许根内 |
 | `hermes_install_allowed_roots` | string[] | `[]` | 额外允许的 Hermes 安装根（如 `/opt/hermes`）；不可为 `/`、盘符根、`/etc`、`/proc`、`/sys` |
 | `webui_port` | int | `18820` | WebUI 端口 |

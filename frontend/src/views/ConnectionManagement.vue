@@ -15,6 +15,7 @@ const msgType = ref<"success" | "error" | "warning">("success");
 const installResult = ref<any>(null);
 const showToken = ref(false);
 const showOnebotToken = ref(false);
+const showCascadeToken = ref(false);
 const hermesDirStatus = ref<HermesDirStatus | null>(null);
 const checkingDir = ref(false);
 
@@ -79,6 +80,11 @@ async function save() {
       hermes_ws_port: c.hermes_ws_port,
       hermes_ws_path: c.hermes_ws_path,
       hermes_ws_token: c.hermes_ws_token,
+      cascade_ws_enabled: c.cascade_ws_enabled,
+      cascade_ws_port: c.cascade_ws_port,
+      cascade_ws_path: c.cascade_ws_path,
+      cascade_ws_token: c.cascade_ws_token,
+      cascade_forward_meta: c.cascade_forward_meta,
     });
     syncBaseline();
     if (wasDirty) {
@@ -140,38 +146,61 @@ async function uninstall() {
   }
 }
 
+function randomToken(): string {
+  const arr = new Uint8Array(24);
+  crypto.getRandomValues(arr);
+  return btoa(String.fromCharCode(...arr))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function copied(text: string, label: string) {
+  navigator.clipboard.writeText(text);
+  msg.value = `${label} 已复制到剪贴板`;
+  msgType.value = "success";
+}
+
 function copyToken() {
-  if (cfg.value?.hermes_ws_token) {
-    navigator.clipboard.writeText(cfg.value.hermes_ws_token);
-    msg.value = "Hermes WS Token 已复制到剪贴板";
-    msgType.value = "success";
-  }
+  if (cfg.value?.hermes_ws_token) copied(cfg.value.hermes_ws_token, "Hermes WS Token");
 }
 
 function copyOnebotToken() {
-  if (cfg.value?.onebot_ws_token) {
-    navigator.clipboard.writeText(cfg.value.onebot_ws_token);
-    msg.value = "OneBot WS Token 已复制到剪贴板";
-    msgType.value = "success";
-  }
+  if (cfg.value?.onebot_ws_token) copied(cfg.value.onebot_ws_token, "OneBot WS Token");
+}
+
+function copyCascadeToken() {
+  if (cfg.value?.cascade_ws_token) copied(cfg.value.cascade_ws_token, "Cascade WS Token");
 }
 
 function regenerateToken() {
   if (!cfg.value) return;
-  const arr = new Uint8Array(24);
-  crypto.getRandomValues(arr);
-  const b64 = btoa(String.fromCharCode(...arr))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  cfg.value.hermes_ws_token = b64;
+  cfg.value.hermes_ws_token = randomToken();
 }
 
 function regenerateOnebotToken() {
   if (!cfg.value) return;
-  const arr = new Uint8Array(24);
-  crypto.getRandomValues(arr);
-  const b64 = btoa(String.fromCharCode(...arr))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  cfg.value.onebot_ws_token = b64;
+  cfg.value.onebot_ws_token = randomToken();
+}
+
+function regenerateCascadeToken() {
+  if (!cfg.value) return;
+  cfg.value.cascade_ws_token = randomToken();
+}
+
+function onCascadeEnabledChange() {
+  if (!cfg.value) return;
+  if (cfg.value.cascade_ws_enabled && !cfg.value.cascade_ws_token) {
+    cfg.value.cascade_ws_token = randomToken();
+  }
+}
+
+function getCascadeUrl() {
+  const port = cfg.value?.cascade_ws_port || 18830;
+  const path = cfg.value?.cascade_ws_path || "/onebot";
+  return `ws://127.0.0.1:${port}${path}`;
+}
+
+function copyCascadeUrl() {
+  copied(getCascadeUrl(), "Cascade WS URL");
 }
 
 function getAdapterUrl() {
@@ -181,9 +210,7 @@ function getAdapterUrl() {
 }
 
 function copyAdapterUrl() {
-  navigator.clipboard.writeText(getAdapterUrl());
-  msg.value = "适配器 URL 已复制到剪贴板";
-  msgType.value = "success";
+  copied(getAdapterUrl(), "适配器 URL");
 }
 </script>
 
@@ -262,6 +289,67 @@ function copyAdapterUrl() {
             <input v-model="cfg.self_id" placeholder="留空自动探测" />
             <span class="hint">机器人的 QQ 号，留空会自动探测</span>
           </label>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>未匹配转发（Cascade WS）</h3>
+        <p class="section-desc">把未 @bot、未命中关键词的群消息原样转给下游 bot，用于串联多个后端。已关闭的群，以及匹配成功后因黑名单、用户过滤、限流、指令权限未进 Hermes 的消息不会转发。</p>
+
+        <div class="subsection">
+          <label class="checkbox-row">
+            <input type="checkbox" v-model="cfg.cascade_ws_enabled" @change="onCascadeEnabledChange" />
+            <span>启用 Cascade WS</span>
+          </label>
+          <span class="hint">开启、改端口或路径后需重启适配器才会监听。同一时刻只接受一个下游客户端（新连接替换旧连接）。无下游连接时匹配失败仍静默丢弃。监听地址默认跟随 --host，远程下游需加 --cascade-host。</span>
+        </div>
+
+        <div class="subsection">
+          <div class="form-row">
+            <label>
+              监听端口
+              <input type="number" v-model.number="cfg.cascade_ws_port" min="1" max="65535" />
+            </label>
+            <label>
+              WS 路径
+              <input v-model="cfg.cascade_ws_path" placeholder="/onebot" />
+            </label>
+          </div>
+        </div>
+
+        <div class="subsection">
+          <h4>WS Token</h4>
+          <div class="token-input-wrapper">
+            <input
+              :type="showCascadeToken ? 'text' : 'password'"
+              v-model="cfg.cascade_ws_token"
+              class="token-input"
+              placeholder="开启时自动生成"
+            />
+            <button @click="showCascadeToken = !showCascadeToken" class="icon-btn" :title="showCascadeToken ? '隐藏' : '显示'">
+              {{ showCascadeToken ? '🙈' : '👁️' }}
+            </button>
+            <button @click="copyCascadeToken" class="icon-btn" title="复制">📋</button>
+            <button @click="regenerateCascadeToken" class="icon-btn" title="重新生成">🔄</button>
+          </div>
+          <span class="hint">下游连接鉴权；Bearer 优先，仍接受 ?access_token= / ?token=</span>
+        </div>
+
+        <div class="subsection">
+          <label class="checkbox-row">
+            <input type="checkbox" v-model="cfg.cascade_forward_meta" />
+            <span>转发心跳 / lifecycle（meta_event）</span>
+          </label>
+          <span class="hint">关闭后不转发心跳/lifecycle，也不在下游连上时补发 connect，下游可能因此断线。不是聊天消息，与 @/关键词匹配无关。</span>
+        </div>
+
+        <div class="subsection last">
+          <h4>下游连接 URL</h4>
+          <div class="url-container">
+            <code class="url-display">{{ getCascadeUrl() }}</code>
+            <button @click="copyCascadeUrl" class="icon-btn" title="复制">📋</button>
+          </div>
+          <span class="hint">下游 bot 以反向 WS 客户端连入此地址，收到未匹配的原始 OneBot 事件；发往此端口的 JSON 原样转给 OneBot。</span>
         </div>
       </div>
 
@@ -730,6 +818,21 @@ input:focus {
   background: #fff3cd;
   color: #856404;
   border-left: 4px solid var(--warning);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.checkbox-row span {
+  font-weight: 500;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: auto;
+  margin-top: 0;
 }
 
 .loading { text-align: center; padding: 2rem; color: var(--text-muted); }

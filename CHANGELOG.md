@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### 新增
+- Cascade WS（`cascade_ws_enabled`，默认关闭，端口 `18830`）：把未 @bot / 未命中关键词的群消息原样转给下游 bot，并把下游发来的 JSON 原样写回 OneBot。已关闭的群、以及匹配成功后因黑名单、用户过滤、限流、指令权限等未进 Hermes 的消息不转发。同一时刻只接受一个下游客户端（新连接替换旧连接）。CLI `--cascade-host` 未指定时跟随 `--host`（不跟随 `--onebot-host`）
+
+### 修复
+- Cascade 出站不再在 OneBot 事件 worker 上 await 下游 `send_str`（卡住的下游不会堵住 Hermes）
+- Cascade API echo 绑到实际发出请求的那条 OneBot 连接；该连接断开时立即失败，不再等全部 OneBot 掉线
+- 下游连上且 OneBot 已在线时，仅当 `cascade_forward_meta` 开启才补发 `lifecycle/connect`（与心跳/lifecycle 转发同一开关）；热更新关闭串联后拒绝新握手（503）且已有连接的入站 API 失败
+- 群聊准入改为 **启用 → @/关键词匹配 → 用户名单**：关闭的群一律 `user_filter`，不因默认 require-mention 变成 `trigger` 而 cascade
+- Cascade passthrough 同时最多 256 个 in-flight waiter（不含 adapter `request()`）；超出立即失败，不占用 echo 表
+- Cascade 策略从共享 OneBot handler 拆出（`on_dropped` / `on_ignored`）；echo 回程与 adapter `request()` 共用 `WsApiTransport` waiter 表（重复 echo / 不可哈希 echo 立即失败，passthrough 超时跟随 `file_upload_timeout`）
+- 群聊未命中 @/关键词的 `DroppedEvent.reason` 从 `mention` 改为 `trigger`
+- Cascade 客户端断开时取消出站 worker（队列满时不再依赖 sentinel）；`broadcast_raw` 仅在实际入队后记「转发」
+- `message_preview` logger 的 `propagate=False` 改为 import 时生效（原先首条日志才设置）；`test_api_send_logs_outbound_line` 显式挂 caplog handler，单跑不再依赖其他测试先配置 preview logger
+
 ### 文档
 - 新增 Windows / WSL2 部署教程（`docs/wsl.md`）：适配器与 Hermes 装在 WSL，NapCat 留在 Windows 走反向 WS
 - README 改为安装/连接入口；WebUI、聊天过滤、运维说明拆到 `docs/webui.md` / `docs/chat.md` / `docs/ops.md`

@@ -164,14 +164,18 @@ class FilteredEvent:
     filter_type: str = "command"
 
 
+DROP_REASON_TRIGGER = "trigger"
+
+
 @dataclass
 class DroppedEvent:
     """A candidate message that will not be forwarded to Hermes.
 
     Unlike :class:`FilteredEvent`, this is a silent drop: the adapter does
     not send a reject reply.  ``reason`` is one of ``user_filter``,
-    ``mention``, ``empty`` (and notice-path user filters use the same codes).
-    Heartbeats and disabled/unhandled notice types still return ``None``.
+    ``trigger`` (group @/keyword miss), ``empty`` (and notice-path user
+    filters use the same codes). Heartbeats and disabled/unhandled notice
+    types still return ``None``.
     """
 
     reason: str

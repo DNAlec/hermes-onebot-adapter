@@ -106,7 +106,7 @@ hermes gateway restart
 # 启动服务
 hermes-onebot-adapter                         # 默认三个口都绑 127.0.0.1
 hermes-onebot-adapter --onebot-host 0.0.0.0   # 仅暴露 OneBot 反向 WS（远程 NapCat）
-hermes-onebot-adapter --host 0.0.0.0          # 三个口都暴露，不推荐（无 TLS）
+hermes-onebot-adapter --host 0.0.0.0          # 所有已启用监听口都暴露，不推荐（无 TLS）
 hermes-onebot-adapter --port 18820            # 指定 WebUI 端口
 hermes-onebot-adapter --no-webui              # 不启动 WebUI (仅 WS 服务)
 
@@ -129,13 +129,14 @@ hermes-onebot-adapter uninstall --hermes-dir /opt/hermes
 
 自动化 API 的安全约定与环境变量见 [运维](docs/ops.md#自动化工具-api)。
 
-## 三端口
+## 端口
 
 | 端口  | 用途 |
 |------|------|
 | 18800 | OneBot WS 服务端 `/onebot`（反向 WS 模式，OneBot 连接此端口；正向 WS 模式不使用）。远程 NapCat 用 `--onebot-host 0.0.0.0` |
 | 18810 | Hermes 插件 WS 服务端 `/hermes`（`Authorization: Bearer` 优先，仍接受 `?token=`；默认只绑回环） |
 | 18820 | WebUI + REST API + 健康检查 (`/api/v1/health`)（详见 [API 文档](docs/api.md)；默认只绑回环） |
+| 18830 | Cascade WS（默认关闭）：未 @ / 未命中关键词的群消息原样转给下游 bot。默认绑 `--host`，远程下游用 `--cascade-host 0.0.0.0` |
 
 ## OneBot 连接
 

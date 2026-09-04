@@ -17,7 +17,7 @@ import pytest
 from onebot_adapter.config import AdapterConfig
 from onebot_adapter.onebot import api as api_module
 from onebot_adapter.onebot.api import OneBotApi, UploadOutcomeUnknownError
-from onebot_adapter.onebot.log_format import PREVIEW_LOGGER_NAME
+from onebot_adapter.onebot.log_format import PREVIEW_LOGGER_NAME, configure_preview_logger
 from onebot_adapter.onebot.ws_api import WsApiTransport, bind_request_ws, reset_request_ws
 
 
@@ -25,6 +25,7 @@ def _make_ws() -> MagicMock:
     """Build a fake ws whose send_json is an AsyncMock recording frames."""
     ws = MagicMock()
     ws.send_json = AsyncMock()
+    ws.send_str = AsyncMock()
     return ws
 
 
@@ -101,7 +102,7 @@ async def test_request_timeout():
     with pytest.raises(TimeoutError):
         await t.request("get_login_info", {}, timeout=0.1)
     # pending 应该被清理
-    assert t._pending == {}
+    assert t._waiters == {}
 
 
 async def test_send_json_failure_raises_runtime_error():
@@ -112,7 +113,7 @@ async def test_send_json_failure_raises_runtime_error():
 
     with pytest.raises(RuntimeError, match="failed to send WS API frame"):
         await t.request("get_login_info", {})
-    assert t._pending == {}
+    assert t._waiters == {}
 
 
 async def test_send_json_failure_after_unregister_re_raises_connection_error():
@@ -158,7 +159,7 @@ async def test_send_json_failure_after_unregister_re_raises_connection_error():
 
     with pytest.raises(ConnectionError):
         await t.request("get_login_info", {})
-    assert t._pending == {}
+    assert t._waiters == {}
 
 
 # ── on_text interception ───────────────────────────────────────────────
@@ -169,17 +170,14 @@ async def test_on_text_intercepts_response_with_matching_echo():
     ws = _make_ws()
     t.register(ws)
 
-    # 同步发出一个请求：我们手动塞一个 future 到 pending 模拟在途请求
-    loop = asyncio.get_running_loop()
-    echo = "abc123"
-    fut = loop.create_future()
-    t._pending[echo] = fut
-
+    task = asyncio.create_task(t.request("get_login_info", {}, timeout=2))
+    await asyncio.sleep(0.01)
+    echo = ws.send_json.await_args.args[0]["echo"]
     raw = json.dumps({"retcode": 0, "data": {"ok": True}, "echo": echo})
     assert t.on_text(raw) is True
-    assert fut.done()
-    assert fut.result()["data"]["ok"] is True
-    assert echo not in t._pending
+    result = await asyncio.wait_for(task, timeout=1)
+    assert result["data"]["ok"] is True
+    assert echo not in t._waiters
 
 
 async def test_on_text_passes_through_event_frame():
@@ -209,6 +207,141 @@ async def test_on_text_non_dict_returns_false():
 async def test_on_text_empty_echo_returns_false():
     t = WsApiTransport()
     assert t.on_text(json.dumps({"retcode": 0, "data": {}, "echo": ""})) is False
+
+
+async def test_on_text_zero_echo_resolves_passthrough():
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    got: list[str] = []
+    await t.passthrough(json.dumps({"action": "get_status", "echo": 0}), got.append)
+    assert 0 in t._waiters
+    raw = json.dumps({"echo": 0, "retcode": 0, "data": {}})
+    assert t.on_text(raw) is True
+    assert got == [raw]
+    assert t._waiters == {}
+
+
+async def test_passthrough_rejects_duplicate_echo():
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    first: list[str] = []
+    second: list[str] = []
+    frame = json.dumps({"action": "get_status", "echo": "dup"})
+    await t.passthrough(frame, first.append)
+    await t.passthrough(frame, second.append)
+    assert ws.send_str.await_count == 1
+    assert json.loads(second[0])["retcode"] == -1
+    assert "already in flight" in json.loads(second[0])["msg"]
+    assert first == []
+    t.unregister(ws)
+
+
+async def test_passthrough_rejects_echo_colliding_with_request():
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    task = asyncio.create_task(t.request("get_login_info", {}, timeout=2))
+    await asyncio.sleep(0.01)
+    echo = ws.send_json.await_args.args[0]["echo"]
+    got: list[str] = []
+    await t.passthrough(json.dumps({"action": "get_status", "echo": echo}), got.append)
+    assert json.loads(got[0])["retcode"] == -1
+    assert ws.send_str.await_count == 0
+    t.unregister(ws)
+    with pytest.raises(ConnectionError):
+        await task
+
+
+async def test_passthrough_rejects_unhashable_echo():
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    got: list[str] = []
+    await t.passthrough(json.dumps({"action": "get_status", "echo": {"id": 1}}), got.append)
+    assert json.loads(got[0])["retcode"] == -1
+    assert "hashable" in json.loads(got[0])["msg"]
+    assert ws.send_str.await_count == 0
+    assert t._waiters == {}
+
+
+async def test_passthrough_times_out():
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    got: list[str] = []
+    await t.passthrough(
+        json.dumps({"action": "get_status", "echo": "slow"}),
+        got.append,
+        timeout=0.05,
+    )
+    await asyncio.sleep(0.15)
+    assert json.loads(got[0])["retcode"] == -1
+    assert "timed out" in json.loads(got[0])["msg"]
+    assert t._waiters == {}
+
+
+async def test_passthrough_rejects_when_inflight_cap_reached():
+    t = WsApiTransport(max_passthrough=2)
+    ws = _make_ws()
+    t.register(ws)
+    first: list[str] = []
+    second: list[str] = []
+    third: list[str] = []
+    await t.passthrough(json.dumps({"action": "get_status", "echo": "a"}), first.append)
+    await t.passthrough(json.dumps({"action": "get_status", "echo": "b"}), second.append)
+    await t.passthrough(json.dumps({"action": "get_status", "echo": "c"}), third.append)
+    assert ws.send_str.await_count == 2
+    assert json.loads(third[0])["retcode"] == -1
+    assert "too many" in json.loads(third[0])["msg"]
+    assert t.on_text(json.dumps({"echo": "a", "retcode": 0, "data": {}})) is True
+    fourth: list[str] = []
+    await t.passthrough(json.dumps({"action": "get_status", "echo": "d"}), fourth.append)
+    assert ws.send_str.await_count == 3
+    assert fourth == []
+    t.unregister(ws)
+
+
+async def test_passthrough_cap_ignores_adapter_request_waiters():
+    t = WsApiTransport(max_passthrough=1)
+    ws = _make_ws()
+    t.register(ws)
+    task = asyncio.create_task(t.request("get_login_info", {}, timeout=2))
+    await asyncio.sleep(0.01)
+    got: list[str] = []
+    await t.passthrough(json.dumps({"action": "get_status", "echo": "only"}), got.append)
+    assert ws.send_str.await_count == 1
+    assert got == []
+    t.unregister(ws)
+    with pytest.raises(ConnectionError):
+        await task
+
+
+async def test_passthrough_default_timeout_uses_upload_ceiling():
+    t = WsApiTransport(passthrough_timeout=0.05)
+    ws = _make_ws()
+    t.register(ws)
+    got: list[str] = []
+    await t.passthrough(json.dumps({"action": "upload_group_file", "echo": "up"}), got.append)
+    await asyncio.sleep(0.15)
+    assert json.loads(got[0])["retcode"] == -1
+    assert "timed out" in json.loads(got[0])["msg"]
+    assert t._waiters == {}
+
+
+async def test_drop_owner_none_leaves_request_waiters_intact():
+    t = WsApiTransport()
+    ws = _make_ws()
+    t.register(ws)
+    task = asyncio.create_task(t.request("get_login_info", {}, timeout=2))
+    await asyncio.sleep(0.01)
+    t.drop_owner(None)
+    assert len(t._waiters) == 1
+    echo = ws.send_json.await_args.args[0]["echo"]
+    assert t.on_text(json.dumps({"echo": echo, "retcode": 0, "data": {}})) is True
+    result = await asyncio.wait_for(task, timeout=1)
+    assert result["retcode"] == 0
 
 
 # ── multiple connections: pick first ───────────────────────────────────
@@ -279,7 +412,7 @@ async def test_unregister_rejects_only_that_ws_pending():
     if sent_frame is None:
         sent_frame = ws2.send_json.await_args.args[0]
         # 请求发给了 ws2 — 重映射以测试 ws1 的 reject 路径
-        t._echo_ws[sent_frame["echo"]] = ws1
+        t._waiters[sent_frame["echo"]].ws = ws1
     # 注销 ws1 → 该请求应被 reject
     t.unregister(ws1)
     with pytest.raises(ConnectionError):
@@ -681,12 +814,20 @@ async def test_api_send_logs_outbound_line(caplog):
     api = OneBotApi(ws_transport=t)
     api.configure_send_logging(config=AdapterConfig(log_message_preview=40, log_file_message_mode="none"))
 
+    preview = configure_preview_logger()
     with caplog.at_level(logging.INFO, logger=PREVIEW_LOGGER_NAME):
-        task = asyncio.create_task(api.send_group_msg(42, [{"type": "text", "data": {"text": "hello-outbound"}}]))
-        await asyncio.sleep(0.01)
-        frame = ws.send_json.await_args.args[0]
-        t.on_text(json.dumps({"retcode": 0, "data": {"message_id": 77}, "echo": frame["echo"]}))
-        await asyncio.wait_for(task, timeout=2)
+        # The preview logger never propagates, and pytest<9 attaches caplog's
+        # handler only to the root logger — attach it directly so this test
+        # captures standalone, not just after another test touched the logger.
+        preview.addHandler(caplog.handler)
+        try:
+            task = asyncio.create_task(api.send_group_msg(42, [{"type": "text", "data": {"text": "hello-outbound"}}]))
+            await asyncio.sleep(0.01)
+            frame = ws.send_json.await_args.args[0]
+            t.on_text(json.dumps({"retcode": 0, "data": {"message_id": 77}, "echo": frame["echo"]}))
+            await asyncio.wait_for(task, timeout=2)
+        finally:
+            preview.removeHandler(caplog.handler)
     assert "发送 ->" in caplog.text
     assert "hello-outbound" in caplog.text
     assert "message_id=77" in caplog.text
