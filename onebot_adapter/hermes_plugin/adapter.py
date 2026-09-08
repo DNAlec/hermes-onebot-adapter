@@ -108,6 +108,11 @@ except ImportError:
     cache_image_from_bytes = None  # type: ignore[assignment]
     cache_audio_from_bytes = None  # type: ignore[assignment]
 
+try:
+    from hermes_cli.commands import is_interrupt_then_dispatch
+except ImportError:
+    is_interrupt_then_dispatch = None  # type: ignore[assignment]
+
 _QQ_TEXT_LIMIT = 4500
 _RESULT_TIMEOUT = 30.0
 _DEFAULT_FILE_UPLOAD_TIMEOUT = 600.0
@@ -123,6 +128,47 @@ _RECONNECT_MAX_DELAY = 30.0
 # congestion (death spiral).  Limiting to 2 keeps retries orderly: one
 # in-flight + one retry max, matching the adapter-side semaphore.
 _MAX_INFLIGHT_SENDS = 2
+# Fallback when hermes_cli is not importable. Matches interrupt_then_dispatch.
+_INTERRUPT_COMMANDS = frozenset({"stop", "new", "reset"})
+
+
+def _slash_command_name(text: str) -> str | None:
+    stripped = text.lstrip()
+    if not stripped.startswith("/"):
+        return None
+    token = stripped.split(maxsplit=1)[0][1:].lower()
+    if "@" in token:
+        token = token.split("@", 1)[0]
+    if not token or "/" in token:
+        return None
+    return token
+
+
+def _event_command_name(event: Any) -> str | None:
+    getter = getattr(event, "get_command", None)
+    if callable(getter):
+        try:
+            cmd = getter()
+        except Exception:
+            cmd = None
+        if isinstance(cmd, str) and cmd:
+            return cmd
+    return _slash_command_name(str(getattr(event, "text", "") or ""))
+
+
+def _is_interrupt_command(command: str | None) -> bool:
+    if not command:
+        return False
+    if is_interrupt_then_dispatch is not None:
+        try:
+            return bool(is_interrupt_then_dispatch(command))
+        except Exception:
+            pass
+    return command in _INTERRUPT_COMMANDS
+
+
+def _outcome_is_cancelled(outcome: Any) -> bool:
+    return getattr(outcome, "name", None) == "CANCELLED"
 
 _PLUGIN_YAML_PATH = Path(__file__).parent / "plugin.yaml"
 _VERSION_RE = re.compile(r"^version:\s*[\"']?([^\"'\n#]+)[\"']?", re.MULTILINE)
@@ -457,6 +503,7 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._file_upload_timeout = _DEFAULT_FILE_UPLOAD_TIMEOUT
         self._plugin_version = _read_plugin_version()
         self._completed_deliveries: dict[str, None] = {}
+        self._idle_sends: dict[str, int] = {}
 
         # Inject self into onebot_tools so tool handlers can call _api_call
         try:
@@ -823,8 +870,9 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             "OneBot plugin → Hermes: chat_id=%s",
             message_event.source.chat_id,
         )
-        # 群聊排队:shared 群聊且 Hermes group_sessions_per_user=False 时,
-        # on_processing_complete 在 session 没有 pending/debounce 后续时发 idle。
+        # Shared-group idle: on_processing_complete when there is no
+        # pending/debounce follow-up; in-session /stop|/new|/reset also idle
+        # after handle_message if this chat has not already idled.
         # Dispatch handle_message as a background task so the receive loop is
         # NOT blocked.  Previously this was ``await self.handle_message(...)``
         # which deadlocked when handle_message hit the bypass-active-session
@@ -865,6 +913,8 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         retrieved".
         """
         token = _msg_context.set(msg_ctx)
+        chat_id = str(getattr(getattr(message_event, "source", None), "chat_id", "") or "")
+        idle_sends_before = self._idle_send_count(chat_id)
         try:
             await self.handle_message(message_event)
         except Exception as exc:
@@ -873,6 +923,10 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 level="error",
                 event="handle_message_failed",
                 message=f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            await self._maybe_fire_idle_after_interrupt_dispatch(
+                message_event, chat_id=chat_id, idle_sends_before=idle_sends_before
             )
         finally:
             _msg_context.reset(token)
@@ -919,15 +973,29 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                     await result
         except Exception:
             logger.debug("OneBot: super on_processing_complete failed", exc_info=True)
+        await self._maybe_fire_idle_from_event(event, outcome)
+
+    async def _maybe_fire_idle_after_interrupt_dispatch(
+        self, event: Any, *, chat_id: str, idle_sends_before: int
+    ) -> None:
+        """Idle after in-session /stop|/new|/reset if this chat did not already."""
+        if not _is_interrupt_command(_event_command_name(event)):
+            return
+        if self._session_is_busy(event):
+            return
+        if self._idle_send_count(chat_id) != idle_sends_before:
+            return
         await self._maybe_fire_idle_from_event(event)
 
-    async def _maybe_fire_idle_from_event(self, event: Any) -> None:
+    async def _maybe_fire_idle_from_event(self, event: Any, outcome: Any = None) -> None:
         source = getattr(event, "source", None)
         chat_id = str(getattr(source, "chat_id", "") or "")
-        text = str(getattr(event, "text", "") or "")
         if not chat_id.startswith("group:"):
             return
-        if text.lstrip().startswith("/"):
+        command = _event_command_name(event)
+        if _outcome_is_cancelled(outcome):
+            return
+        if command is not None and not _is_interrupt_command(command):
             return
         try:
             extra = getattr(self.config, "extra", None) or {}
@@ -967,6 +1035,16 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             logger.debug("OneBot: session key for idle check failed", exc_info=True)
             return ""
 
+    def _session_is_busy(self, event: Any) -> bool:
+        """True when Hermes still owns this session (follow-up or active guard)."""
+        if self._session_has_followup(event):
+            return True
+        session_key = self._session_key_for_event(event)
+        if not session_key:
+            return True
+        active = getattr(self, "_active_sessions", None)
+        return isinstance(active, dict) and session_key in active
+
     def _session_has_followup(self, event: Any) -> bool:
         """Return True when Hermes will start another turn for this session."""
         session_key = self._session_key_for_event(event)
@@ -993,9 +1071,26 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         gid = chat_id[len("group:"):]
         try:
             await ws.send_json({"type": "idle", "v": 1, "chat_id": chat_id, "group_id": gid})
-            logger.info("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
         except Exception:
             logger.warning("OneBot: idle frame send failed gid=%s", gid, exc_info=True)
+            return
+        self._note_idle_send(chat_id)
+        logger.info("OneBot: fired idle frame gid=%s chat_id=%s", gid, chat_id)
+
+    def _idle_send_count(self, chat_id: str) -> int:
+        counts = getattr(self, "_idle_sends", None)
+        if not isinstance(counts, dict) or not chat_id:
+            return 0
+        return int(counts.get(chat_id, 0))
+
+    def _note_idle_send(self, chat_id: str) -> None:
+        if not chat_id:
+            return
+        counts = getattr(self, "_idle_sends", None)
+        if not isinstance(counts, dict):
+            counts = {}
+            self._idle_sends = counts
+        counts[chat_id] = counts.get(chat_id, 0) + 1
 
     async def _send_duplicate_idle(self, data: dict[str, Any]) -> None:
         """Release a replay-created busy slot when a delivery was already done."""

@@ -125,13 +125,13 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 | Hermes 隔离群成员（per_user=True） | 直接转发，不排队 |
 | 适配器排队总开关关闭 | 直接转发，不排队 |
 | 群未 busy | 标记 busy，转发 |
-| 群 busy，发送者相同且队列为空 | 直接转发（刷新 busy 时间戳，不入队；仍算同一 Hermes session） |
-| 群 busy（其他情况） | 入队等待（含 busy 用户自身；队列非空时 busy 用户也不能插队）；出队时连续同用户消息合并为一条 |
-| `/new`、`/reset` | 绕过排队发给 Hermes；默认同时清空当前群待处理队列（不释放 busy） |
+| 群 busy，发送者相同且队列为空，且不在 interrupt hold 内 | 直接转发（刷新 busy 时间戳，不入队；仍算同一 Hermes session） |
+| 群 busy（其他情况，含 `/stop`/`/new`/`/reset` hold 期间的跟手消息） | 入队等待（含 busy 用户自身；队列非空时 busy 用户也不能插队）；出队时连续同用户消息合并为一条 |
+| `/stop`、`/new`、`/reset` | 绕过排队发给 Hermes，并对当前群加 interrupt hold（禁止同用户直推，直到 idle）；`/new`/`/reset` 默认同时清空当前群待处理队列（不释放 busy） |
 | `/clean` | 默认由适配器本地清空当前群待处理队列**并释放 busy**，不发送给 Hermes |
 | 其他 `/` 开头的消息 | **始终直接转发**（绕过排队） |
 
-所有 `/` 指令都不占用适配器的 busy 槽，也不会注册用于释放 busy 槽的 idle 回调；它们不会扰动正在处理的普通群消息及其排队顺序。
+`/` 指令绕过排队直接转发，不占用新的 busy 槽。普通 slash 命令不发 idle；`/stop`/`/new`/`/reset` 加 interrupt hold，并在 session 空闲后发 idle 以释放 busy。
 
 ### Hermes 会话隔离配置
 
@@ -139,9 +139,9 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 ### idle 信号
 
-处理完成的 idle 信号由 Hermes 插件在 `on_processing_complete` 中发送：仅当 shared 群聊 session 没有 pending/debounce 后续时发 `idle` 帧；适配器把它当作 **session 空闲**并出队下一条。同一发送者在 busy 且队列为空时仍直推（喂给当前 Hermes session 的 redirect/steer/pending），但不再按直推次数等待多帧 idle。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
+处理完成的 idle 信号由 Hermes 插件发送：hook 路径在 `on_processing_complete`（无 pending/debounce、非 cancelled）；in-session `/stop`/`/new`/`/reset` 在 `handle_message` 返回后若本群尚未发过 idle 则补发。适配器把它当作 **session 空闲**并出队下一条。同一发送者在 busy 且队列为空、且不在 interrupt hold 内时仍直推（喂给当前 Hermes session 的 redirect/steer/pending），但不再按直推次数等待多帧 idle。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
 
-`/stop`、`/new`、`/reset` 命令会导致 Hermes 中断当前 turn 但**不触发 idle 帧**，适配器会在 broadcast 这些命令 3 秒后主动清空 busy 槽防止队列卡死（识别 busy 代数，不受 bot 发送刷新时间戳影响）。`/stop` 只中断 Hermes 任务：若网关已经空闲（回复「没有可停止的活跃任务」），适配器 busy 不会因此解开。
+`/stop`、`/new`、`/reset` 在 session 空闲后发 idle（含 in-session 中断路径），适配器任意 idle 即释放 hold 并出队。旧插件不发 idle 时由看门狗超时兜底。
 
 默认情况下，`/new` 和 `/reset` 还会立即丢弃当前群尚未处理的排队消息，但**不**释放 busy；`/clean` 清空队列并释放 busy，可在排队卡死时手动解堵，且不发送给 Hermes。`/new`/`/reset` 的队列清理不会中断当前正在执行的 turn。
 

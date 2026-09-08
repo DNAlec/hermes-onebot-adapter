@@ -6,6 +6,7 @@
 - Cascade WS（`cascade_ws_enabled`，默认关闭，端口 `18830`）：把未 @bot / 未命中关键词的群消息原样转给下游 bot，并把下游发来的 JSON 原样写回 OneBot。已关闭的群、以及匹配成功后因黑名单、用户过滤、限流、指令权限等未进 Hermes 的消息不转发。同一时刻只接受一个下游客户端（新连接替换旧连接）。CLI `--cascade-host` 未指定时跟随 `--host`（不跟随 `--onebot-host`）
 
 ### 修复
+- `/stop`/`/new`/`/reset`：插件在 session 真正空闲后发 idle（in-session 走 `_dispatch_active_session_command` 的路径也会发）；cancelled turn 不发 idle；同一 `chat_id` 上 dying turn 的 SUCCESS idle 与 interrupt-dispatch idle 合并为一次。适配器 hold 只挡住 same-user bypass，任意 idle 即释放；刷新 busy 时间戳以免看门狗立刻出队。旧插件不发 idle 时由看门狗超时兜底。避免 ⚡ Interrupting 后无回复、后续消息卡在 Hermes pending
 - Cascade 出站不再在 OneBot 事件 worker 上 await 下游 `send_str`（卡住的下游不会堵住 Hermes）
 - Cascade API echo 绑到实际发出请求的那条 OneBot 连接；该连接断开时立即失败，不再等全部 OneBot 掉线
 - 下游连上且 OneBot 已在线时，仅当 `cascade_forward_meta` 开启才补发 `lifecycle/connect`（与心跳/lifecycle 转发同一开关）；热更新关闭串联后拒绝新握手（503）且已有连接的入站 API 失败
@@ -16,9 +17,13 @@
 - Cascade 客户端断开时取消出站 worker（队列满时不再依赖 sentinel）；`broadcast_raw` 仅在实际入队后记「转发」
 - `message_preview` logger 的 `propagate=False` 改为 import 时生效（原先首条日志才设置）；`test_api_send_logs_outbound_line` 显式挂 caplog handler，单跑不再依赖其他测试先配置 preview logger
 
+### 升级说明
+- `/stop` idle 协议有变：需重装随包 Hermes 插件并重启网关，被中断 turn 才不会提前出队
+
 ### 文档
 - 新增 Windows / WSL2 部署教程（`docs/wsl.md`）：适配器与 Hermes 装在 WSL，NapCat 留在 Windows 走反向 WS
 - README 改为安装/连接入口；WebUI、聊天过滤、运维说明拆到 `docs/webui.md` / `docs/chat.md` / `docs/ops.md`
+- 排队规则表与 idle 说明对齐 interrupt hold：`/stop`/`/new`/`/reset` 后同用户跟手消息入队，直到 idle；插件 idle 含 hook 与 in-session 补发两条路径
 
 ## [1.8.0] - 2026-09-02
 
