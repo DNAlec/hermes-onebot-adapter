@@ -6,8 +6,8 @@
 
 测试覆盖:
 - DM 直接放行 / per_user=True 不排队 / event_queue_enabled=False 不排队
-- shared 群聊 busy 时:同用户且队列空则直接广播;否则入队(含 busy 用户,队列非空时不插队)
-- 同一发送者直推仍算同一 session,一帧 idle 即可出队
+- shared 群聊 busy 时:同用户且队列空且不在 interrupt hold 内则直接广播;否则入队(含 busy 用户,队列非空时不插队)
+- 同一发送者直推仍算同一 session,一帧 idle 即可出队;/stop hold 禁止直推
 - 连续同用户消息出队时合并为一条
 - /命令绕过排队
 - idle 帧 dequeue + dispatch
@@ -156,7 +156,6 @@ async def test_shared_group_busy_same_user_empty_queue_bypasses():
     assert "42" in relay._busy_groups
     assert relay._busy_groups["42"][0] == "100"
     assert relay._busy_groups["42"][1] > since - 10
-    assert relay._busy_epoch["42"] == 1
 
 
 async def test_same_user_bypass_idle_releases_session():
@@ -166,7 +165,6 @@ async def test_same_user_bypass_idle_releases_session():
     await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
     await relay._enqueue_or_broadcast(_group_event("followup", gid="42", uid="100", mid="2"))
     await relay._enqueue_or_broadcast(_group_event("other", gid="42", uid="200", mid="3"))
-    assert relay._busy_epoch["42"] == 1
     assert [e.user_id for e in relay._queues["42"]] == ["200"]
 
     await relay._handle_idle({"group_id": "42"})
@@ -392,71 +390,99 @@ async def test_idle_frame_without_group_id_or_chat_id_is_ignored():
     relay._broadcast_event.assert_not_awaited()
 
 
-# ── /stop idle 丢失补救 ──────────────────────────────────────────────────
+# ── /stop interrupt hold ──────────────────────────────────────────────────
 
 
-async def test_stop_command_triggers_delayed_cleanup():
-    """/stop 命令 broadcast 后 3s 内无 idle → delayed cleanup 清 busy 并 dequeue。"""
-    relay, _, _ = _make_relay()
-    relay._broadcast_event = AsyncMock()
-    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
-    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
-    # Broadcast /stop — should trigger delayed cleanup
-    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
-    assert relay._broadcast_event.await_count == 2  # msg1 + /stop
-    assert "42" in relay._busy_groups
-    # Wait for delayed cleanup
-    await asyncio.sleep(3.5)
-    await asyncio.sleep(0)
-    assert relay._broadcast_event.await_count == 3  # msg2 dequeued
-    assert relay._busy_groups["42"][0] == "200"
-    assert "42" not in relay._queues
-
-
-async def test_stop_cleanup_noop_if_idle_arrives_first():
-    """idle 先到时 delayed cleanup 是 no-op。"""
+async def test_stop_idle_releases_hold_immediately():
+    """/stop 后任意 idle 立即出队。"""
     relay, _, _ = _make_relay()
     relay._broadcast_event = AsyncMock()
     await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
     await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
     await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
-    # Simulate idle arriving (gateway did fire post_delivery)
     await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
-    await asyncio.sleep(0)
-    # Delayed cleanup should be a no-op — the msg2 was already dequeued
-    assert relay._broadcast_event.await_count == 3  # msg1 + /stop + msg2(dequeued)
-    assert relay._busy_groups["42"][0] == "200"
-    assert "42" not in relay._queues
-    # Wait past the cleanup delay — should not double-dequeue
-    await asyncio.sleep(3.5)
-    await asyncio.sleep(0)
-    assert relay._broadcast_event.await_count == 3  # still 3, no extra dequeue
-
-
-async def test_stop_cleanup_still_runs_after_busy_timestamp_refresh():
-    """A send that refreshes busy timestamp must not cancel delayed /stop cleanup."""
-    relay, _, _ = _make_relay()
-    relay._STOP_IDLE_DELAY = 0.05
-    relay._broadcast_event = AsyncMock()
-    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
-    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
-    epoch = relay._busy_epoch["42"]
-    busy_user, _ = relay._busy_groups["42"]
-    await relay._touch_busy_group("group:42", True)
-    assert relay._busy_groups["42"][0] == busy_user
-    assert relay._busy_epoch["42"] == epoch
-    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
-    await asyncio.sleep(0.2)
     await asyncio.sleep(0)
     assert relay._broadcast_event.await_count == 3
     assert relay._busy_groups["42"][0] == "200"
+    assert "42" not in relay._queues
+    assert "42" not in relay._interrupt_hold
+
+
+async def test_stop_then_new_hold_until_idle():
+    """连续中断仍 hold,直到 idle 才出队。"""
+    relay, _, _ = _make_relay(event_queue_clear_on_session_reset=False)
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
+    await relay._enqueue_or_broadcast(_group_event("/new", gid="42", uid="100", mid="4"))
+    assert "42" in relay._interrupt_hold
+    assert relay._broadcast_event.await_count == 3  # msg1 + /stop + /new
+    assert relay._busy_groups["42"][0] == "100"
+    assert len(relay._queues["42"]) == 1
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 4
+    assert relay._busy_groups["42"][0] == "200"
+
+
+async def test_stop_refreshes_busy_so_watchdog_does_not_fire_immediately():
+    """卡住 turn 上的 /stop 刷新时间戳,看门狗不会立刻出队。"""
+    relay, _, _ = _make_relay(event_queue_idle_timeout=0.05)
+    relay._WATCHDOG_INTERVAL = 0.02
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    busy_user, _ = relay._busy_groups["42"]
+    relay._busy_groups["42"] = (busy_user, time.monotonic() - 100)
+    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
+    await asyncio.sleep(0.03)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 2
+    assert relay._busy_groups["42"][0] == "100"
+    if relay._watchdog_task is not None:
+        relay._watchdog_task.cancel()
+
+
+async def test_watchdog_dequeues_after_stop_if_idle_never_arrives():
+    """旧插件不发 idle 时,看门狗仍能在超时后出队。"""
+    relay, _, _ = _make_relay(event_queue_idle_timeout=1.0)
+    relay._WATCHDOG_INTERVAL = 0.02
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
+    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="3"))
+    busy_user, _ = relay._busy_groups["42"]
+    relay._busy_groups["42"] = (busy_user, time.monotonic() - 100)
+    await asyncio.sleep(0.08)
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 3
+    assert relay._busy_groups["42"][0] == "200"
+    if relay._watchdog_task is not None:
+        relay._watchdog_task.cancel()
+
+
+async def test_stop_hold_queues_same_user_instead_of_bypass():
+    """interrupt hold 内 busy 用户跟手消息入队,避免落到 Hermes pending。"""
+    relay, _, _ = _make_relay()
+    relay._broadcast_event = AsyncMock()
+    await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
+    await relay._enqueue_or_broadcast(_group_event("/stop", gid="42", uid="100", mid="2"))
+    result = await relay._enqueue_or_broadcast(
+        _group_event("continue", gid="42", uid="100", mid="3")
+    )
+    assert result == "queued"
+    assert relay._broadcast_event.await_count == 2  # msg1 + /stop
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
+    await asyncio.sleep(0)
+    assert relay._broadcast_event.await_count == 3
+    assert relay._broadcast_event.call_args_list[-1][0][0].text == "continue"
 
 
 async def test_new_and_reset_commands_clear_pending_queue_by_default():
     """/new 和 /reset 默认丢弃当前群待处理消息,命令本身仍转发 Hermes。"""
     for cmd in ("/new", "/reset"):
         relay, _, _ = _make_relay()
-        relay._STOP_IDLE_DELAY = 0.01
         relay._broadcast_event = AsyncMock()
         await relay.push_event(_group_event("msg1", gid="42", uid="100", mid="1"))
         await relay.push_event(_group_event("msg2", gid="42", uid="200", mid="2"))
@@ -469,14 +495,11 @@ async def test_new_and_reset_commands_clear_pending_queue_by_default():
         assert relay._broadcast_event.await_count == 2
         assert "42" not in relay._queues
         assert [entry[1].text for entry in relay._ring_buffer] == ["msg1"]
-        await asyncio.sleep(0.02)
-        await asyncio.sleep(0)
         assert relay._broadcast_event.await_count == 2
 
 
 async def test_session_reset_queue_clear_can_be_disabled():
     relay, _, _ = _make_relay(event_queue_clear_on_session_reset=False)
-    relay._STOP_IDLE_DELAY = 0.01
     relay._broadcast_event = AsyncMock()
     await relay._enqueue_or_broadcast(_group_event("msg1", gid="42", uid="100", mid="1"))
     await relay._enqueue_or_broadcast(_group_event("msg2", gid="42", uid="200", mid="2"))
@@ -484,7 +507,7 @@ async def test_session_reset_queue_clear_can_be_disabled():
     await relay._enqueue_or_broadcast(_group_event("/new", gid="42", uid="100", mid="3"))
 
     assert len(relay._queues["42"]) == 1
-    await asyncio.sleep(0.02)
+    await relay._handle_idle({"type": "idle", "group_id": "42", "chat_id": "group:42"})
     await asyncio.sleep(0)
     assert relay._broadcast_event.await_count == 3
     assert relay._broadcast_event.call_args_list[-1][0][0].text == "msg2"
@@ -700,6 +723,7 @@ def test_idle_message_shape():
     assert msg["v"] == 1
     assert msg["chat_id"] == "group:42"
     assert msg["group_id"] == "42"
+    assert "command" not in msg
 
 
 # ── Regression tests for queue-loss robustness fixes ────────────────────

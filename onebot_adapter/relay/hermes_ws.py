@@ -120,12 +120,8 @@ class HermesRelayServer:
     _RING_BUFFER_SIZE = 50
     _RING_BUFFER_MAX_AGE = 30.0  # seconds; skip older events on replay
     _WATCHDOG_INTERVAL = 30.0    # seconds between busy-timeout sweeps
-    _STOP_IDLE_DELAY = 3.0      # seconds to wait after /stop before force-clearing busy
-    # Hermes gateway built-in commands that interrupt an in-flight turn by
-    # bumping the session generation, causing the stale run's idle callback
-    # to be popped without firing.  Hardcoded because they are gateway
-    # internals, not plugin commands — the ``commands_snapshot`` registry
-    # only carries plugin/builtin slash commands, not generation-bumping ones.
+    # Gateway interrupt_then_dispatch builtins. Hardcoded — they are not in
+    # the plugin ``commands_snapshot`` registry.
     _INTERRUPT_COMMANDS = frozenset({"stop", "new", "reset"})
     _SESSION_RESET_COMMANDS = frozenset({"new", "reset"})
     # Max concurrent OneBot API send calls (send_group_msg / upload_*_file).
@@ -191,11 +187,8 @@ class HermesRelayServer:
         # 排队生效条件:per_user=False AND config.event_queue_enabled=True
         self._hermes_group_sessions_per_user: bool = True
         self._busy_groups: dict[str, tuple[str, float]] = {}
-        # Incremented when a group claims or is handed a new busy slot.
-        # Send-path timestamp refresh must not change this; /stop delayed
-        # cleanup uses (user_id, epoch) so a "stopped" confirmation cannot
-        # cancel the force-clear.
-        self._busy_epoch: dict[str, int] = {}
+        # After /stop|/new|/reset: suppress same-user bypass until idle.
+        self._interrupt_hold: set[str] = set()
         self._queues: dict[str, deque[NormalizedEvent]] = {}
         self._group_locks: dict[str, asyncio.Lock] = {}
         self._event_push_lock = asyncio.Lock()
@@ -231,9 +224,7 @@ class HermesRelayServer:
                     "relay: event_queue_enabled disabled, clearing %d busy group(s)",
                     len(self._busy_groups),
                 )
-            self._busy_groups.clear()
-            self._busy_epoch.clear()
-            self._queues.clear()
+            self._clear_queue_state()
         # 插件运行时配置变化:广播 fresh ready 让插件实时切换。
         # broadcast_self_id 复用 ready 帧机制,这里用新 config 广播。
         self._config = config
@@ -316,9 +307,7 @@ class HermesRelayServer:
                         "relay: per_user became True, clearing %d busy group(s)",
                         len(self._busy_groups),
                     )
-                self._busy_groups.clear()
-                self._busy_epoch.clear()
-                self._queues.clear()
+                self._clear_queue_state()
 
     def _store_plugin_version(self, plugin_version: str) -> None:
         """缓存插件上报的版本号并比对。"""
@@ -398,9 +387,7 @@ class HermesRelayServer:
             except Exception:
                 logger.warning("relay: watchdog task raised on cancel", exc_info=True)
             self._watchdog_task = None
-        self._busy_groups.clear()
-        self._busy_epoch.clear()
-        self._queues.clear()
+        self._clear_queue_state()
 
     async def broadcast_commands_refresh(self) -> None:
         """Send a ``commands_refresh`` frame to every connected plugin client,
@@ -522,9 +509,7 @@ class HermesRelayServer:
                         "relay: last plugin disconnected, clearing %d busy group(s)",
                         len(self._busy_groups),
                     )
-                self._busy_groups.clear()
-                self._busy_epoch.clear()
-                self._queues.clear()
+                self._clear_queue_state()
                 self._plugin_version = None
                 self._version_mismatch = True
                 self._latest_plugin_status = None
@@ -575,9 +560,10 @@ class HermesRelayServer:
         - 非 /命令(/命令绕过排队,与 ring buffer 同思路)
 
         排队规则:群未 busy → 标记 busy 并广播;群 busy 时若发送者就是
-        当前 busy 用户且队列为空 → 直接广播(刷新 busy 时间戳,不入队,
-        仍算同一 session);否则一律入队 FIFO(含 busy 用户自身,避免插队)。
-        idle 表示该群 Hermes session 已空闲,一帧即可出队。
+        当前 busy 用户且队列为空且不在 interrupt hold 内 → 直接广播
+        (刷新 busy 时间戳,不入队,仍算同一 session);否则一律入队 FIFO
+        (含 busy 用户自身,避免插队)。idle 表示该群 Hermes session 已空闲,
+        一帧即可出队; interrupt hold 只挡住 same-user bypass,任意 idle 释放。
 
         Returns ``"broadcast"``, ``"queued"``, ``"handled"`` or ``"dropped"`` (see push_event).
         """
@@ -607,22 +593,7 @@ class HermesRelayServer:
                 and self._config.event_queue_clear_on_session_reset
             ):
                 await self._clear_group_queue(gid)
-            busy_user = None
-            busy_epoch = None
-            async with self._get_group_lock(gid):
-                busy = self._busy_groups.get(gid)
-                if busy is not None:
-                    busy_user = busy[0]
-                    busy_epoch = self._busy_epoch.get(gid)
-            result = await self._broadcast_with_status(event)
-            if result == "broadcast" and command in self._INTERRUPT_COMMANDS and busy_user is not None:
-                task = asyncio.create_task(
-                    self._delayed_stop_cleanup(gid, busy_user, busy_epoch)
-                )
-                self._text_tasks.add(task)
-                task.add_done_callback(self._text_tasks.discard)
-                task.add_done_callback(_log_task_exception)
-            return result
+            return await self._broadcast_slash_command(event, gid, command)
         # Hermes 隔离群成员 或 适配器总开关关 → 不排队
         if self._hermes_group_sessions_per_user or not self._config.event_queue_enabled:
             return await self._broadcast_with_status(event)
@@ -638,19 +609,20 @@ class HermesRelayServer:
                     # No client received the event — roll back the busy claim so
                     # the next message (or reconnect replay) can try again.
                     self._busy_groups.pop(gid, None)
-                    self._busy_epoch.pop(gid, None)
+                    self._clear_interrupt_hold(gid)
                     self._schedule_group_lock_cleanup(gid)
                 return result
             # Group busy.
             busy_user_id, _ = busy
             q = self._queues.get(gid)
-            if event.user_id == busy_user_id and not q:
-                # Same sender, nothing waiting: deliver now instead of
-                # queueing behind the in-flight turn.  Refresh the busy
-                # timestamp so the watchdog follows the latest follow-up.
-                # This is still the same Hermes session (redirect/steer/pending
-                # drain), so do not treat it as a second turn — one idle
-                # frame means the session is free.
+            if (
+                event.user_id == busy_user_id
+                and not q
+                and not self._interrupt_hold_active(gid)
+            ):
+                # Same sender, nothing waiting: still the in-flight session.
+                # Hold suppresses this so a follow-up cannot land in Hermes
+                # pending while /stop|/new|/reset is draining.
                 self._busy_groups[gid] = (busy_user_id, time.monotonic())
                 logger.info(
                     "relay same-user bypass: gid=%s busy_user=%s delivery_id=%s text_len=%d",
@@ -688,10 +660,26 @@ class HermesRelayServer:
         delivered = await self._broadcast_event(event)
         return "dropped" if delivered is False else "broadcast"
 
+    async def _broadcast_slash_command(
+        self, event: NormalizedEvent, gid: str, command: str | None
+    ) -> str:
+        """Broadcast a slash command, arming interrupt hold when needed."""
+        armed = False
+        async with self._get_group_lock(gid):
+            busy = self._busy_groups.get(gid)
+            if busy is not None and command is not None and command in self._INTERRUPT_COMMANDS:
+                self._begin_interrupt_hold(gid)
+                armed = True
+        result = await self._broadcast_with_status(event)
+        if armed and result != "broadcast":
+            async with self._get_group_lock(gid):
+                self._clear_interrupt_hold(gid)
+        return result
+
     def _get_group_lock(self, gid: str) -> asyncio.Lock:
         """Get or create a per-group lock for queue state protection.
 
-        Serialises access to ``_busy_groups`` / ``_busy_epoch`` and ``_queues``
+        Serialises access to ``_busy_groups`` and ``_queues``
         for a single group so that ``_enqueue_or_broadcast``, ``_handle_idle``,
         and the watchdog cannot interleave on the same group.
         """
@@ -709,6 +697,7 @@ class HermesRelayServer:
                 lock is not None
                 and not lock.locked()
                 and gid not in self._busy_groups
+                and gid not in self._interrupt_hold
                 and not self._queues.get(gid)
             ):
                 self._group_locks.pop(gid, None)
@@ -768,17 +757,34 @@ class HermesRelayServer:
         self._schedule_group_lock_cleanup(gid)
         return len(queued)
 
+    def _clear_queue_state(self) -> None:
+        self._busy_groups.clear()
+        self._interrupt_hold.clear()
+        self._queues.clear()
+
     def _claim_busy(self, gid: str, user_id: str) -> None:
-        """Mark *gid* busy for *user_id* and bump the slot epoch."""
+        """Mark *gid* busy for *user_id*."""
         self._busy_groups[gid] = (user_id, time.monotonic())
-        self._busy_epoch[gid] = self._busy_epoch.get(gid, 0) + 1
+
+    def _begin_interrupt_hold(self, gid: str) -> None:
+        """Suppress same-user bypass until idle; refresh busy so watchdog waits."""
+        self._interrupt_hold.add(gid)
+        busy = self._busy_groups.get(gid)
+        if busy is not None:
+            self._busy_groups[gid] = (busy[0], time.monotonic())
+
+    def _interrupt_hold_active(self, gid: str) -> bool:
+        return gid in self._interrupt_hold
+
+    def _clear_interrupt_hold(self, gid: str) -> None:
+        self._interrupt_hold.discard(gid)
 
     async def _release_group_busy(self, gid: str) -> bool:
         """Drop the busy slot for *gid* without dispatching the next queued event."""
         async with self._get_group_lock(gid):
             released = gid in self._busy_groups
             self._busy_groups.pop(gid, None)
-            self._busy_epoch.pop(gid, None)
+            self._clear_interrupt_hold(gid)
         self._schedule_group_lock_cleanup(gid)
         return released
 
@@ -837,13 +843,13 @@ class HermesRelayServer:
         buffer replays the recent events from scratch.
         """
         self._busy_groups.pop(gid, None)
+        self._clear_interrupt_hold(gid)
         if not self._clients:
             # No plugin connected — leave the queue in place; the watchdog
             # will retry on its next sweep once a plugin reconnects.
             return
         q = self._queues.get(gid)
         if not q:
-            self._busy_epoch.pop(gid, None)
             if q is not None:
                 self._queues.pop(gid, None)
             return
@@ -899,7 +905,7 @@ class HermesRelayServer:
                     current = self._busy_groups.get(gid)
                     if current and current[0] == nxt.user_id:
                         self._busy_groups.pop(gid, None)
-                        self._busy_epoch.pop(gid, None)
+                        self._clear_interrupt_hold(gid)
                 self._schedule_group_lock_cleanup(gid)
 
         task = asyncio.create_task(_dispatch_nxt())
@@ -911,52 +917,12 @@ class HermesRelayServer:
             gid, len(self._queues.get(gid, ())), nxt.user_id, merged_count, nxt.delivery_ids, len(nxt.text or ""),
         )
 
-    async def _delayed_stop_cleanup(
-        self, gid: str, busy_user: str, busy_epoch: int | None
-    ) -> None:
-        """Force-clear a busy slot if the gateway does not fire an idle frame
-        within ``_STOP_IDLE_DELAY`` seconds after an interrupting command
-        (``/stop``, ``/new``, ``/reset``).
-
-        Hermes bumps the session generation when these commands interrupt an
-        in-flight turn, which causes the stale run's ``post_delivery_callback``
-        to be popped *without* firing (see gateway ``run.py:11099-11112``).
-        Without the idle frame the adapter's busy slot is never cleared and
-        the queue stalls permanently — the watchdog eventually handles it
-        after ``event_queue_idle_timeout`` (default 300 s), but that is far
-        too long for interactive use.
-
-        Identity is ``(busy_user, epoch)``, not the busy timestamp.  A bot
-        ``send`` (including the "/stop" confirmation) refreshes the
-        timestamp via ``_touch_busy_group`` and must not cancel this cleanup.
-
-        This method runs after a short delay.  If the gateway *does* fire
-        idle in the meantime, ``_handle_idle`` dequeues first (new epoch or
-        no busy slot) and this is a no-op.  The per-group lock prevents the
-        two from racing on ``_dequeue_and_dispatch``.
-        """
-        await asyncio.sleep(self._STOP_IDLE_DELAY)
-        async with self._get_group_lock(gid):
-            busy = self._busy_groups.get(gid)
-            if (
-                busy is None
-                or busy[0] != busy_user
-                or self._busy_epoch.get(gid) != busy_epoch
-            ):
-                return
-            logger.info(
-                "relay stop cleanup: gid=%s — no idle after /stop, force-clearing",
-                gid,
-            )
-            self._dequeue_and_dispatch(gid)
-        self._schedule_group_lock_cleanup(gid)
-
     async def _handle_idle(self, data: dict[str, Any]) -> None:
         """Handle an ``idle`` frame from the Hermes plugin.
 
-        The plugin fires this from ``on_processing_complete`` when a
-        shared-group session has no pending/debounce follow-up left.  Treat
-        it as session-idle: clear busy and dispatch the next queued message.
+        The plugin fires this when a shared-group session has no
+        pending/debounce follow-up left.  Treat it as session-idle: clear
+        busy and dispatch the next queued message (also clears interrupt hold).
         """
         gid = str(data.get("group_id", ""))
         if not gid:
@@ -1036,9 +1002,7 @@ class HermesRelayServer:
     async def _replay_ring_buffer_locked(self, ws: aiohttp.web.WebSocketResponse) -> bool:
         # Clear any leftover queue state from the previous (now-dead) session
         # so the replay rebuilds busy/queue state cleanly from the buffer.
-        self._busy_groups.clear()
-        self._busy_epoch.clear()
-        self._queues.clear()
+        self._clear_queue_state()
         now = time.monotonic()
         cutoff = now - self._RING_BUFFER_MAX_AGE
         # Snapshot before any concurrent push can append; entries added after
