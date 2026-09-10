@@ -139,9 +139,9 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 ### idle 信号
 
-处理完成的 idle 信号由 Hermes 插件发送：hook 路径在 `on_processing_complete`（无 pending/debounce、非 cancelled）；in-session `/stop`/`/new`/`/reset` 在 `handle_message` 返回后若本群尚未发过 idle 则补发。适配器把它当作 **session 空闲**并出队下一条。同一发送者在 busy 且队列为空、且不在 interrupt hold 内时仍直推（喂给当前 Hermes session 的 redirect/steer/pending），但不再按直推次数等待多帧 idle。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
+处理完成的 idle 信号由 Hermes 插件发送：hook 路径在 `on_processing_complete`（无 pending/debounce、非 cancelled）；in-session `/stop`/`/new`/`/reset` 会挡住被中断 turn 的 SUCCESS idle，直到 `handle_message` 返回后再补发（本群尚未发过 idle 时）。适配器把它当作 **session 空闲**并出队下一条。同一发送者在 busy 且队列为空、且不在 interrupt hold 内时仍直推（喂给当前 Hermes session 的 redirect/steer/pending），但不再按直推次数等待多帧 idle。若插件崩溃或 idle 帧丢失，看门狗会在超时后强制清空 busy。
 
-`/stop`、`/new`、`/reset` 在 session 空闲后发 idle（含 in-session 中断路径），适配器任意 idle 即释放 hold 并出队。旧插件不发 idle 时由看门狗超时兜底。
+`/stop`、`/new`、`/reset` 在 session 空闲后发 idle（含 in-session 中断路径），适配器任意 idle 即释放 hold 并出队。被中断 turn 若在 `/stop` 尚未结束时就发 idle，下一条排队消息会撞上 Hermes 的 stale session lock 被吞掉，队列表现为卡住直到 `/new`/`/clean`。旧插件不发 idle 时由看门狗超时兜底。
 
 默认情况下，`/new` 和 `/reset` 还会立即丢弃当前群尚未处理的排队消息，但**不**释放 busy；`/clean` 清空队列并释放 busy，可在排队卡死时手动解堵，且不发送给 Hermes。`/new`/`/reset` 的队列清理不会中断当前正在执行的 turn。
 

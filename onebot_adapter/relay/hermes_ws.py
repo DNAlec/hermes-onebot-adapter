@@ -943,7 +943,11 @@ class HermesRelayServer:
             if gid not in self._busy_groups:
                 logger.info("relay idle for non-busy gid=%s (already cleared by watchdog/replay/disconnect)", gid)
                 return
-            logger.info("relay idle: gid=%s — dispatching next queued", gid)
+            logger.info(
+                "relay idle: gid=%s hold=%s — dispatching next queued",
+                gid,
+                gid in self._interrupt_hold,
+            )
             self._dequeue_and_dispatch(gid)
         self._schedule_group_lock_cleanup(gid)
 
