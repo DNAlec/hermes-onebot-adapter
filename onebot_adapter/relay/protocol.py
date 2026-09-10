@@ -258,7 +258,11 @@ def idle_message(chat_id: str, group_id: str) -> dict[str, Any]:
     """P->A: Hermes plugin -> adapter service.  Plugin fires this when a
     shared-group session is actually idle (no pending/debounce follow-up,
     cancelled turns do not send idle).  Other slash commands do not send
-    idle; ``/stop``/``/new``/``/reset`` do once the session is free.
+    idle; ``/stop``/``/new``/``/reset`` do once ``handle_message`` returns
+    and the session is free.  A dying turn's SUCCESS hook during an
+    in-flight interrupt command must not idle, or the adapter will dequeue
+    into Hermes while ``_dispatch_active_session_command`` still owns the
+    session.
 
     ``chat_id`` is the original event chat_id (``group:<gid>`` form, no
     ``:user:`` suffix — only shared groups send idle).  ``group_id`` is the

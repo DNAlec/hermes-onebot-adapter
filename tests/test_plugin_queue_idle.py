@@ -161,6 +161,35 @@ async def test_interrupt_dispatch_skips_idle_when_hook_already_sent():
     assert adapter._ws.send_json.await_count == 1
 
 
+async def test_dying_turn_idle_during_stop_is_deferred_until_dispatch_finishes():
+    """Dying-turn SUCCESS during /stop must not idle until handle_message returns.
+
+    Otherwise the adapter dequeues the next queued group message while
+    ``_dispatch_active_session_command`` still owns the session; Hermes then
+    heals a stale lock, swallows that message, and the adapter busy slot
+    never receives idle.
+    """
+    adapter = _make_adapter()
+    adapter._session_key_for_event = lambda _event: "session:42"
+    adapter._pending_messages = {}
+    adapter._text_debounce = {}
+    adapter._active_sessions = {}
+    adapter._send_idle = plugin_adapter.OneBotAdapter._send_idle.__get__(
+        adapter, plugin_adapter.OneBotAdapter
+    )
+    adapter._idle_sends = {}
+
+    async def handle_message(_message):
+        await adapter.on_processing_complete(_event("group:42", "hello"))
+        assert adapter._ws.send_json.await_count == 0
+
+    adapter.handle_message = handle_message
+    await adapter._dispatch_event(_event("group:42", "/stop"), (False, "", "", False), [])
+    assert adapter._ws.send_json.await_count == 1
+    assert adapter._ws.send_json.await_args.args[0]["chat_id"] == "group:42"
+    assert adapter._interrupt_idle_block_counts == {}
+
+
 async def test_interrupt_dispatch_still_idles_when_other_group_idled():
     """Another group's idle must not suppress this group's in-session /stop idle."""
     adapter = _make_adapter()

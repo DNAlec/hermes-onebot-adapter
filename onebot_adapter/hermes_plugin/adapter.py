@@ -871,8 +871,9 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             message_event.source.chat_id,
         )
         # Shared-group idle: on_processing_complete when there is no
-        # pending/debounce follow-up; in-session /stop|/new|/reset also idle
-        # after handle_message if this chat has not already idled.
+        # pending/debounce follow-up; in-session /stop|/new|/reset suppress
+        # dying-turn idle until handle_message returns, then idle if this
+        # chat has not already idled.
         # Dispatch handle_message as a background task so the receive loop is
         # NOT blocked.  Previously this was ``await self.handle_message(...)``
         # which deadlocked when handle_message hit the bypass-active-session
@@ -915,6 +916,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
         token = _msg_context.set(msg_ctx)
         chat_id = str(getattr(getattr(message_event, "source", None), "chat_id", "") or "")
         idle_sends_before = self._idle_send_count(chat_id)
+        interrupt_blocked = False
+        if chat_id.startswith("group:") and _is_interrupt_command(
+            _event_command_name(message_event)
+        ):
+            self._begin_interrupt_idle_block(chat_id)
+            interrupt_blocked = True
         try:
             await self.handle_message(message_event)
         except Exception as exc:
@@ -925,10 +932,15 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 message=f"{type(exc).__name__}: {exc}",
             )
         else:
+            if interrupt_blocked:
+                self._end_interrupt_idle_block(chat_id)
+                interrupt_blocked = False
             await self._maybe_fire_idle_after_interrupt_dispatch(
                 message_event, chat_id=chat_id, idle_sends_before=idle_sends_before
             )
         finally:
+            if interrupt_blocked:
+                self._end_interrupt_idle_block(chat_id)
             _msg_context.reset(token)
             if delivery_ids:
                 for delivery_id in delivery_ids:
@@ -978,7 +990,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
     async def _maybe_fire_idle_after_interrupt_dispatch(
         self, event: Any, *, chat_id: str, idle_sends_before: int
     ) -> None:
-        """Idle after in-session /stop|/new|/reset if this chat did not already."""
+        """Idle after in-session /stop|/new|/reset once handle_message returns.
+
+        Dying-turn SUCCESS idle is blocked for this chat while the interrupt
+        command is still running, so this path is the one that releases the
+        adapter queue after /stop|/new|/reset.
+        """
         if not _is_interrupt_command(_event_command_name(event)):
             return
         if self._session_is_busy(event):
@@ -1002,6 +1019,12 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             if extra.get("group_sessions_per_user", True):
                 return
         except Exception:
+            return
+        if self._interrupt_idle_blocked(chat_id):
+            logger.info(
+                "OneBot: skip idle — interrupt command still running chat_id=%s",
+                chat_id,
+            )
             return
         if self._session_has_followup(event):
             logger.info(
@@ -1091,6 +1114,35 @@ class OneBotAdapter(BasePlatformAdapter):  # type: ignore[misc]
             counts = {}
             self._idle_sends = counts
         counts[chat_id] = counts.get(chat_id, 0) + 1
+
+    def _interrupt_idle_blocks(self) -> dict[str, int]:
+        counts = getattr(self, "_interrupt_idle_block_counts", None)
+        if not isinstance(counts, dict):
+            counts = {}
+            self._interrupt_idle_block_counts = counts
+        return counts
+
+    def _begin_interrupt_idle_block(self, chat_id: str) -> None:
+        if not chat_id:
+            return
+        counts = self._interrupt_idle_blocks()
+        counts[chat_id] = counts.get(chat_id, 0) + 1
+
+    def _end_interrupt_idle_block(self, chat_id: str) -> None:
+        if not chat_id:
+            return
+        counts = self._interrupt_idle_blocks()
+        remaining = counts.get(chat_id, 0) - 1
+        if remaining <= 0:
+            counts.pop(chat_id, None)
+        else:
+            counts[chat_id] = remaining
+
+    def _interrupt_idle_blocked(self, chat_id: str) -> bool:
+        if not chat_id:
+            return False
+        counts = getattr(self, "_interrupt_idle_block_counts", None)
+        return isinstance(counts, dict) and counts.get(chat_id, 0) > 0
 
     async def _send_duplicate_idle(self, data: dict[str, Any]) -> None:
         """Release a replay-created busy slot when a delivery was already done."""
