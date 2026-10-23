@@ -7,6 +7,7 @@
 - Cascade WS（`cascade_ws_enabled`，默认关闭，端口 `18830`）：把未 @bot / 未命中关键词的群消息原样转给下游 bot，并把下游发来的 JSON 原样写回 OneBot。已关闭的群、以及匹配成功后因黑名单、用户过滤、限流、指令权限等未进 Hermes 的消息不转发。同一时刻只接受一个下游客户端（新连接替换旧连接）。CLI `--cascade-host` 未指定时跟随 `--host`（不跟随 `--onebot-host`）
 
 ### 修复
+- 群维度授权注册按 Hermes `PlatformEntry` 实际字段探测，旧核心仍可正常加载 OneBot 插件；旧核心配置了 `ONEBOT_GROUP_ALLOWED_CHATS` 时提示升级 Hermes，沿用原有授权规则
 - `/stop`/`/new`/`/reset`：插件在 session 真正空闲后发 idle（in-session 走 `_dispatch_active_session_command` 的路径也会发）；cancelled turn 不发 idle；dying turn 的 SUCCESS idle 在 interrupt `handle_message` 返回前被挡住，避免适配器提前出队、Hermes `Healing stale session lock` 把下一条排队消息吞掉（日志特征：`/stop` 后立刻 `relay idle` + `relay dequeue`，随后无回复，直到 `/new`/`/clean`）。同一 `chat_id` 上 dying turn 与 interrupt-dispatch 仍只发一次 idle。适配器 hold 只挡住 same-user bypass，任意 idle 即释放；刷新 busy 时间戳以免看门狗立刻出队。旧插件不发 idle 时由看门狗超时兜底。避免 ⚡ Interrupting 后无回复、后续消息卡在 Hermes pending
 - Cascade 出站不再在 OneBot 事件 worker 上 await 下游 `send_str`（卡住的下游不会堵住 Hermes）
 - Cascade API echo 绑到实际发出请求的那条 OneBot 连接；该连接断开时立即失败，不再等全部 OneBot 掉线
