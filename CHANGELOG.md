@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 新增
+- 插件声明群维度授权字段 `group_allowed_chats_env` / `allowlist_suppresses_pairing`（Hermes 核心 `PlatformEntry` 字段，2026-10-17 起支持）。运营者设 `ONEBOT_GROUP_ALLOWED_CHATS=group:<群号>`（逗号分隔，`*` 表示全部）即可放行白名单群内的所有成员，无需逐个 QQ 号配对、也不必用全局的 `GATEWAY_ALLOWED_USERS`；同时开启 `allowlist_suppresses_pairing` 后，未授权私聊静默丢弃，不再回复配对码
 - Cascade WS（`cascade_ws_enabled`，默认关闭，端口 `18830`）：把未 @bot / 未命中关键词的群消息原样转给下游 bot，并把下游发来的 JSON 原样写回 OneBot。已关闭的群、以及匹配成功后因黑名单、用户过滤、限流、指令权限等未进 Hermes 的消息不转发。同一时刻只接受一个下游客户端（新连接替换旧连接）。CLI `--cascade-host` 未指定时跟随 `--host`（不跟随 `--onebot-host`）
 
 ### 修复
