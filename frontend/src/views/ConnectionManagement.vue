@@ -349,7 +349,7 @@ function copyAdapterUrl() {
             <code class="url-display">{{ getCascadeUrl() }}</code>
             <button @click="copyCascadeUrl" class="icon-btn" title="复制">📋</button>
           </div>
-          <span class="hint">下游 bot 以反向 WS 客户端连入此地址，收到未匹配的原始 OneBot 事件；发往此端口的 JSON 原样转给 OneBot。</span>
+          <span class="hint">下游 bot 以反向 WS 客户端连入此地址，收到未匹配的原始 OneBot 事件；发往此端口的 API 请求转给 OneBot，echo 经唯一映射后在响应中恢复原值。</span>
         </div>
       </div>
 

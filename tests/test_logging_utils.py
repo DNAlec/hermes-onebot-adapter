@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from onebot_adapter.logging_utils import safe_json, text_summary
 
 
@@ -33,3 +37,17 @@ def test_text_summary_optional_preview_is_truncated():
     assert "len=10" in rendered
     assert "abcd..." in rendered
     assert "abcdefghij" not in rendered
+
+
+@pytest.mark.parametrize("scheme", ["http", "https", "ws", "wss"])
+@pytest.mark.parametrize("authority", ["example.test:8443", "[2001:db8::1]:8443"])
+@pytest.mark.parametrize("userinfo", ["PRIVATE_USER", "PRIVATE_USER:PRIVATE_PASSWORD", "PRIVATE_USER:p%40ss"])
+def test_safe_json_strips_url_userinfo(scheme, authority, userinfo):
+    url = f"{scheme}://{userinfo}@{authority}/file?token=PRIVATE_TOKEN#PRIVATE_FRAGMENT"
+    rendered = json.loads(safe_json({"file": url}))
+    assert rendered["file"] == f"{scheme}://{authority}/file?<redacted>"
+
+
+def test_safe_json_preserves_url_without_credentials():
+    url = "https://[2001:db8::1]:8443/path@name"
+    assert json.loads(safe_json({"file": url}))["file"] == url

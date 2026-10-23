@@ -43,7 +43,7 @@ Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，�
 
 注意：[入站限流](ops.md#入站消息限流)只在消息匹配成功、即将投递 Hermes 时才检查；匹配失败的 cascade 流量不经过限流器，过载时仅受出站队列上限约束（满则丢弃并记 warning）。
 
-下游发到该端口的 text 帧原样写到当前 OneBot 连接；带 `echo` 的 API 响应回到当前这一个下游客户端（新连接会替换旧连接）。API 等待上限与 `file_upload_timeout` 相同。心跳 / lifecycle（含下游连上时补发的 `lifecycle/connect`）由 `cascade_forward_meta` 控制（默认转发）。开启、改端口或路径后需重启适配器。WebUI「连接管理」页可配置。
+下游 API 请求转发到当前 OneBot 连接；适配器把 `echo` 映射为唯一上游标识，响应时恢复原值，其他字段保持原值，防止重连或超时后的迟到响应串单。响应只回到发起请求的下游客户端（新连接会替换旧连接）。API 等待上限与 `file_upload_timeout` 相同。心跳 / lifecycle（含下游连上时补发的 `lifecycle/connect`）由 `cascade_forward_meta` 控制（默认转发）。开启、改端口或路径后需重启适配器。WebUI「连接管理」页可配置。
 
 ## /指令过滤
 

@@ -3,7 +3,8 @@
 Downstream clients connect here as they would to a OneBot reverse WS.  The
 adapter forwards group messages that missed @/keyword matching (and optional
 meta_event frames) as raw OneBot 11 JSON, and writes inbound frames from this
-port onto the live OneBot connection unchanged. API echo correlation lives on
+port onto the live OneBot connection. API echoes are mapped to unique upstream
+values and restored on response; all other fields retain their values. Correlation lives on
 ``WsApiTransport.passthrough``.
 
 Exactly one consumer is accepted at a time (same as Hermes plugin WS); a new
