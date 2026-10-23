@@ -26,7 +26,9 @@ def _sanitize_url(value: str) -> str:
         return value
     if parsed.scheme not in {"http", "https", "ws", "wss"}:
         return value
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "<redacted>" if parsed.query else "", ""))
+    # Strip userinfo without rebuilding hostname/port, preserving IPv6 brackets.
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "<redacted>" if parsed.query else "", ""))
 
 
 def text_summary(value: Any, *, preview: int = 0) -> str:
@@ -48,7 +50,7 @@ def sanitize_for_log(value: Any, *, key: str = "") -> Any:
     lowered = key.lower()
     if any(fragment in lowered for fragment in _SECRET_FRAGMENTS):
         return "<redacted>"
-    if lowered in _TEXT_KEYS:
+    if lowered in _TEXT_KEYS or (lowered == "message" and isinstance(value, str)):
         return text_summary(value)
     if isinstance(value, dict):
         return {str(k): sanitize_for_log(v, key=str(k)) for k, v in value.items()}

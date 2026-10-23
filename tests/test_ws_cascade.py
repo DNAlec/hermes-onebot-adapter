@@ -313,9 +313,11 @@ async def test_inbound_api_call_forwarded_and_response_routed():
                 await ws.send_str(json.dumps(frame))
                 await asyncio.wait_for(_wait_send(onebot_ws), timeout=1)
                 sent = onebot_ws.send_str.await_args.args[0]
-                assert json.loads(sent) == frame
+                upstream = json.loads(sent)
+                assert upstream["echo"] != frame["echo"]
+                assert {**upstream, "echo": frame["echo"]} == frame
 
-                response = json.dumps({"echo": "e1", "retcode": 0, "status": "ok", "data": {"message_id": 9}})
+                response = json.dumps({"echo": upstream["echo"], "retcode": 0, "data": {"message_id": 9}})
                 assert handler.intercept_api_response(response) is True
                 data = await _receive_text(ws)
                 assert json.loads(data)["echo"] == "e1"

@@ -22,7 +22,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Any
 
-from onebot_adapter.logging_utils import safe_json
+from onebot_adapter.logging_utils import safe_json, text_summary
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,8 @@ class WsApiTransport:
             )
         if waiter.on_response is not None:
             try:
-                waiter.on_response(raw)
+                data["echo"] = waiter.echo
+                waiter.on_response(json.dumps(data, ensure_ascii=False))
             except Exception:
                 logger.exception("WsApiTransport: passthrough callback failed echo=%s", key)
         return True
@@ -199,7 +200,7 @@ class WsApiTransport:
         self, raw: str, on_response: Callable[[str], None], *,
         owner: Any = None, timeout: float | None = None,
     ) -> None:
-        """Send *raw* unchanged and deliver the matching echo response to *on_response*.
+        """Forward a frame with a unique upstream echo, restoring it on response.
 
         Occupies the same waiter table as :meth:`request`.  Duplicate or
         unhashable echos fail immediately via *on_response* and are not sent.
@@ -208,25 +209,42 @@ class WsApiTransport:
         :attr:`passthrough_timeout` (the adapter upload ceiling).
         """
         ws = self._pick_ws()
+        try:
+            frame = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            frame = None
         echo = echo_of(raw)
         key = echo_key(echo)
         if echo is not None and key is None:
             on_response(failed_response(echo, _ECHO_UNHASHABLE))
             return
         if key is not None:
-            if key in self._waiters:
+            if key in self._waiters or any(
+                waiter.on_response is not None and waiter.echo == echo
+                for waiter in self._waiters.values()
+            ):
                 on_response(failed_response(echo, _ECHO_IN_FLIGHT))
                 return
             if self._passthrough_inflight() >= self.max_passthrough:
                 on_response(failed_response(echo, _ECHO_TOO_MANY))
                 return
+            # A downstream reconnect or timeout can reuse its echo while the
+            # old OneBot call is still running. Never reuse that upstream key.
+            key = uuid.uuid4().hex
+            while key in self._waiters:
+                key = uuid.uuid4().hex
+            frame["echo"] = key
+            raw = json.dumps(frame, ensure_ascii=False)
             wait_timeout = timeout if timeout is not None else self.passthrough_timeout
             self._arm_waiter(
                 key,
                 _Waiter(ws=ws, echo=echo, on_response=on_response, owner=owner),
                 wait_timeout,
             )
-        logger.debug("WsApiTransport: passthrough raw frame %s", safe_json(raw, 500))
+        logger.debug(
+            "WsApiTransport: passthrough frame %s",
+            safe_json(frame, 500) if isinstance(frame, dict) else text_summary(raw),
+        )
         try:
             await ws.send_str(raw)
         except Exception:

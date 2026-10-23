@@ -215,10 +215,10 @@ async def test_on_text_zero_echo_resolves_passthrough():
     t.register(ws)
     got: list[str] = []
     await t.passthrough(json.dumps({"action": "get_status", "echo": 0}), got.append)
-    assert 0 in t._waiters
-    raw = json.dumps({"echo": 0, "retcode": 0, "data": {}})
+    echo = json.loads(ws.send_str.await_args.args[0])["echo"]
+    raw = json.dumps({"echo": echo, "retcode": 0, "data": {}})
     assert t.on_text(raw) is True
-    assert got == [raw]
+    assert [json.loads(item) for item in got] == [{"echo": 0, "retcode": 0, "data": {}}]
     assert t._waiters == {}
 
 
@@ -295,7 +295,8 @@ async def test_passthrough_rejects_when_inflight_cap_reached():
     assert ws.send_str.await_count == 2
     assert json.loads(third[0])["retcode"] == -1
     assert "too many" in json.loads(third[0])["msg"]
-    assert t.on_text(json.dumps({"echo": "a", "retcode": 0, "data": {}})) is True
+    echo = json.loads(ws.send_str.await_args_list[0].args[0])["echo"]
+    assert t.on_text(json.dumps({"echo": echo, "retcode": 0, "data": {}})) is True
     fourth: list[str] = []
     await t.passthrough(json.dumps({"action": "get_status", "echo": "d"}), fourth.append)
     assert ws.send_str.await_count == 3
@@ -831,3 +832,76 @@ async def test_api_send_logs_outbound_line(caplog):
     assert "发送 ->" in caplog.text
     assert "hello-outbound" in caplog.text
     assert "message_id=77" in caplog.text
+
+
+@pytest.mark.parametrize("retire", ["disconnect", "timeout", "completed"])
+async def test_passthrough_reused_echo_ignores_late_response(retire):
+    transport = WsApiTransport()
+    ws = _make_ws()
+    transport.register(ws)
+    owner = object()
+    first, second = [], []
+    frame = {"action": "get_msg", "params": {"message_id": 111}, "echo": 1}
+    await transport.passthrough(json.dumps(frame), first.append, owner=owner)
+    old_echo = json.loads(ws.send_str.await_args.args[0])["echo"]
+    old_response = json.dumps({"echo": old_echo, "retcode": 0, "data": {"message_id": 111}})
+    if retire == "disconnect":
+        transport.drop_owner(owner)
+    elif retire == "timeout":
+        transport._on_waiter_timeout(old_echo)
+        assert json.loads(first[0])["echo"] == 1
+    else:
+        assert transport.on_text(old_response)
+    frame["params"]["message_id"] = 222
+    await transport.passthrough(json.dumps(frame), second.append, owner=object())
+    new_echo = json.loads(ws.send_str.await_args.args[0])["echo"]
+    assert new_echo != old_echo
+    assert not transport.on_text(old_response)
+    assert second == []
+    expected = {"echo": 1, "retcode": 0, "data": {"message_id": 222}}
+    assert transport.on_text(json.dumps({**expected, "echo": new_echo}))
+    assert [json.loads(item) for item in second] == [expected]
+    assert transport._waiters == {}
+
+
+@pytest.mark.parametrize("message", [
+    "PRIVATE_BODY_MARKER",
+    [{"type": "text", "data": {"text": "PRIVATE_BODY_MARKER"}}],
+])
+async def test_passthrough_debug_log_redacts_payload(caplog, message):
+    transport = WsApiTransport()
+    ws = _make_ws()
+    transport.register(ws)
+    frame = {
+        "action": "send_private_msg",
+        "params": {
+            "message": message,
+            "file": "https://PRIVATE_USER:PRIVATE_PASSWORD@example.com/file?token=URL_SECRET_MARKER",
+            "access_token": "TOKEN_SECRET_MARKER",
+        },
+        "echo": "log-test",
+    }
+    with caplog.at_level(logging.DEBUG, logger="onebot_adapter.onebot.ws_api"):
+        await transport.passthrough(json.dumps(frame), lambda _: None)
+    assert "passthrough frame" in caplog.text
+    assert "send_private_msg" in caplog.text
+    assert "PRIVATE_BODY_MARKER" not in caplog.text
+    assert "URL_SECRET_MARKER" not in caplog.text
+    assert "TOKEN_SECRET_MARKER" not in caplog.text
+    assert "PRIVATE_USER" not in caplog.text
+    assert "PRIVATE_PASSWORD" not in caplog.text
+    assert json.loads(ws.send_str.await_args.args[0])["params"] == frame["params"]
+    transport.unregister(ws)
+
+
+@pytest.mark.parametrize("raw", ["INVALID_SECRET_MARKER", '["INVALID_SECRET_MARKER"]'])
+async def test_passthrough_unstructured_debug_log_is_summary_only(caplog, raw):
+    transport = WsApiTransport()
+    ws = _make_ws()
+    transport.register(ws)
+    with caplog.at_level(logging.DEBUG, logger="onebot_adapter.onebot.ws_api"):
+        await transport.passthrough(raw, lambda _: None)
+    assert "passthrough frame" in caplog.text
+    assert "INVALID_SECRET_MARKER" not in caplog.text
+    ws.send_str.assert_awaited_once_with(raw)
+    transport.unregister(ws)

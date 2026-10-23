@@ -3,9 +3,12 @@
 ## [Unreleased]
 
 ### 新增
-- Cascade WS（`cascade_ws_enabled`，默认关闭，端口 `18830`）：把未 @bot / 未命中关键词的群消息原样转给下游 bot，并把下游发来的 JSON 原样写回 OneBot。已关闭的群、以及匹配成功后因黑名单、用户过滤、限流、指令权限等未进 Hermes 的消息不转发。同一时刻只接受一个下游客户端（新连接替换旧连接）。CLI `--cascade-host` 未指定时跟随 `--host`（不跟随 `--onebot-host`）
+- Cascade WS（`cascade_ws_enabled`，默认关闭，端口 `18830`）：把未 @bot / 未命中关键词的群消息原样转给下游 bot，并把下游 API 请求写回 OneBot（echo 唯一映射，响应恢复原值）。已关闭的群、以及匹配成功后因黑名单、用户过滤、限流、指令权限等未进 Hermes 的消息不转发。同一时刻只接受一个下游客户端（新连接替换旧连接）。CLI `--cascade-host` 未指定时跟随 `--host`（不跟随 `--onebot-host`）
 
 ### 修复
+- 前端依赖安全更新：Axios 1.20.0、Vue 3.5.44、Vite 8.3.5 及相关间接依赖；提高最低版本并更新锁文件，修复 npm audit 报告的 7 项高危依赖问题
+- Cascade API 使用唯一上游 echo 并在响应中恢复下游原值，防止重连、超时或重复响应导致串单；其他 API 字段保持原值
+- Cascade DEBUG 日志按结构脱敏正文和凭证（含 URL 用户名/密码）；非法 JSON 仅记录长度摘要，兼容 OneBot 字符串与消息段两种正文格式
 - `/stop`/`/new`/`/reset`：插件在 session 真正空闲后发 idle（in-session 走 `_dispatch_active_session_command` 的路径也会发）；cancelled turn 不发 idle；dying turn 的 SUCCESS idle 在 interrupt `handle_message` 返回前被挡住，避免适配器提前出队、Hermes `Healing stale session lock` 把下一条排队消息吞掉（日志特征：`/stop` 后立刻 `relay idle` + `relay dequeue`，随后无回复，直到 `/new`/`/clean`）。同一 `chat_id` 上 dying turn 与 interrupt-dispatch 仍只发一次 idle。适配器 hold 只挡住 same-user bypass，任意 idle 即释放；刷新 busy 时间戳以免看门狗立刻出队。旧插件不发 idle 时由看门狗超时兜底。避免 ⚡ Interrupting 后无回复、后续消息卡在 Hermes pending
 - Cascade 出站不再在 OneBot 事件 worker 上 await 下游 `send_str`（卡住的下游不会堵住 Hermes）
 - Cascade API echo 绑到实际发出请求的那条 OneBot 连接；该连接断开时立即失败，不再等全部 OneBot 掉线
