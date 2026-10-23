@@ -22,6 +22,7 @@ import random
 import re
 import socket
 import uuid
+from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1694,6 +1695,27 @@ async def _standalone_send(
         return {"error": f"standalone send failed: {exc}"}
 
 
+def _group_auth_registration_kwargs() -> dict[str, Any]:
+    """Advertise group authorization only when the host registry supports it."""
+    supported: set[str] = set()
+    try:
+        from gateway.platform_registry import PlatformEntry
+    except ImportError:
+        pass  # Hermes imports remain optional for standalone use.
+    else:
+        supported = {field.name for field in fields(PlatformEntry)}
+    options = {
+        "group_allowed_chats_env": "ONEBOT_GROUP_ALLOWED_CHATS",
+        "allowlist_suppresses_pairing": True,
+    }
+    if "group_allowed_chats_env" not in supported and os.environ.get("ONEBOT_GROUP_ALLOWED_CHATS", "").strip():
+        logger.warning(
+            "OneBot: ONEBOT_GROUP_ALLOWED_CHATS requires a newer Hermes version; "
+            "upgrade Hermes to enable group-scoped authorization. Existing authorization remains in effect."
+        )
+    return {name: value for name, value in options.items() if name in supported}
+
+
 def register(ctx) -> None:
     """Plugin entry point: called by the Hermes plugin system."""
     ctx.register_platform(
@@ -1704,6 +1726,7 @@ def register(ctx) -> None:
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=["ONEBOT_ADAPTER_URL", "ONEBOT_ADAPTER_TOKEN"],
+        **_group_auth_registration_kwargs(),
         install_hint="pip install aiohttp; 启动 hermes-onebot-adapter 服务并在 WebUI 安装插件",
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="ONEBOT_HOME_CHANNEL",
