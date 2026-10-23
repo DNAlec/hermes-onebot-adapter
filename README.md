@@ -17,7 +17,7 @@ NapCat ──双向 OneBot 11 WS（事件 + API）── 适配器服务 ──W
 - [配置流程](#配置流程)
 - [Windows / WSL](#windows--wsl)
 - [CLI](#cli)
-- [三端口](#三端口)
+- [端口](#端口)
 - [OneBot 连接](#onebot-连接)
 - [更多文档](#更多文档)
 
@@ -54,7 +54,7 @@ hermes-onebot-adapter --init-config   # 生成默认配置后退出
 pipx upgrade hermes-onebot-adapter
 ```
 
-**1.8.0** 含路径白名单、分端口绑定和插件 cache 媒体校验，**必须重装插件并重启 Hermes 网关**（只升级服务不够）。重装不会覆盖 WebUI「工具管理」里已保存的工具集。
+**1.9.0** 新增 Hermes 群级授权兼容与 Cascade 转发，并修复群聊中断后的排队问题；**必须重装插件并重启 Hermes 网关**（只升级服务不够）。重装不会覆盖 WebUI「工具管理」里已保存的工具集。
 
 ```bash
 pipx upgrade hermes-onebot-adapter
@@ -75,7 +75,8 @@ Windows 不要用原生 Python 跑本服务，请用 WSL2，见 [Windows / WSL �
 3. **配置 OneBot 连接** — 在 WebUI 的「连接管理」页选择连接模式（反向 WS / 正向 WS），填写 WS 地址和 token
 4. **安装 Hermes 插件** — 在 WebUI 的「连接管理」页填写 Hermes 安装目录（默认须在当前用户 `$HOME` 下；`/opt` 等非常规路径先填「额外允许的 Hermes 安装根」），点击「安装插件到 Hermes」
 5. **启用插件** — `hermes plugins enable onebot-platform`
-6. **重启 Hermes 网关** — `hermes gateway restart`
+6. **检查授权配置** — 适配器 WebUI 控制群启用、成员过滤与私聊策略；需要 Hermes 群级授权时按[网关授权说明](docs/chat.md#hermes-网关授权)配置 `ONEBOT_GROUP_ALLOWED_CHATS`
+7. **重启 Hermes 网关** — `hermes gateway restart`
 
 安装插件时，Installer 自动完成三件事：
 
@@ -174,7 +175,7 @@ cd frontend && npm install && npm run dev   # 前端开发 (Vite 代理到 :1882
 ./scripts/build_frontend.sh      # 构建前端到 webui/static/
 ```
 
-维护者架构与模块约定见 [AGENTS.md](AGENTS.md)。发布前更新 [CHANGELOG.md](CHANGELOG.md)，再打 `vX.Y.Z` 标签。
+维护者架构与模块约定见 [AGENTS.md](AGENTS.md)。发布步骤与验证要求见 [发布流程](docs/releasing.md)。
 
 技术栈：aiohttp（后端）+ Vue 3 / Vite / TypeScript（WebUI）；`pyproject.toml` + setuptools，CLI entry point `hermes-onebot-adapter`。
 
