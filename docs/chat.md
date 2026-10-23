@@ -3,6 +3,7 @@
 安装与连接见根目录 [README.md](../README.md)。页面入口见 [WebUI 与工具](webui.md)。字段定义见 [api.md](api.md)。
 
 - [准入控制](#准入控制)
+- [Hermes 网关授权](#hermes-网关授权)
 - [/指令过滤](#指令过滤)
 - [出站消息过滤](#出站消息过滤)
 - [未匹配转发（Cascade WS）](#未匹配转发cascade-ws)
@@ -12,7 +13,7 @@
 
 ## 准入控制
 
-适配器服务对群与私聊分别提供准入控制，均在 WebUI 配置。适配器在消息转发到 Hermes 之前完成所有过滤/鉴权，Hermes 网关侧无需重复配置准入名单。
+适配器服务对群与私聊分别提供准入控制，均在 WebUI 配置。适配器在消息转发到 Hermes 之前完成群启用、触发、用户过滤等检查。Hermes 是否还检查自己的准入名单取决于核心的上游鉴权支持，见下方[网关授权](#hermes-网关授权)。
 
 **群聊**：每群通过「启用 Bot」开关控制是否处理该群；群内成员通过群配置的「群成员过滤模式 + 名单」控制（默认黑名单空 = 允许所有群成员）。不再使用全局群白/黑名单。
 
@@ -30,6 +31,24 @@
 管理工具（踢人/禁言等）的鉴权由适配器的 `global_admins` / 群配置 `admins` 决定，非管理员调用时适配器直接拒绝。
 
 Bot 动态黑名单独立保存到 `~/.onebot_adapter/bot_blacklist.sqlite3`，不与上述准入名单混用。Bot 通过 `onebot_get_bot_blacklist` / `onebot_edit_bot_blacklist` 工具临时拉黑用户（全局管理员和对应群管理员始终豁免），WebUI「聊天配置」页可设置 `bot_blacklist_enabled`/`bot_blacklist_max_duration_seconds`/`bot_blacklist_reject_message`，也可查看及人工解除有效记录。群聊仅在消息本应触发 bot 时检查并回复提示；私聊记录、群记录和全局记录按各自作用域生效。
+
+## Hermes 网关授权
+
+1.9.0 插件向支持相应 `PlatformEntry` 字段的 Hermes 核心声明群级授权。需要在 Hermes 侧按群授予访问权限时，在 Hermes 使用的 `<hermes>/.env`（默认 `~/.hermes/.env`，不是适配器服务的环境文件）添加：
+
+```dotenv
+ONEBOT_GROUP_ALLOWED_CHATS=group:123456789,group:987654321
+```
+
+保存后运行 `hermes gateway restart`。必须保留 `group:` 前缀，多个群用逗号分隔；`*` 表示授予所有群访问权限。安装器只自动写入连接 URL 和 token，不会替你设置这份名单。
+
+- 群级授权允许指定群中的成员通过 Hermes 的群授权检查，但不能绕过适配器 WebUI 中的禁用群、成员过滤、触发条件、私聊策略或限流。
+- 群授权本身不授予私聊权限。配置非空名单后，核心默认策略会对未授权私聊静默忽略，不再发送配对码；显式配置的 Hermes 私聊处理策略优先。
+- 该名单是**授权来源而非排他限制**：已有配对、全局授权及上游鉴权等仍可能放行其他消息。要限制实际接入的群和用户，请配置适配器 WebUI。
+- 插件已有 `authorization_is_upstream=True` 声明。支持此声明的核心（包括已验证的 `v0.22.5+138.gafe3cbd`）信任适配器对实际收到的消息所做的鉴权，通常不需要重复配置 Hermes 名单；此时不应依靠群名单阻止适配器已允许的消息。
+- 旧版 Hermes 缺少群级授权注册字段时，插件仍可加载并沿用原有授权规则；若设置了上述变量，日志会提示升级 Hermes。是否支持取决于核心字段，不能只凭插件版本判断。
+
+从旧版升级时需先更新适配器，再重装随包插件并重启 Hermes，步骤见 [README](../README.md#快速开始)。
 
 ## 未匹配转发（Cascade WS）
 

@@ -2,10 +2,14 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-23
+
 ### 新增
+- Hermes 群级授权：声明 `ONEBOT_GROUP_ALLOWED_CHATS`（`group:<群号>`，逗号分隔，支持 `*`），兼容核心按群授予访问权限；配置名单时，在核心默认策略下抑制未授权私聊的配对码。该名单不取代适配器 WebUI 的准入控制，也不会撤销已有配对或其他授权。感谢 [@sheep-in-box](https://github.com/sheep-in-box) 的 [PR #1](https://github.com/DNAlec/hermes-onebot-adapter/pull/1)
 - Cascade WS（`cascade_ws_enabled`，默认关闭，端口 `18830`）：把未 @bot / 未命中关键词的群消息原样转给下游 bot，并把下游 API 请求写回 OneBot（echo 唯一映射，响应恢复原值）。已关闭的群、以及匹配成功后因黑名单、用户过滤、限流、指令权限等未进 Hermes 的消息不转发。同一时刻只接受一个下游客户端（新连接替换旧连接）。CLI `--cascade-host` 未指定时跟随 `--host`（不跟随 `--onebot-host`）
 
 ### 修复
+- 按 Hermes `PlatformEntry` 实际字段探测群级授权能力，旧版核心仍能加载插件；配置了不受支持的 `ONEBOT_GROUP_ALLOWED_CHATS` 时提示升级，保留原有授权行为
 - 前端依赖安全更新：Axios 1.20.0、Vue 3.5.44、Vite 8.3.5 及相关间接依赖；提高最低版本并更新锁文件，修复 npm audit 报告的 7 项高危依赖问题
 - Cascade API 使用唯一上游 echo 并在响应中恢复下游原值，防止重连、超时或重复响应导致串单；其他 API 字段保持原值
 - Cascade DEBUG 日志按结构脱敏正文和凭证（含 URL 用户名/密码）；非法 JSON 仅记录长度摘要，兼容 OneBot 字符串与消息段两种正文格式
@@ -21,9 +25,11 @@
 - `message_preview` logger 的 `propagate=False` 改为 import 时生效（原先首条日志才设置）；`test_api_send_logs_outbound_line` 显式挂 caplog handler，单跑不再依赖其他测试先配置 preview logger
 
 ### 升级说明
+- 群级授权需要支持相应注册字段的 Hermes 核心；已在 `v0.22.5+138.gafe3cbd` 验证。旧版核心可继续使用，但不会启用新字段；环境变量配置和上游鉴权差异见 [聊天与过滤](docs/chat.md#hermes-网关授权)
 - `/stop` idle 协议有变：需重装随包 Hermes 插件并重启网关，被中断 turn 才不会提前出队；否则 `/stop` 后排队消息可能被 Hermes stale lock 吞掉，表现为队列卡死直到 `/new` 或 `/clean`
 
 ### 文档
+- 补充 Hermes 群级授权配置、上游鉴权关系、发布流程与 1.9.0 升级步骤
 - 新增 Windows / WSL2 部署教程（`docs/wsl.md`）：适配器与 Hermes 装在 WSL，NapCat 留在 Windows 走反向 WS
 - README 改为安装/连接入口；WebUI、聊天过滤、运维说明拆到 `docs/webui.md` / `docs/chat.md` / `docs/ops.md`
 - 排队规则表与 idle 说明对齐 interrupt hold：`/stop`/`/new`/`/reset` 后同用户跟手消息入队，直到 idle；插件 idle 含 hook 与 in-session 补发两条路径
@@ -327,7 +333,8 @@
 - ffmpeg 语音转码
 - SeqMap: NapCat real_seq ↔ message_id 映射
 
-[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/DNAlec/hermes-onebot-adapter/compare/v1.6.0...v1.6.1

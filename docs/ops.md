@@ -66,6 +66,9 @@ NapCat ──▶ 本适配器 (18800) ──匹配成功──▶ Hermes
 | `ONEBOT_ADAPTER_URL` | 是 | 适配器服务 WS 地址 (`ws://host:18810/hermes`) |
 | `ONEBOT_ADAPTER_TOKEN` | 是 | 适配器服务鉴权 token |
 | `ONEBOT_HOME_CHANNEL` | 否 | cron 投递目标 chat_id |
+| `ONEBOT_GROUP_ALLOWED_CHATS` | 否 | Hermes 群级授权，如 `group:123456789,group:987654321`；`*` 授权全部群，需要核心支持 |
+
+以上变量由 Hermes 网关读取，放在 Hermes 的 `.env` 中，修改后重启网关。群级授权与适配器 WebUI 的准入规则关系见[网关授权](chat.md#hermes-网关授权)。
 
 ## 使用统计
 
