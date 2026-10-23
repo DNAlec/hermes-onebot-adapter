@@ -1704,6 +1704,13 @@ def register(ctx) -> None:
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=["ONEBOT_ADAPTER_URL", "ONEBOT_ADAPTER_TOKEN"],
+        # 群维度授权：运营者在 ONEBOT_GROUP_ALLOWED_CHATS 里列群 ID
+        # （"group:<群号>"，逗号分隔，"*" 表示全部），该群所有成员即被放行，
+        # 无需逐个列 QQ 号。allowlist_suppresses_pairing 让未授权私聊在配了
+        # 白名单后静默丢弃，不再回复配对码。需要 Hermes 核心已包含这两个
+        # PlatformEntry 字段。
+        group_allowed_chats_env="ONEBOT_GROUP_ALLOWED_CHATS",
+        allowlist_suppresses_pairing=True,
         install_hint="pip install aiohttp; 启动 hermes-onebot-adapter 服务并在 WebUI 安装插件",
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="ONEBOT_HOME_CHANNEL",
